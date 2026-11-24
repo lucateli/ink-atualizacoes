@@ -1,6 +1,58 @@
 (()=>{
-if(window.__inkLeitorV2) return;          // evita rodar duas vezes
+if(window.__inkLeitorV2) return;
 window.__inkLeitorV2 = true;
+
+/* =====================================================================
+   PATCH ANDROID (DESTRUIR POPUPS E FORÇAR TOQUE)
+   ===================================================================== */
+(function androidFixes() {
+    // Função para caçar e destruir o pop-up do "Serei sempre legal"
+    let _busy = false;
+    const matarPopup = () => {
+        if (_busy) return; _busy = true; setTimeout(() => { _busy = false; }, 400);
+        const todos = document.querySelectorAll('button, a, div, span');
+        for (const el of todos) {
+            if (el.textContent && el.textContent.toLowerCase().includes('serei sempre legal')) {
+                let modal = el;
+                for (let i = 0; i < 10; i++) { 
+                    if (modal.parentElement && modal.parentElement.tagName !== 'BODY') {
+                        modal = modal.parentElement;
+                    } else {
+                        break;
+                    }
+                }
+                if (modal && modal.remove) {
+                    modal.remove();
+                    console.log('[Ink-Fix] Popup DESTRUÍDO!');
+                }
+            }
+        }
+    };
+
+    setInterval(matarPopup, 500);
+    if (document.body) {
+        new MutationObserver(matarPopup).observe(document.body, { childList: true, subtree: true });
+    }
+
+    // Forçar eventos de toque a não serem passivos
+    // So toca nos listeners dentro do leitor (/ler/); no resto do site nao mexe em nada,
+    // e nunca altera o objeto 'options' original da pagina (pode ser null/congelado/reutilizado).
+    const originalAddEventListener = EventTarget.prototype.addEventListener;
+    const TOUCH_TYPES = { touchstart: 1, touchmove: 1, pointerdown: 1, pointermove: 1 };
+    EventTarget.prototype.addEventListener = function(type, listener, options) {
+        try {
+            if (TOUCH_TYPES[type] && location.pathname.startsWith('/ler/')) {
+                if (options && typeof options === 'object') options = Object.assign({}, options, { passive: false });
+                else if (typeof options === 'boolean') options = { capture: options, passive: false };
+                else options = { passive: false };
+            }
+        } catch (_) {}
+        return originalAddEventListener.call(this, type, listener, options);
+    };
+
+    console.log('[Ink-Fix] Patches Android aplicados.');
+})();
+/* ===================================================================== */
 
 /* =====================================================================
    COMUM
@@ -11,59 +63,10 @@ const gauss = () => { let u = 0, v = 0; while(!u) u = Math.random(); while(!v) v
 const MOBILE = (() => { try{ return matchMedia('(pointer:coarse)').matches || innerWidth < 700; }catch(e){ return innerWidth < 700; } })();
 
 /* =====================================================================
-   PATCH 1: CORREÇÕES CRÍTICAS PARA ANDROID WEBVIEW
-   ===================================================================== */
-(function androidFixes() {
-    // 1. Auto-fechar popups do site (como o "Serei sempre legal")
-    setInterval(() => {
-        const botoes = document.querySelectorAll('button, a, div[role="button"], span[role="button"]');
-        for (const b of botoes) {
-            const txt = (b.textContent || '').toLowerCase().trim();
-            if (txt.includes('serei sempre legal') || txt.includes('entendi') || txt.includes('fechar') || txt.includes('aceitar')) {
-                if (b.getBoundingClientRect().width > 0) {
-                    b.click();
-                    console.log('[Ink-Fix] Popup fechado automaticamente.');
-                }
-            }
-        }
-    }, 1000);
-
-    // 2. Forçar eventos de toque a não serem passivos (necessário para arrastar)
-    const originalAddEventListener = EventTarget.prototype.addEventListener;
-    EventTarget.prototype.addEventListener = function(type, listener, options) {
-        if (type === 'touchstart' || type === 'touchmove' || type === 'pointerdown' || type === 'pointermove') {
-            if (typeof options === 'object') {
-                options.passive = false;
-            } else {
-                options = { passive: false };
-            }
-        }
-        return originalAddEventListener.call(this, type, listener, options);
-    };
-
-    // 3. CSS para bloquear menus e seleção
-    const css = document.createElement('style');
-    css.innerHTML = `
-        * { -webkit-touch-callout: none !important; -webkit-user-select: none !important; user-select: none !important; -webkit-tap-highlight-color: transparent !important; }
-        .bz-order, .bz-order * { touch-action: none !important; }
-    `;
-    (document.head || document.documentElement).appendChild(css);
-
-    // 4. Bloquear menu de contexto
-    document.addEventListener('contextmenu', e => {
-        if (e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') e.preventDefault();
-    }, { capture: true });
-
-    console.log('[Ink-Fix] Patches Android aplicados.');
-})();
-/* ===================================================================== */
-
-
-/* =====================================================================
-   PARTE A — LEITURA AUTOMÁTICA
+   PARTE A — LEITURA AUTOMÁTICA (só em /ler/...)
    ===================================================================== */
 const LS = 'ink_autoread_cfg';
-let cfg = {speed: 1.5, method: '', methodM: '', manga: false, min: null, eye: false, eyeLvl: 0.25, pos: null, auto: true, voice: false, vrate: 1, vname: '', dbg: false, perf: null, bin: false, bin1: false, smooth: true};
+let cfg = {speed: 1.5, method: '', methodM: '', manga: false, min: null, eye: false, eyeLvl: 0.25, pos: null, auto: true, voice: false, vrate: 1, vname: '', dbg: false, perf: null, bin: false, bin1: false, smooth: true, metaGoal: 10};
 try{ Object.assign(cfg, JSON.parse(localStorage.getItem(LS) || '{}')); }catch(e){}
 cfg.smooth = true;
 const isPerf = () => cfg.perf == null ? MOBILE : !!cfg.perf;
@@ -1186,6 +1189,84 @@ function setEyeLvl(d){
   if(!cfg.eye) cfg.eye = true;
   save(); applyEye();
 }
+/* =====================================================================
+   META DE PÁGINAS — para missões do tipo "Ler N páginas"
+   Lê sozinho, conta cada página nova (contador "pág x/y" do leitor) e para ao bater a meta.
+   ===================================================================== */
+const MS_KEY = 'ink_missions';
+function scanMissions(){
+  const lis = document.querySelectorAll('li.event-mission');
+  if(!lis.length) return;
+  const out = [];
+  lis.forEach(li => {
+    const el = li.querySelector('strong');
+    const t = (el ? el.textContent : '').replace(/\s+/g, ' ').trim();
+    if(!/^ler\s+\d+\s+p[aá]ginas/i.test(t)) return;
+    const fe = li.querySelector('.event-mission__frac');
+    const fr = fe ? fe.textContent : '';
+    const m = /(\d+)\s*\/\s*(\d+)/.exec(fr);
+    const done = li.classList.contains('is-done') || /resgatad/i.test(fr);
+    const tot = +/\d+/.exec(t)[0];
+    out.push({t, c: m ? +m[1] : (done ? tot : 0), n: m ? +m[2] : tot, done, rep: !!li.querySelector('.event-mission__repeat'), fac: /fac[cç][aã]o/i.test(t)});
+  });
+  if(out.length){ try{ localStorage.setItem(MS_KEY, JSON.stringify({ts: Date.now(), list: out})); }catch(e){} }
+}
+setInterval(scanMissions, 1500);
+const pendingMissions = () => { try{ return (JSON.parse(localStorage.getItem(MS_KEY) || '{}').list || []).filter(x => !x.done && x.n > x.c); }catch(e){ return []; } };
+let metaSel = -1;   // -1 = nenhuma, 0..L-1 = uma missão, L = "todas"
+// As páginas lidas contam para várias missões ao mesmo tempo; "todas" lê até a maior meta e vai marcando cada missão que completa.
+const allTargets = L => { const nf = L.filter(x => !x.fac); return (nf.length ? nf : L).slice().sort((a, b) => (a.n - a.c) - (b.n - b.c)); };
+function metaPick(){
+  const L = pendingMissions();
+  if(!L.length){ setSt('Sem missões de leitura pendentes. Abra o painel do evento uma vez e volte.'); return; }
+  metaSel = (metaSel + 1) % (L.length + 1);
+  if(metaSel === L.length){
+    cfg.metaGoal = Math.max(1, ...allTargets(L).map(x => x.n - x.c));
+  } else {
+    cfg.metaGoal = Math.max(1, L[metaSel].n - L[metaSel].c);
+    if(L[metaSel].fac) setSt('Missão de facção: leia uma HQ do herói da sua facção.');
+  }
+  save(); metaPaint();
+}
+const meta = {on: false, done: 0, seen: new Set(), targets: []};
+const metaKey = st => { const c = st.p != null ? st.p : st.pg; return c == null ? null : location.pathname + '#' + c; };
+function metaPaint(){
+  const l = document.getElementById('ink-meta-lbl'), v = document.getElementById('ink-meta-val');
+  if(l) l.textContent = meta.on ? `Meta: ${meta.done}/${cfg.metaGoal} págs` + (meta.targets.length ? ` · ✓ ${meta.targets.filter(x => meta.done >= x.r).length}/${meta.targets.length} missões` : '') : 'Parar após a meta de páginas';
+  if(v) v.textContent = cfg.metaGoal;
+  const pl = document.getElementById('ink-meta-pick-lbl');
+  if(pl){
+    const L = pendingMissions(), x = L[metaSel];
+    const txt = (metaSel >= 0 && metaSel === L.length) ? `Todas as missões (${allTargets(L).length}) · ${cfg.metaGoal} págs` : x ? `Faltam ${x.n - x.c}: ${x.t}${x.fac ? ' (HQ da facção)' : ''}` : (L.length ? `Escolher missão (${L.length} pendentes)` : 'Abra o painel do evento p/ ler missões');
+    pl.textContent = txt; pl.title = txt;
+  }
+  sw('ink-meta-btn', meta.on);
+}
+function metaToggle(){
+  if(meta.on){ meta.on = false; metaPaint(); setSt('Meta desligada.'); return; }
+  meta.on = true; meta.done = 0; meta.seen.clear();
+  { const L = pendingMissions(); meta.targets = (metaSel >= 0 && metaSel === L.length) ? allTargets(L).map(x => ({t: x.t, r: x.n - x.c})) : []; }
+  const k = metaKey(readState()); if(k) meta.seen.add(k);   // a página atual não conta
+  metaPaint();
+  if(!running) loop();
+}
+function metaGoalStep(d){ cfg.metaGoal = Math.max(1, Math.min(300, (cfg.metaGoal || 10) + d)); save(); metaPaint(); }
+function metaTick(){
+  if(!meta.on || !running) return;
+  const k = metaKey(readState());
+  if(!k || meta.seen.has(k)) return;
+  meta.seen.add(k); meta.done++;
+  const hit = meta.targets.filter(x => x.r === meta.done).map(x => x.t);
+  if(hit.length) console.info('[Ink] missão completa:', hit.join(' | '));
+  if(meta.done >= cfg.metaGoal){
+    meta.on = false;
+    const fac = pendingMissions().some(x => x.fac) ? ' Missões de facção: leia HQs do herói da sua facção.' : '';
+    finish(`✓ Meta cumprida: ${meta.done} páginas lidas.${fac} Abra o painel do evento para atualizar.`);
+  }
+  metaPaint();
+}
+setInterval(metaTick, 500);
+
 function mount(){
   if(document.getElementById('ink-auto-ui') || !document.body) return;
   injectCSS();
@@ -1215,6 +1296,14 @@ function mount(){
         '<button id="ink-auto-manga" class="ia-row" type="button" title="Leitura da direita para a esquerda (vale também para a ordenação das bolhas)"><span class="ia-lbl">Modo mangá (← direita p/ esquerda)</span>' + swp + '</button>' +
         '<button id="ink-auto-next" class="ia-row" type="button" title="Ao terminar o capítulo, abre o próximo e continua lendo"><span class="ia-lbl">Próximo capítulo automático</span>' + swp + '</button>' +
       '</div>' +
+      '<div class="ia-sec">Missão</div>' +
+      '<div class="ia-grp">' +
+        '<button id="ink-meta-pick" class="ia-row" type="button"><span class="ia-lbl" id="ink-meta-pick-lbl"></span></button>' +
+        '<div class="ia-combo">' +
+          '<button id="ink-meta-btn" class="ia-row" type="button" title="Lê sozinho até completar a meta de páginas e para"><span class="ia-lbl" id="ink-meta-lbl"></span>' + swp + '</button>' +
+          '<div class="ia-step"><button id="ink-meta-less" type="button" title="−1 página">−</button><span id="ink-meta-val" class="ia-val"></span><button id="ink-meta-more" type="button" title="+1 página">+</button></div>' +
+        '</div>' +
+      '</div>' +
       '<div class="ia-sec">Audiolivro</div>' +
       '<div class="ia-grp">' +
         '<button id="ink-voice-btn" class="ia-row" type="button" title="Lê os balões em voz alta (OCR + voz do navegador)"><span class="ia-ico">' + ICO.voice + '</span><span class="ia-lbl">Ler balões em voz alta</span>' + swp + '</button>' +
@@ -1239,6 +1328,11 @@ function mount(){
     d.addEventListener(ev, halt, {passive: true});
   });
 
+  d.querySelector('#ink-meta-pick').onclick = metaPick;
+  d.querySelector('#ink-meta-btn').onclick = metaToggle;
+  d.querySelector('#ink-meta-less').onclick = () => metaGoalStep(-1);
+  d.querySelector('#ink-meta-more').onclick = () => metaGoalStep(1);
+  metaPaint();
   d.querySelector('#ink-auto-go').onclick = toggle;
   d.querySelector('#ink-auto-mini-go').onclick = toggle;
   d.querySelector('#ink-auto-slow').onclick = () => setSpeed(-1);
@@ -1318,7 +1412,8 @@ function route(){
 window.addEventListener('popstate', route);
 setInterval(route, 2500);
 route();
-window.lerAuto = {start: () => { if(!running) loop(); }, stop: () => stop('Parado.'), next: () => { const e = findNextEl(); console.log(e); return e; },
+window.lerAuto = {meta: n => { if(n) cfg.metaGoal = n; if(!meta.on) metaToggle(); return cfg.metaGoal; }, metaStatus: () => ({...meta, seen: meta.seen.size, goal: cfg.metaGoal}),
+  start: () => { if(!running) loop(); }, stop: () => stop('Parado.'), next: () => { const e = findNextEl(); console.log(e); return e; },
   voices: () => ptVoices().map(v => v.name + ' (' + v.lang + ')'),
   bin1: v => { cfg.bin1 = v !== false; save(); return cfg.bin1; },
   bin: v => { cfg.bin = v !== false; save(); return cfg.bin; },
@@ -1924,7 +2019,6 @@ new MutationObserver(muts=>{
   requestAnimationFrame(onDomChange);
 }).observe(document.body, {childList: true, subtree: true});
 
-// tenta injetar UI logo de cara
 setTimeout(()=>{
   const d = document.querySelector('.bz-order');
   if(d) ui(d);
