@@ -1023,56 +1023,64 @@ const ICO_O = {
   'ink-ord-zero':  svg('<path d="M3 12a9 9 0 1 0 3-6.7M3 4v5h5"/>')
 };
 const INK_CSS = `
-#ink-auto-ui{--ia-bg:rgba(17,17,21,.88);--ia-card:rgba(255,255,255,.06);--ia-card2:rgba(255,255,255,.11);--ia-line:rgba(255,255,255,.09);--ia-txt:#f4f2ef;--ia-dim:#9d9aa6;--ia-ac:#e8573f;--ia-ac2:#ff8a4c;
-  position:fixed;z-index:2147483000;width:min(268px,calc(100vw - 16px));box-sizing:border-box;padding:12px;color:var(--ia-txt);
-  background:var(--ia-bg);-webkit-backdrop-filter:blur(18px) saturate(1.4);backdrop-filter:blur(18px) saturate(1.4);
-  border:1px solid var(--ia-line);border-radius:20px;font:13px/1.35 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
-  box-shadow:0 14px 44px rgba(0,0,0,.55),inset 0 1px 0 rgba(255,255,255,.06);max-height:calc(100vh - 16px);overflow:auto;
+#ink-auto-ui{--ia-bg:rgba(16,16,20,.84);--ia-card:rgba(255,255,255,.06);--ia-card2:rgba(255,255,255,.12);--ia-line:rgba(255,255,255,.08);--ia-txt:#f4f2ef;--ia-dim:#a19eac;--ia-ac:#e8573f;--ia-ac2:#ff8a4c;
+  position:fixed;z-index:2147483000;width:min(236px,calc(100vw - 16px));box-sizing:border-box;padding:8px;color:var(--ia-txt);
+  background:var(--ia-bg);-webkit-backdrop-filter:blur(16px) saturate(1.4);backdrop-filter:blur(16px) saturate(1.4);
+  border:1px solid var(--ia-line);border-radius:18px;font:12.5px/1.3 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  box-shadow:0 10px 30px rgba(0,0,0,.5),inset 0 1px 0 rgba(255,255,255,.05);max-height:calc(100vh - 16px);overflow:auto;
   overscroll-behavior:contain;touch-action:manipulation;-webkit-tap-highlight-color:transparent;pointer-events:auto;
-  scrollbar-width:thin;scrollbar-color:#444 transparent}
-#ink-auto-ui.mob{background:rgba(17,17,21,.97);-webkit-backdrop-filter:none;backdrop-filter:none;padding:10px 12px}
+  scrollbar-width:none}
+#ink-auto-ui::-webkit-scrollbar{display:none}
+#ink-auto-ui.mob{background:rgba(16,16,20,.96);-webkit-backdrop-filter:none;backdrop-filter:none}
 #ink-auto-ui *{box-sizing:border-box}
 #ink-auto-ui button{all:unset;box-sizing:border-box;cursor:pointer;user-select:none;-webkit-user-select:none;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
-#ink-auto-ui button:focus-visible{outline:2px solid var(--ia-ac2);outline-offset:2px}
-#ink-auto-ui .ia-head{display:flex;align-items:center;gap:8px;cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none}
-#ink-auto-ui .ia-logo{width:28px;height:28px;border-radius:9px;display:grid;place-items:center;color:#fff;flex:none;background:linear-gradient(135deg,var(--ia-ac),var(--ia-ac2));box-shadow:0 3px 10px rgba(232,87,63,.4)}
-#ink-auto-ui .ia-title{flex:1;font-weight:650;letter-spacing:.2px;white-space:nowrap}
-#ink-auto-ui .ia-ib{width:30px;height:30px;border-radius:10px;display:grid;place-items:center;background:var(--ia-card);color:var(--ia-txt);flex:none}
+#ink-auto-ui button:focus-visible{outline:2px solid var(--ia-ac2);outline-offset:1px}
+#ink-auto-ui .ia-head{display:flex;align-items:center;gap:6px;cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none}
+#ink-auto-ui .ia-logo{width:24px;height:24px;border-radius:8px;display:grid;place-items:center;color:#fff;flex:none;background:linear-gradient(135deg,var(--ia-ac),var(--ia-ac2))}
+#ink-auto-ui .ia-title{flex:1;font-weight:650;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#ink-auto-ui .ia-ib{width:26px;height:26px;border-radius:8px;display:grid;place-items:center;background:var(--ia-card);color:var(--ia-txt);flex:none}
 #ink-auto-ui #ink-auto-mini-go{display:none;color:#fff;background:linear-gradient(135deg,var(--ia-ac),var(--ia-ac2))}
-#ink-auto-ui.min{width:auto;padding:8px}
+#ink-auto-ui.min{width:auto;padding:6px}
 #ink-auto-ui.min .ia-title,#ink-auto-ui.min #ink-auto-body{display:none}
 #ink-auto-ui.min #ink-auto-mini-go{display:grid}
-#ink-auto-ui.mob .ia-ib{width:42px;height:42px;border-radius:13px}
-#ink-auto-ui .ia-st{margin:10px 0;padding:9px 11px;min-height:36px;border-radius:12px;background:var(--ia-card);border:1px solid var(--ia-line);color:#d9d6df;font-size:12.5px;word-break:break-word;transition:border-color .2s}
-#ink-auto-ui.run .ia-st{border-color:rgba(232,87,63,.5)}
-#ink-auto-ui .ia-main{display:flex;gap:8px;align-items:center}
-#ink-auto-ui #ink-auto-go{flex:1;height:42px;border-radius:13px;display:flex;align-items:center;justify-content:center;gap:8px;font-weight:650;color:#fff;
-  background:linear-gradient(135deg,var(--ia-ac),var(--ia-ac2));box-shadow:0 5px 16px rgba(232,87,63,.35);transition:transform .08s,filter .15s}
+#ink-auto-ui.mob .ia-ib{width:36px;height:36px;border-radius:11px}
+#ink-auto-ui .ia-st{margin:6px 0 0;padding:5px 9px;border-radius:10px;background:var(--ia-card);color:#d9d6df;font-size:11.5px;line-height:1.3;word-break:break-word;
+  display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2;overflow:hidden;border:1px solid transparent;transition:border-color .2s}
+#ink-auto-ui .ia-st:empty{display:none}
+#ink-auto-ui.run .ia-st{border-color:rgba(232,87,63,.45)}
+#ink-auto-ui .ia-main{display:flex;gap:6px;align-items:center;margin-top:6px}
+#ink-auto-ui #ink-auto-go{flex:1;height:36px;border-radius:11px;display:flex;align-items:center;justify-content:center;gap:6px;font-weight:650;font-size:12.5px;color:#fff;
+  background:linear-gradient(135deg,var(--ia-ac),var(--ia-ac2));box-shadow:0 4px 12px rgba(232,87,63,.3);transition:transform .08s,filter .15s}
 #ink-auto-ui #ink-auto-go:active{transform:scale(.97)}
-#ink-auto-ui.run #ink-auto-go{background:var(--ia-card2);box-shadow:none;border:1px solid var(--ia-line)}
-#ink-auto-ui.mob #ink-auto-go{height:48px}
-#ink-auto-ui .ia-step{display:flex;align-items:center;padding:2px;border-radius:13px;background:var(--ia-card);border:1px solid var(--ia-line);flex:none}
-#ink-auto-ui .ia-step button{width:30px;height:34px;border-radius:10px;display:grid;place-items:center;font-size:17px;line-height:1}
+#ink-auto-ui.run #ink-auto-go{background:var(--ia-card2);box-shadow:none}
+#ink-auto-ui.mob #ink-auto-go{height:44px}
+#ink-auto-ui .ia-step{display:flex;align-items:center;border-radius:11px;background:var(--ia-card);flex:none}
+#ink-auto-ui .ia-step button{width:26px;height:36px;border-radius:9px;display:grid;place-items:center;font-size:16px;line-height:1}
 #ink-auto-ui .ia-step button:active{background:var(--ia-card2)}
-#ink-auto-ui.mob .ia-step button{width:38px;height:42px}
-#ink-auto-ui .ia-val{min-width:42px;text-align:center;font-weight:600;font-size:12.5px;font-variant-numeric:tabular-nums}
-#ink-auto-ui .ia-sec{margin:14px 2px 6px;font-size:10.5px;letter-spacing:.9px;text-transform:uppercase;color:var(--ia-dim);font-weight:650}
-#ink-auto-ui .ia-grp{display:flex;flex-direction:column;gap:6px}
-#ink-auto-ui .ia-combo{display:flex;gap:6px;align-items:stretch}
-#ink-auto-ui .ia-combo .ia-row{flex:1;min-width:0}
-#ink-auto-ui .ia-row{display:flex;align-items:center;gap:9px;width:100%;padding:9px 11px;border-radius:13px;background:var(--ia-card);border:1px solid var(--ia-line);transition:background .12s,border-color .12s}
-#ink-auto-ui.mob .ia-row{min-height:46px}
+#ink-auto-ui.mob .ia-step button{width:32px;height:44px}
+#ink-auto-ui .ia-val{min-width:34px;text-align:center;font-weight:600;font-size:12px;font-variant-numeric:tabular-nums}
+#ink-auto-ui .ia-chips{display:grid;grid-template-columns:repeat(5,1fr);gap:4px;margin-top:6px}
+#ink-auto-ui .ia-chip{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;min-height:42px;padding:5px 1px 4px;border-radius:11px;
+  background:var(--ia-card);border:1px solid transparent;color:var(--ia-dim);font-size:9.5px;font-weight:600;letter-spacing:.1px;transition:background .12s,color .12s,border-color .12s}
+#ink-auto-ui.mob .ia-chip{min-height:50px}
+#ink-auto-ui .ia-chip:active{background:var(--ia-card2)}
+#ink-auto-ui .ia-chip.on{color:#fff;background:rgba(232,87,63,.2);border-color:rgba(232,87,63,.55)}
+#ink-auto-ui .ia-chip svg{width:16px;height:16px}
+#ink-auto-ui .ia-sub{display:flex;gap:4px;align-items:stretch;margin-top:5px}
+#ink-auto-ui .ia-sub .ia-row{flex:1;min-width:0}
+#ink-auto-ui .ia-sub .ia-step button{height:32px}
+#ink-auto-ui.mob .ia-sub .ia-step button{height:40px}
+#ink-auto-ui .ia-sec{margin:9px 2px 4px;font-size:9.5px;letter-spacing:.9px;text-transform:uppercase;color:var(--ia-dim);font-weight:700}
+#ink-auto-ui .ia-row{display:flex;align-items:center;gap:7px;width:100%;padding:7px 9px;border-radius:11px;background:var(--ia-card);border:1px solid transparent;font-size:11.5px;transition:background .12s,border-color .12s}
+#ink-auto-ui.mob .ia-row{min-height:40px}
 #ink-auto-ui .ia-row:active{background:var(--ia-card2)}
-#ink-auto-ui .ia-row.on{border-color:rgba(232,87,63,.45);background:rgba(232,87,63,.1)}
+#ink-auto-ui .ia-row.on{border-color:rgba(232,87,63,.55);background:rgba(232,87,63,.16)}
 #ink-auto-ui .ia-lbl{flex:1;min-width:0;font-weight:550;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #ink-auto-ui .ia-ico{display:grid;place-items:center;color:var(--ia-dim);flex:none}
-#ink-auto-ui .ia-sw{position:relative;flex:none;width:34px;height:20px;border-radius:99px;background:rgba(255,255,255,.18);transition:background .15s}
-#ink-auto-ui .ia-sw::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.4);transition:transform .15s}
-#ink-auto-ui .ia-row.on .ia-sw{background:var(--ia-ac)}
-#ink-auto-ui .ia-row.on .ia-sw::after{transform:translateX(14px)}
-#ink-auto-ui .dim{opacity:.5}
+#ink-auto-ui .ia-sub.dim{display:none}
+#ink-auto-ui:has(#ink-eye-btn:not(.on)) #ink-eye-sub{display:none}
 @media (hover:hover){
-  #ink-auto-ui .ia-row:hover{background:var(--ia-card2)}
+  #ink-auto-ui .ia-row:hover,#ink-auto-ui .ia-chip:hover{background:var(--ia-card2)}
   #ink-auto-ui .ia-ib:hover,#ink-auto-ui .ia-step button:hover{background:var(--ia-card2)}
   #ink-auto-ui #ink-auto-go:hover{filter:brightness(1.08)}
 }
@@ -1232,12 +1240,13 @@ const meta = {on: false, done: 0, seen: new Set(), targets: []};
 const metaKey = st => { const c = st.p != null ? st.p : st.pg; return c == null ? null : location.pathname + '#' + c; };
 function metaPaint(){
   const l = document.getElementById('ink-meta-lbl'), v = document.getElementById('ink-meta-val');
-  if(l) l.textContent = meta.on ? `Meta: ${meta.done}/${cfg.metaGoal} págs` + (meta.targets.length ? ` · ✓ ${meta.targets.filter(x => meta.done >= x.r).length}/${meta.targets.length} missões` : '') : 'Parar após a meta de páginas';
+  if(l) l.textContent = meta.on ? `${meta.done}/${cfg.metaGoal} págs` + (meta.targets.length ? ` · ✓${meta.targets.filter(x => meta.done >= x.r).length}/${meta.targets.length}` : '') : 'Ligar meta';
   if(v) v.textContent = cfg.metaGoal;
   const pl = document.getElementById('ink-meta-pick-lbl');
   if(pl){
     const L = pendingMissions(), x = L[metaSel];
-    const txt = (metaSel >= 0 && metaSel === L.length) ? `Todas as missões (${allTargets(L).length}) · ${cfg.metaGoal} págs` : x ? `Faltam ${x.n - x.c}: ${x.t}${x.fac ? ' (HQ da facção)' : ''}` : (L.length ? `Escolher missão (${L.length} pendentes)` : 'Abra o painel do evento p/ ler missões');
+    const short = t => (t.replace(/^ler\s+\d+\s+p[aá]ginas\s*/i, '').replace(/\s+hoje$/i, '') || 'qualquer HQ');
+    const txt = (metaSel >= 0 && metaSel === L.length) ? `Todas (${allTargets(L).length}) · ${cfg.metaGoal} págs` : x ? `${x.fac ? '🏰 ' : ''}Faltam ${x.n - x.c} · ${short(x.t)}` : (L.length ? `Escolher missão (${L.length} pendentes)` : 'Abra o painel do evento p/ ler missões');
     pl.textContent = txt; pl.title = txt;
   }
   sw('ink-meta-btn', meta.on);
@@ -1278,6 +1287,14 @@ function mount(){
   const moon = svg('<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>');
   const bolt = svg('<path d="M13 2L4 14h7l-1 8 9-12h-7z"/>');
   const swp  = '<span class="ia-sw"></span>';
+  const IC = {
+    manga: svg('<path d="M19 12H5M11 6l-6 6 6 6"/>'),
+    next:  svg('<path d="M5 5l9 7-9 7zM18 5v14"/>'),
+    voice: ICO.voice,
+    eye:   moon,
+    perf:  bolt
+  };
+  const chip = (id, ico, txt, tip) => '<button id="' + id + '" class="ia-chip" type="button" title="' + tip + '">' + ico + '<span>' + txt + '</span></button>';
   d.innerHTML =
     '<div id="ink-auto-head" class="ia-head">' +
       '<span class="ia-logo">' + ICO.book + '</span>' +
@@ -1291,34 +1308,26 @@ function mount(){
         '<button id="ink-auto-go" type="button"></button>' +
         '<div class="ia-step"><button id="ink-auto-slow" type="button" title="mais devagar">−</button><span id="ink-auto-sp" class="ia-val"></span><button id="ink-auto-fast" type="button" title="mais rápido">+</button></div>' +
       '</div>' +
-      '<div class="ia-sec">Leitura</div>' +
-      '<div class="ia-grp">' +
-        '<button id="ink-auto-manga" class="ia-row" type="button" title="Leitura da direita para a esquerda (vale também para a ordenação das bolhas)"><span class="ia-lbl">Modo mangá (← direita p/ esquerda)</span>' + swp + '</button>' +
-        '<button id="ink-auto-next" class="ia-row" type="button" title="Ao terminar o capítulo, abre o próximo e continua lendo"><span class="ia-lbl">Próximo capítulo automático</span>' + swp + '</button>' +
+      '<div class="ia-chips">' +
+        chip('ink-auto-manga', IC.manga, 'Mangá', 'Modo mangá: leitura da direita para a esquerda') +
+        chip('ink-auto-next', IC.next, 'Auto', 'Ao terminar o capítulo, abre o próximo e continua') +
+        chip('ink-voice-btn', IC.voice, 'Voz', 'Lê os balões em voz alta (OCR + voz do navegador)') +
+        chip('ink-eye-btn', IC.eye, 'Olhos', 'Filtro quente que reduz a luz azul (Alt+C)') +
+        chip('ink-perf-btn', IC.perf, 'Leve', 'Modo desempenho (menos CPU/GPU)') +
+      '</div>' +
+      '<div id="ink-voice-combo" class="ia-sub">' +
+        '<button id="ink-voice-pick" class="ia-row" type="button" title="Trocar a voz"><span class="ia-lbl" id="ink-voice-name"></span></button>' +
+        '<div class="ia-step"><button id="ink-voice-slow" type="button" title="voz mais devagar">−</button><span id="ink-voice-sp" class="ia-val"></span><button id="ink-voice-fast" type="button" title="voz mais rápida">+</button></div>' +
+      '</div>' +
+      '<div id="ink-eye-sub" class="ia-sub">' +
+        '<span class="ia-row" style="cursor:default"><span class="ia-lbl">Intensidade do filtro</span></span>' +
+        '<div class="ia-step"><button id="ink-eye-less" type="button" title="menos intenso">−</button><span id="ink-eye-lvl" class="ia-val"></span><button id="ink-eye-more" type="button" title="mais intenso">+</button></div>' +
       '</div>' +
       '<div class="ia-sec">Missão</div>' +
-      '<div class="ia-grp">' +
-        '<button id="ink-meta-pick" class="ia-row" type="button"><span class="ia-lbl" id="ink-meta-pick-lbl"></span></button>' +
-        '<div class="ia-combo">' +
-          '<button id="ink-meta-btn" class="ia-row" type="button" title="Lê sozinho até completar a meta de páginas e para"><span class="ia-lbl" id="ink-meta-lbl"></span>' + swp + '</button>' +
-          '<div class="ia-step"><button id="ink-meta-less" type="button" title="−1 página">−</button><span id="ink-meta-val" class="ia-val"></span><button id="ink-meta-more" type="button" title="+1 página">+</button></div>' +
-        '</div>' +
-      '</div>' +
-      '<div class="ia-sec">Audiolivro</div>' +
-      '<div class="ia-grp">' +
-        '<button id="ink-voice-btn" class="ia-row" type="button" title="Lê os balões em voz alta (OCR + voz do navegador)"><span class="ia-ico">' + ICO.voice + '</span><span class="ia-lbl">Ler balões em voz alta</span>' + swp + '</button>' +
-        '<div id="ink-voice-combo" class="ia-combo">' +
-          '<button id="ink-voice-pick" class="ia-row" type="button" title="Trocar a voz"><span class="ia-lbl" id="ink-voice-name"></span></button>' +
-          '<div class="ia-step"><button id="ink-voice-slow" type="button" title="voz mais devagar">−</button><span id="ink-voice-sp" class="ia-val"></span><button id="ink-voice-fast" type="button" title="voz mais rápida">+</button></div>' +
-        '</div>' +
-      '</div>' +
-      '<div class="ia-sec">Tela</div>' +
-      '<div class="ia-grp">' +
-        '<div class="ia-combo">' +
-          '<button id="ink-eye-btn" class="ia-row" type="button" title="Filtro quente que reduz a luz azul (Alt+C)"><span class="ia-ico">' + moon + '</span><span class="ia-lbl">Conforto ocular</span>' + swp + '</button>' +
-          '<div class="ia-step"><button id="ink-eye-less" type="button" title="menos intenso">−</button><span id="ink-eye-lvl" class="ia-val"></span><button id="ink-eye-more" type="button" title="mais intenso">+</button></div>' +
-        '</div>' +
-        '<button id="ink-perf-btn" class="ia-row" type="button"><span class="ia-ico">' + bolt + '</span><span class="ia-lbl">Modo desempenho</span>' + swp + '</button>' +
+      '<button id="ink-meta-pick" class="ia-row" type="button"><span class="ia-lbl" id="ink-meta-pick-lbl"></span></button>' +
+      '<div class="ia-sub">' +
+        '<button id="ink-meta-btn" class="ia-row" type="button" title="Lê sozinho até completar a meta de páginas e para"><span class="ia-lbl" id="ink-meta-lbl"></span></button>' +
+        '<div class="ia-step"><button id="ink-meta-less" type="button" title="−1 página">−</button><span id="ink-meta-val" class="ia-val"></span><button id="ink-meta-more" type="button" title="+1 página">+</button></div>' +
       '</div>' +
     '</div>';
   document.body.appendChild(d);
