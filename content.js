@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Ink Leitor
 // @namespace    ink-leitor
-// @version      4.0.0
-// @description  Leitor automático, OCR, TTS e ordenador mangá/HQ para ink.app.br
+// @version      4.1.0
+// @description  Leitor automático, OCR, TTS, ordenador de capítulos e auto-arrumar bolhas mangá/HQ
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
 // @run-at       document-idle
@@ -15,7 +15,7 @@
     if (window.__ink) return;
     window.__ink = true;
 
-    const VERSION = '4.0.0';
+    const VERSION = '4.1.0';
     const IS_MOBILE = (() => {
         try { return matchMedia('(pointer:coarse)').matches || innerWidth < 700; }
         catch (e) { return innerWidth < 700; }
@@ -64,7 +64,7 @@
     (() => {
         const KEY = 'serei sempre legal';
         const LOCKS = new Set(['modal-open', 'no-scroll', 'locked', 'overflow-hidden', 'is-locked', 'scroll-lock', 'blur']);
-        const MINE = '#ink-panel,#ink-eye,#ink-order,#ink-dbg';
+        const MINE = '#ink-panel,#ink-eye,#ink-order,#ink-dbg,#ink-auto-arrange-btn';
         let popupAt = 0, timer = 0, lastRun = 0;
 
         const isMine = el => !!(el && el.closest && el.closest(MINE));
@@ -248,7 +248,7 @@
     const stateLabel = st => st.b != null ? `balão ${st.b}/${st.bt} · pág ${st.p}/${st.pt}` : (st.pg != null ? `pág ${st.pg}/${st.pgt}` : (st.pct != null ? `${st.pct}%` : 'lendo'));
 
     /* ================================================================== *
-     *  5. NAVEGAÇÃO (métodos de avançar)
+     *  5. NAVEGAÇÃO
      * ================================================================== */
     const sendKey = (k, code, kc) => {
         const t = document.activeElement || document.body;
@@ -323,7 +323,107 @@
     const MANGA = ['ArrowLeft', 'clickEsq', 'swipeR'];
 
     /* ================================================================== *
-     *  6. ORDER BAR — ordenação de mangá/HQ
+     *  6. BUBBLE SORTER (Auto-Arrumar Mangá/HQ)
+     * ================================================================== */
+    const BubbleSorter = (() => {
+        // Encontra as coordenadas originais do balão no DOM
+        function getCoords(el) {
+            const x = parseFloat(el.dataset.x || el.dataset.left || el.dataset.cx || el.style.left || 0);
+            const y = parseFloat(el.dataset.y || el.dataset.top || el.dataset.cy || el.style.top || 0);
+            return { x, y };
+        }
+
+        function sortBubbles(mode) {
+            const modal = document.querySelector('.bz-order'); // Classe do modal do site
+            if (!modal) return;
+
+            // Pega todos os elementos arrastáveis (os balões)
+            let items = Array.from(modal.querySelectorAll('[draggable="true"], .bz-order-item, [class*="item"]'));
+            // Filtra lixos (botões, headers)
+            items = items.filter(el => el.offsetWidth > 20 && !el.querySelector('button:not(.delete)') && !el.id.includes('ink'));
+
+            if (items.length < 2) {
+                setStatus('⚠ Não encontrei os balões para ordenar.');
+                return;
+            }
+
+            items.sort((a, b) => {
+                const ca = getCoords(a);
+                const cb = getCoords(b);
+
+                // Se tiver coordenadas (eixo Y é a linha, X é a coluna)
+                if (ca.x !== 0 || ca.y !== 0 || cb.x !== 0 || cb.y !== 0) {
+                    // Se a diferença no eixo Y for maior que 30px, significa que estão em linhas diferentes
+                    if (Math.abs(ca.y - cb.y) > 30) {
+                        return ca.y - cb.y;
+                    }
+                    // Se estão na mesma linha, ordena no eixo X (Mangá = direita p/ esquerda, HQ = esquerda p/ direita)
+                    return mode === 'manga' ? cb.x - ca.x : ca.x - cb.x;
+                }
+                
+                // Fallback se não tiver coordenadas
+                return 0;
+            });
+
+            const parent = items[0].parentNode;
+            if (parent) {
+                // Move os elementos no DOM para a nova ordem
+                items.forEach(item => parent.appendChild(item));
+                // Dispara eventos para frameworks (React/Vue) atualizarem o estado
+                items.forEach(item => {
+                    item.dispatchEvent(new Event('change', { bubbles: true }));
+                    item.dispatchEvent(new Event('input', { bubbles: true }));
+                });
+            }
+        }
+
+        function injectUI() {
+            const modal = document.querySelector('.bz-order');
+            if (!modal || modal.querySelector('#ink-auto-arrange-btn')) return;
+
+            // Procura o container do título ou o header
+            const header = modal.querySelector('.title, h2, h3, header') || modal;
+            const btn = document.createElement('button');
+            btn.id = 'ink-auto-arrange-btn';
+            btn.type = 'button';
+            
+            const updateBtnText = () => {
+                btn.textContent = cfg.manga ? '↔ Auto Mangá' : '↔ Auto HQ';
+                btn.style.background = cfg.manga ? '#e8573f' : '#ff69b4';
+            };
+            updateBtnText();
+
+            btn.style.cssText = 'color:#fff; border:none; border-radius:8px; padding:6px 12px; font-weight:bold; cursor:pointer; font-size:12px; margin-left:10px; display:inline-flex; align-items:center; transition:0.2s; box-shadow:0 2px 8px rgba(0,0,0,0.2);';
+            
+            btn.onclick = (e) => {
+                e.preventDefault();
+                sortBubbles(cfg.manga ? 'manga' : 'hq');
+                const oldText = btn.textContent;
+                btn.textContent = '✓ Arrumado!';
+                setTimeout(() => { btn.textContent = oldText; }, 1500);
+            };
+
+            // Insere no cabeçalho (onde fica o botão "Reescanear")
+            const headerContainer = modal.querySelector('div'); 
+            if (headerContainer) {
+                headerContainer.appendChild(btn);
+            } else {
+                modal.prepend(btn);
+            }
+        }
+
+        function start() {
+            // Fica observando a DOM para ver se a tela "Arrumar as bolhas" abriu
+            setInterval(() => {
+                if (document.querySelector('.bz-order')) injectUI();
+            }, 1000);
+        }
+
+        return { start };
+    })();
+
+    /* ================================================================== *
+     *  7. ORDER BAR — Ordenar Capítulos (na página da obra)
      * ================================================================== */
     const OrderBar = (() => {
         const KEY = 'ink_ord_cfg';
@@ -375,7 +475,7 @@
 
         function apply() {
             const box = findContainer();
-            if (!box) { status('⚠ Lista de capítulos não encontrada'); return false; }
+            if (!box) { status('⚠ Lista não encontrada'); return false; }
             const items = collectItems(box);
             if (!items.length) { status('⚠ Lista vazia'); return false; }
             if (!state.orig.has(box)) state.orig.set(box, items.map(x => x.el));
@@ -417,7 +517,7 @@
             const box = findContainer();
             if (!box) { status('⚠ Lista não encontrada'); return false; }
             const o = state.orig.get(box);
-            if (!o || !o.length) { status('⚠ Sem ordem salva — recarregue a página'); return false; }
+            if (!o || !o.length) { status('⚠ Sem ordem salva'); return false; }
             for (const el of o) { try { el.isConnected && box.appendChild(el); } catch (e) { } }
             box.style.direction = ''; box.style.flexDirection = '';
             state.mode = 'orig';
@@ -432,7 +532,7 @@
         }
 
         const modeLabel = () => ({ asc: 'Crescente', desc: 'Decrescente', orig: 'Original' }[state.mode] || 'Ordenar');
-        const dirLabel = () => state.dir === 'manga' ? 'Mangá (dir→esq)' : 'Ocidental (esq→dir)';
+        const dirLabel = () => state.dir === 'manga' ? 'Mangá' : 'Ocidental';
 
         function paint() {
             const bar = $('ink-order');
@@ -478,7 +578,7 @@
     })();
 
     /* ================================================================== *
-     *  7. READER LOOP (motor)
+     *  8. READER LOOP (Motor)
      * ================================================================== */
     let running = false, runId = 0, lastUser = 0;
     const alive = id => running && id === runId;
@@ -832,7 +932,7 @@
     document.addEventListener('visibilitychange', () => { if (running && !document.hidden) keepAwake(true); });
 
     /* ================================================================== *
-     *  8. VOZ / TTS
+     *  9. VOZ / TTS
      * ================================================================== */
     const TTS = window.speechSynthesis || null;
     let voices = [];
@@ -847,8 +947,7 @@
         return (br.length ? br : pt).slice().sort((a, b) => isNatural(b) - isNatural(a));
     }
     const currentVoice = () => { const l = ptVoices(); return l.find(v => v.name === cfg.vname) || l[0] || null; };
-    const shortVoice = n => n.replace(/^Microsoft\s+|^Google\s+/i, '').replace(/\s*[-–(].*$/, '').trim() || n;
-
+    
     function mkUtt(text) {
         const u = new SpeechSynthesisUtterance(text);
         const v = currentVoice();
@@ -882,7 +981,7 @@
     const cancelSpeech = () => { try { if (TTS) TTS.cancel(); } catch (e) { } };
 
     /* ================================================================== *
-     *  9. OCR
+     * 10. OCR
      * ================================================================== */
     const OCR = { worker: null, promise: null };
     const ocrBase = () => {
@@ -990,7 +1089,7 @@
             return null;
         })();
         const panel = $('ink-panel');
-        const eye = $('ink-eye');
+        const eye = $('ink-eye-el');
         const hidden = [];
         [panel, eye].forEach(el => { if (!el) return; hidden.push({ el, vis: el.style.visibility }); el.style.visibility = 'hidden'; });
         let shot;
@@ -1053,7 +1152,7 @@
     }
 
     /* ================================================================== *
-     * 10. MÚSICA (Drive via Apps Script)
+     * 11. MÚSICA (Drive via Apps Script)
      * ================================================================== */
     const MUS = { list: [], cur: -1, audio: null, blob: null, shuffle: false };
     try { MUS.list = JSON.parse(localStorage.getItem('ink_music_list') || '[]'); } catch (e) { }
@@ -1164,7 +1263,7 @@
     }
 
     /* ================================================================== *
-     * 11. MISSÕES
+     * 12. MISSÕES
      * ================================================================== */
     const meta = { on: false, done: 0, seen: new Set() };
     const metaKey = st => { const c = st.p != null ? st.p : st.pg; return c == null ? null : location.pathname + '#' + c; };
@@ -1194,7 +1293,7 @@
     }
 
     /* ================================================================== *
-     * 12. ÍCONES + CSS
+     * 13. ÍCONES + CSS
      * ================================================================== */
     const svg = (p, fill) => `<svg viewBox="0 0 24 24" width="16" height="16" ${fill ? 'fill="currentColor"' : 'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"'} aria-hidden="true">${p}</svg>`;
     const ICO = {
@@ -1268,15 +1367,15 @@ box-shadow:0 8px 24px rgba(255,105,180,.28),inset 0 1px 0 rgba(255,255,255,.5);-
 `;
 
     function injectCSS() {
-        if ($('ink-css') && $('ink-css').dataset.v === '4.0.0') return;
+        if ($('ink-css') && $('ink-css').dataset.v === '4.1.0') return;
         const old = $('ink-css'); if (old) old.remove();
         const s = document.createElement('style');
-        s.id = 'ink-css'; s.dataset.v = '4.0.0'; s.textContent = CSS;
+        s.id = 'ink-css'; s.dataset.v = '4.1.0'; s.textContent = CSS;
         (document.head || document.documentElement).appendChild(s);
     }
 
     /* ================================================================== *
-     * 13. PAINEL
+     * 14. PAINEL
      * ================================================================== */
     function buildPanel() {
         if ($('ink-panel')) return;
@@ -1442,12 +1541,17 @@ box-shadow:0 8px 24px rgba(255,105,180,.28),inset 0 1px 0 rgba(255,255,255,.5);-
     }
 
     /* ================================================================== *
-     * 14. INIT
+     * 15. INIT
      * ================================================================== */
     function init() {
         injectCSS();
         buildPanel();
         applyPos();
+        
+        // Inicia o observador do modal de bolhas
+        BubbleSorter.start();
+        
+        // Inicia a barra de ordenar capítulos (se estiver na página de catálogo)
         OrderBar.build();
         let tries = 0;
         const w = setInterval(() => {
