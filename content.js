@@ -6,33 +6,30 @@ window.__inkLeitorV2 = true;
    PATCH ANDROID (DESTRUIR POPUPS E FORÇAR TOQUE)
    ===================================================================== */
 (function androidFixes() {
-    // Função para caçar e destruir o pop-up do "Serei sempre legal"
-    let _busy = false;
+    // Caça e remove o pop-up do "Serei sempre legal".
+    // Antes: varria todo elemento da página a cada 500 ms e a cada mudança do DOM (lia textContent de cada um).
+    // Agora: uma única leitura barata do texto da página, só quando algo mudou, e só procura o nó se o texto existir.
+    const KEY = 'serei sempre legal';
+    let _t = 0;
     const matarPopup = () => {
-        if (_busy) return; _busy = true; setTimeout(() => { _busy = false; }, 400);
-        const todos = document.querySelectorAll('button, a, div, span');
-        for (const el of todos) {
-            if (el.textContent && el.textContent.toLowerCase().includes('serei sempre legal')) {
-                let modal = el;
-                for (let i = 0; i < 10; i++) { 
-                    if (modal.parentElement && modal.parentElement.tagName !== 'BODY') {
-                        modal = modal.parentElement;
-                    } else {
-                        break;
-                    }
-                }
-                if (modal && modal.remove) {
-                    modal.remove();
-                    console.log('[Ink-Fix] Popup DESTRUÍDO!');
-                }
-            }
+        _t = 0;
+        const body = document.body;
+        if (!body || !(body.textContent || '').toLowerCase().includes(KEY)) return;
+        const w = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+        let n;
+        while ((n = w.nextNode())) {
+            if (!n.nodeValue || !n.nodeValue.toLowerCase().includes(KEY)) continue;
+            let modal = n.parentElement;
+            for (let i = 0; i < 10 && modal && modal.parentElement && modal.parentElement.tagName !== 'BODY'; i++) modal = modal.parentElement;
+            if (modal && modal.remove) { modal.remove(); console.log('[Ink-Fix] Popup DESTRUÍDO!'); }
+            break;
         }
     };
-
-    setInterval(matarPopup, 500);
-    if (document.body) {
-        new MutationObserver(matarPopup).observe(document.body, { childList: true, subtree: true });
-    }
+    const agendar = () => { if (!_t) _t = setTimeout(matarPopup, 350); };
+    setInterval(() => { if (!document.hidden) agendar(); }, 3000);
+    const startObs = () => { if (document.body) new MutationObserver(agendar).observe(document.body, { childList: true, subtree: true }); };
+    if (document.body) startObs(); else document.addEventListener('DOMContentLoaded', startObs, {once: true});
+    agendar();
 
     // Forçar eventos de toque a não serem passivos
     // So toca nos listeners dentro do leitor (/ler/); no resto do site nao mexe em nada,
@@ -217,7 +214,7 @@ const prog = s => s.b != null ? s.p * 100000 + s.b : (s.pg != null ? s.pg : (s.p
 async function waitChange(before, id, maxMs){
   const t0 = performance.now(), p0 = prog(before);
   while(performance.now() - t0 < maxMs){
-    await sleep(40);
+    await sleep(isPerf() ? 70 : 40);
     if(!alive(id)) return false;
     const s = readState(), pn = prog(s);
     if(p0 != null && pn != null){
@@ -1203,6 +1200,7 @@ function setEyeLvl(d){
    ===================================================================== */
 const MS_KEY = 'ink_missions';
 function scanMissions(){
+  if(document.hidden) return;
   const lis = document.querySelectorAll('li.event-mission');
   if(!lis.length) return;
   const out = [];
@@ -1219,7 +1217,7 @@ function scanMissions(){
   });
   if(out.length){ try{ localStorage.setItem(MS_KEY, JSON.stringify({ts: Date.now(), list: out})); }catch(e){} }
 }
-setInterval(scanMissions, 1500);
+setInterval(scanMissions, 2500);
 const pendingMissions = () => { try{ return (JSON.parse(localStorage.getItem(MS_KEY) || '{}').list || []).filter(x => !x.done && x.n > x.c); }catch(e){ return []; } };
 let metaSel = -1;   // -1 = nenhuma, 0..L-1 = uma missão, L = "todas"
 // As páginas lidas contam para várias missões ao mesmo tempo; "todas" lê até a maior meta e vai marcando cada missão que completa.
