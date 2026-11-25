@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ink Leitor
 // @namespace    ink-leitor
-// @version      4.4.2
+// @version      4.4.3
 // @description  Leitor automático, OCR, TTS, música (YouTube + Drive), ordenador de capítulos e auto-arrumar bolhas mangá/HQ
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
@@ -10,12 +10,22 @@
 // @updateURL    https://raw.githubusercontent.com/lucateli/ink-atualizacoes/main/content.js
 // @downloadURL  https://raw.githubusercontent.com/lucateli/ink-atualizacoes/main/content.js
 // ==/UserScript==
+
+/* ====================================================================
+ *  REGRAS OBRIGATÓRIAS PARA QUALQUER IA QUE EDITAR ESTE ARQUIVO
+ *  1. O arquivo entregue deve SEMPRE se chamar exatamente: content.js
+ *     (nunca content_v2.js, ink.js, novo.js etc.).
+ *  2. Entregar o arquivo COMPLETO, nunca só trechos ou "diffs".
+ *  3. Aumentar a versão em AMBOS os lugares: "@version" (cabeçalho)
+ *     e "const VERSION = '…'" (logo abaixo). O atualizador lê a segunda.
+ *  4. Manter o formato exato: const VERSION = 'X.Y.Z';
+ * ==================================================================== */
 (() => {
     'use strict';
     if (window.__ink) return;
     window.__ink = true;
 
-    const VERSION = '4.4.2';
+    const VERSION = '4.4.3';
     const IS_MOBILE = (() => {
         try { return matchMedia('(pointer:coarse)').matches || innerWidth < 700; }
         catch (e) { return innerWidth < 700; }
