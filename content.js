@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ink Leitor
 // @namespace    ink-leitor
-// @version      4.4.3
+// @version      4.4.4
 // @description  Leitor automático, OCR, TTS, música (YouTube + Drive), ordenador de capítulos e auto-arrumar bolhas mangá/HQ
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
@@ -25,7 +25,7 @@
     if (window.__ink) return;
     window.__ink = true;
 
-    const VERSION = '4.4.3';
+    const VERSION = '4.4.4';
     const IS_MOBILE = (() => {
         try { return matchMedia('(pointer:coarse)').matches || innerWidth < 700; }
         catch (e) { return innerWidth < 700; }
@@ -1622,6 +1622,10 @@ box-shadow:0 8px 24px rgba(255,105,180,.28),inset 0 1px 0 rgba(255,255,255,.5);-
 #ink-panel button{all:unset;box-sizing:border-box;cursor:pointer;user-select:none;touch-action:manipulation;-webkit-tap-highlight-color:transparent;display:inline-flex;align-items:center;justify-content:center;gap:5px}
 #ink-panel .ia-head{display:flex;align-items:center;gap:6px;cursor:grab;touch-action:none;padding-bottom:6px}
 #ink-panel .ia-title{flex:1;font-weight:800;font-size:13px;color:var(--ib-ac);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#ink-panel .ia-title{min-width:0}
+#ink-panel .ia-title.tick{position:relative;overflow:hidden;text-overflow:clip;font-weight:700;font-size:12px;-webkit-mask-image:linear-gradient(90deg,transparent,#000 7%,#000 93%,transparent);mask-image:linear-gradient(90deg,transparent,#000 7%,#000 93%,transparent)}
+#ink-panel .ia-tick-in{display:inline-block;padding-left:100%;white-space:nowrap;will-change:transform}
+@keyframes ink-tick{from{transform:translateX(0)}to{transform:translateX(-100%)}}
 #ink-panel .ia-ib{width:26px;height:26px;border-radius:8px;background:var(--ib-card);color:var(--ib-txt);flex:none}
 #ink-panel.mob .ia-ib{width:36px;height:36px;border-radius:11px}
 #ink-panel .ia-tabs{display:flex;gap:4px;margin-bottom:4px}
@@ -1911,13 +1915,303 @@ box-shadow:0 8px 24px rgba(255,105,180,.28),inset 0 1px 0 rgba(255,255,255,.5);-
         const y = Math.min(Math.max(0, cfg.pos.y), Math.max(0, innerHeight - r.height));
         u.style.left = x + 'px'; u.style.top = y + 'px'; u.style.bottom = 'auto'; u.style.right = 'auto';
     }
+    /* ---- Modo menina: cantadas rolando no lugar do título/versão ---- */
+    const CANTADAS = [
+        "Você tem um mapa? Porque eu me perdi no brilho dos seus olhos.",
+        "Você não é pescoço, mas mexeu com a minha cabeça.",
+        "Se você fosse um sanduíche, seu nome seria x-princesa!",
+        "Me chama de espírito obsessor e me deixa te possuir.",
+        "Eu perdi meu número de telefone, me empresta o seu?",
+        "Você não usa calcinha, você usa um porta-joias",
+        "Havia dois ursos o Beijaeu e o Mebeija, então, o Beijaeu morreu. Quem sobrou?",
+        "Seu nome é Tamara, né? Por que você TAMARAvilhosa.",
+        "Estou fazendo uma campanha de doação de órgãos! Então, não quer doar seu coração pra mim?",
+        "Você é o ovo que faltava na minha marmita.",
+        "Você não foi feita com velas, fitinhas vermelhas, mel e rosas, mas é uma simpatia!",
+        "Eu vou te dar um beijo. Se você não gostar, me devolve, tá?",
+        "Não me formei em cardiologia, mas quero cuidar do seu coração.",
+        "Você achou a minha chave, porque só ela abre o cadeado do seu coração.",
+        "Se te fizer sorrir e com o olhar te conquistar, não a deixa partir, chegou a hora de amar.",
+        "Nos detalhes da vida, você é o arco-íris que sempre enfeita o meu céu.",
+        "Fazer Enem, só se for pra entrar no seu coração.",
+        "No Whatsapp é ruim, deixa eu falar no seu ouvidinho.",
+        "Se nada é para sempre, então, vem ser meu nada.",
+        "Você é linda, mas está um pouco pálida: talvez seja cansaço de estar sempre passando no meu pensamento.",
+        "Se beleza brotasse em ovos você seria dona da granja inteira!",
+        "Você é o doce de leite que falta no meu churros.",
+        "Seu pai é dono da Tam? — Não, por quê? — Porque queria saber como é que faz pra ter um avião desse em casa!",
+        "Papo de urubu, pena de galinha, se você quer um beijinho dê uma risadinha.",
+        "Eu não sou o Luciano Huck, mas eu quero você no meu lar doce lar, sua linda!",
+        "Em cima da colina passa boi passa boiada, só saio da sua frente quando for minha namorada.",
+        "Você não é piso molhado, mas eu já tô pronto, pra te passar o rodo, sua linda!",
+        "Gata, eu rezo 1/3, para achar 1/2 De te levar pra 1/4!",
+        "Me chama de previsão do tempo e diz que tá rolando um clima.",
+        "Não sou traficante, mas eu quero a sua boca.",
+        "Meu nome é Arnaldo, mas pode me chamar de Naldo, pois quando eu te vi perdi o ar.",
+        "Seu pai é mecânico? Porque você é uma graxinha!",
+        "Meu nome é muito grande. Melhor você me chamar de “Amor”.",
+        "Você acredita em amor à primeira vista ou devo passar por aqui mais uma vez?",
+        "Gata, você não é semáforo, mas é de parar o trânsito.",
+        "Não sou o Papai Noel, mas eu poderia te proporcionar uma noite feliz.",
+        "Você não é GPS quebrado, mas me deixa sem rumo.",
+        "Você não é colesterol, mas afetou meu coração.",
+        "Fica comigo que eu faço esquecer o João. — Que João? — Viu só, já está esquecendo…",
+        "A pressa é sua inimiga? Porque eu ouvi dizer que a pressa é inimiga da perfeição.",
+        "Pode até ter muita gente interessada, mas só consigo achar você interessante.",
+        "Com você, parei de entender matemática. Sinto que somos sempre 1, apesar de sermos 2.",
+        "Você é tão desejada quanto uma sexta-feira!",
+        "Me perdi dentro de mim mesmo. E, quando me encontrei, foi com saudades de você.",
+        "Aquele chocolate que faz declaração: Serenata de Amor.",
+        "Black Friday do meu beijo: pede um e leva dois.",
+        "Pessoas tentam agradar pessoas com coisas de valores. Eu tento te agradar com tudo que sou. Tem algo mais valioso do que isso?",
+        "Você é poesia personificada.",
+        "Agora, eu entendo qual a razão de chamarem de borboletas no estômago.",
+        "Não existe amor à primeira vista. O que existe é a pessoa certa, no momento certo. Você por acaso estava lá!",
+        "Casando comigo você nunca vai pegar na enxada! Só vai ter que fazer amor desde a manhã até a madrugada!",
+        "Primeiramente, você é tão linda que não caga, lança bombom!",
+        "Eu não sou plano de saúde, mas, se você quiser, eu acabo com a sua carência, sua linda.",
+        "“Pulei na água até o umbigo, então, quer ficar comigo?”",
+        "Gata, me pega no colo? É que minha mãe vem vindo e eu queria contar que andei de avião.",
+        "Será que desligaram o wi-fi da horta? Meu chuchuzinho não está online.",
+        "Tem certeza de que você não é um extraterrestre? Porque você abduziu o meu coração.",
+        "Gata, seu nome é Camila? — Sim, por quê? — Então, vem “camilamber”!",
+        "Você tem um band-aid? Porque ralei meu joelho caindo de amores por você.",
+        "Se você está aqui, quem está gerenciando o céu?",
+        "Você é tão gata que se eu te matar de amor ainda sobram mais 6 vidas.",
+        "A economia grega anda tão ruim assim? — Por quê? — Porque até uma deusa grega como você veio morar aqui!",
+        "Se felicidade fosse dinheiro, você seria o Banco Central e eu seria o maior investidor.",
+        "Me passa o seu Twitter? O meu pai disse que eu devo seguir o meu sonho.",
+        "Gata, você deve comer Photoshop no café da manhã! Pra ser tão linda assim!",
+        "Desculpe, eu não já fiquei com você antes? Não? Vamos dar um jeito nisso.",
+        "Não sou manteiga de cacau, mas adoraria amaciar seus lábios.",
+        "Gata, que roupa feia, tira isso agora, sua linda!",
+        "Sabe qual a diferença entre você e um milhão de reais? É que um milhão de reais eu tenho na minha casa.",
+        "Vamos viajar o mundo usando meus créditos de desconto no Airbnb?",
+        "Você é sempre gostosa assim ou hoje tá fantasiada de lasanha?",
+        "Gata, você é uma paçoca? Porque só de sentir o cheiro já dá vontade de comer, sua linda!",
+        "Você tem brigadeiro? — Não. — Então, me dá um beijinho.",
+        "Você gosta de Toddy? Se você quiser, eu posso ser Toddynho seu.",
+        "Você é como um bom café da manhã… Dá energia para um novo dia.",
+        "Me chama de demaquilante e me deixa tirar seu batom.",
+        "Gata, por você eu dou até um stop no jogo online, bebê.",
+        "Eu até ficaria comigo mesmo, mas vou deixar essa oportunidade para você.",
+        "Você não é Receita Federal, mas poderia se declarar pra mim.",
+        "É melhor você controlar sua língua. Guarde ela aqui, junto da minha.",
+        "Gata, queria saber se doeu quando você caiu do céu.",
+        "O Natal está chegando, e eu não acredito em Papai Noel, mas queria que ele me desse você de presente de fim de ano.",
+        "O único mal que eu quero para você, é que a sua mãe seja minha sogra.",
+        "Eu só posso estar com problema de visão, porque eu não vejo a hora de te dar uns pega.",
+        "Você não é horário de verão, mas eu gostaria de perder uma hora com você.",
+        "Você não é GPS, mas queria encontrar o caminho das curvas do seu corpo.",
+        "Nessa brincadeira de dizer que te amei, muitas vezes já fui campeão. Agora, me dê a recompensa e deixe eu entrar no teu coração.",
+        "Quer saber uma verdade constrangedora? Eu nunca fui beijado por um anjo. Então, quer ser a primeira?",
+        "Soube que você é a chave perfeita para abrir a porta do meu coração.",
+        "Alguém sabe me dizer se Cicatricure já está curando as feridas do coração?",
+        "Eu não sou o Yoshi, mas daria minha vida por você.",
+        "Você não é o Pikachu, mas é sempre a minha primeira escolha.",
+        "Meu amor é igual level no Tibia, infinito.",
+        "Gata, desliga esse firewall e me deixa entrar em você.",
+        "Você não é o Death Note, mas também causa ataque cardíaco.",
+        "Quando eu te vi até joguei fora o meu Memory Card, você é inesquecível.",
+        "Você vai receber a carta de Hogwarts, porque o que você faz com o meu coração só pode ser bruxaria.",
+        "Meu sonho era ser o Batman para que você me chamasse sempre que precisasse de alguém. Como não tenho bat-sinal, vem de zap!",
+        "Você conhece o Mario? Então, vem ser minha Peach!",
+        "Eu sei que não sou herói da DC, mas você, com certeza, é, porque olha… que Maravilha.",
+        "Não sou o Stephen King, mas meu coração fica iluminado quando você olha pra mim.",
+        "Você não é Tesseract, entretanto, é a única pessoa capaz de abrir as portas do meu coração.",
+        "Quando eu te vi deu tela azul…",
+        "Me chama de Ash Ketchum, que eu te mostro meu Pikachu.",
+        "Não sei sua composição corporal, mas chutaria lítio, neodímio, oxigênio e carbono. Sabe por quê? Porque você é Li-Nd-O-NA.",
+        "Nosso amor é de outro mundo, porque mesmo fora da gravidade da Terra, eu ainda ficaria caidinho por você.",
+        "Gata, entre Star Wars e Star Trek, eu queria mesmo era star com você.",
+        "Se você fosse um algoritmo, seria o mais eficiente em roubar meu coração",
+        "Gata, você é a senha do meu wi-fi, porque, sempre que te vejo, minha conexão fica mais forte.",
+        "Você não é o Google, mas tem tudo o que eu procuro, sua linda!",
+        "Desculpa, não te ouvi. Ah, você não falou nada? E não quer começar a falar comigo agora?",
+        "Sempre fui bom em língua portuguesa, mas depois que te conheci notei que o dicionário ainda não tem uma palavra que defina com exatidão a tua perfeição.",
+        "A previsão do meu horóscopo acertou em cheio. Ela dizia que hoje seria um dia de grandes emoções por causa da entrada de um novo amor na minha vida.",
+        "Vou guardar para sempre esse dia na memória, porque foi o dia que eu conheci você, o amor da minha vida.",
+        "Baixou a temperatura? Não? É que desde que você se aproximou de mim senti tantos arrepios.",
+        "Hoje escutei uma música que me lembrou a que vai tocar no nosso casamento.",
+        "Ei, o cupido te ligou? Ele queria pedir para você devolver o meu coração.",
+        "Eu não sou dinheiro, mas posso te fazer feliz!",
+        "Meu amor por você é igual à obra do governo: nunca acaba.",
+        "Você é muito fofo(a), mas temos um problema: você gosta ou não de passas?",
+        "O meu telefone continua corrigindo automaticamente seu nome para “Amor”. Acredito que seja um sinal.",
+        "Você não é massagem cardíaca, mas reanima o meu coração!",
+        "Eu queria ser grego, mas grego eu não posso ser, porque grego tem várias deusas e minha única deusa é você.",
+        "Vontade de fazer aquilo que começa com s: ser o amor da sua vida.",
+        "Com licença, você teria um amigo em comum que pudesse nos apresentar?",
+        "Está vendo este meu amigo? Então, ele quer saber se você me acha fofo(a).",
+        "Existe um vazio no meu coração que tem as suas medidas.",
+        "Se preto fosse paixão e branco fosse carinho, o que eu sinto por você seria xadrezinho.",
+        "Posso tirar uma foto sua? É para mostrar ao Papai Noel o que eu quero de presente.",
+        "Da próxima vez que alguém me perguntar qual é meu tipo, irei mostrar a sua foto de perfil.",
+        "Está calor, né? Mas não é de hoje que eu me derreto por você.",
+        "Eu tenho uma memória terrível. Felizmente, você é inesquecível.",
+        "Não sou poeta, mas seus olhos são a inspiração que eu precisava.",
+        "Quando estou ao seu lado, sinto como se estivesse flutuando nas nuvens.",
+        "Você é a definição perfeita de fofura. Não consigo resistir!",
+        "Seu sorriso é como um raio de sol em um dia chuvoso. Não consigo evitar sorrir quando estou perto de você.",
+        "Sua mãe é uma rosa e seu pai um jasmim, admiro os dois porque fizeram você especialmente para mim.",
+        "Você pode não ser o meu primeiro/minha primeira, mas pode ser meu último/minha última.",
+        "Estou escrevendo um artigo sobre as coisas boas da vida. Posso te incluir nele?",
+        "Sua presença é tão cativante que o tempo parece parar quando você entra em uma sala.",
+        "A sua companhia ilumina qualquer ambiente.",
+        "Em um mundo repleto de imitações, você é uma obra-prima original que impressiona a todos ao redor.",
+        "Seu charme e graça são como uma dança delicada que encanta a todos que têm o privilégio de testemunhar.",
+        "Seus olhos brilham como safiras preciosas, e sua voz é como um suave acorde de violino.",
+        "Você é uma poesia em movimento, sua delicadeza encanta a todos ao seu redor.",
+        "Em um mundo ruidoso, sua elegância se destaca em um sussurro suave, conquistando corações sem esforço.",
+        "Nada na vida é perfeito, mas você é o que mais se aproxima da perfeição.",
+        "Seu pai é astronauta? Porque você é uma estrela.",
+        "Você é de Brasília? Porque é um tesouro nacional.",
+        "Ei, acabei de notar que você me notou. Então só queria avisar que notei você também.",
+        "Onde é que eu deixo meu currículo para concorrer à vaga de amor da sua vida?",
+        "Seu nome é VIVO? Porque você é tudo o que eu mais quero.",
+        "Você acredita em amor à primeira vista? Nem eu. Espera, deixa eu te olhar de novo.",
+        "Gata, você não é enquete do Datafolha, mas me deixa com a curiosidade de saber o resultado.",
+        "Você é a tradução da palavra perfeição no dicionário.",
+        "Eu não sou jardineiro, mas eu quero cuidar do seu jardim.",
+        "Você é o arco-íris da minha vida.",
+        "Me chama de outdoor e deixa eu fazer propaganda da sua beleza.",
+        "Você é o meu mundo, mas eu quero ser o seu universo.",
+        "Seu sorriso é a chave para o meu coração.",
+        "Você é tão linda que até as flores invejam você.",
+        "Me dê uma chance de te fazer feliz.",
+        "Você é a música que eu mais gosto de ouvir.",
+        "Você é a molécula de hidrogênio? Porque sem você não posso existir.",
+        "Gata, eu sou um elétron e você é um próton. Nós dois juntos formamos um átomo de amor.",
+        "Se eu fosse um ácido nucleico, você seria a minha hélice complementar.",
+        "Você é uma equação matemática? Porque sem você não faz sentido.",
+        "Querida, eu sou como o DNA helicase, eu quero desembrulhar seu código genético.",
+        "Gato, você é um neutrino? Porque você é extremamente rápido e passa por mim sem nenhum impedimento.",
+        "Você é um exoplaneta? Porque eu quero estudar tudo sobre você.",
+        "Você é a minha constante de Planck. Sem você, nada faz sentido.",
+        "Você é a hipótese de Riemann? Porque eu não posso deixar de pensar em você.",
+        "Você é como um campo magnético, eu sou a carga elétrica e juntos nós podemos criar algo incrível.",
+        "Gato, eu sou um químico e você é meu experimento favorito.",
+        "Você é como uma molécula de hidrocarboneto, simples, mas com um potencial ilimitado.",
+        "Você é uma força fundamental da natureza? Porque eu não posso resistir a você.",
+        "Você é uma molécula aromática? Porque você é excepcionalmente bonita e única.",
+        "Gata, você é um fóton? Porque você ilumina meu mundo.",
+        "Você é tão linda(o) que acelera meu batimento cardíaco mais rápido do que um reator nuclear.",
+        "Você é o carbono? Porque eu sinto uma ligação especial entre nós.",
+        "Meu amor por você é como a entropia, sempre aumentando e nunca diminuindo.",
+        "Você é o potencial de ação do meu neurônio, porque me deixa eletrizado(a) sempre que te vejo.",
+        "Se você fosse um fóssil, eu te desenterraria e te chamaria de tesouro, sua linda.",
+        "Se eu fosse uma enzima, seria helicase para despir seu DNA e replicar nosso amor.",
+        "Você deve ser a força gravitacional, porque você atrai meu olhar onde quer que esteja.",
+        "Meu amor por você é como pi: irracional, infinito e impossível de ser calculado.",
+        "Eu só quero que você saiba, que eu estou pensando em você agora mesmo.",
+        "Se você me der um beijo eu te dou um doce, um doce, um doce",
+        "Você é a luz que ilumina o meu caminho, é o amor que eu sinto todo dia",
+        "Você é como uma canção de amor, que não sai da minha cabeça",
+        "Você é a música que eu quero tocar, a razão do meu cantar",
+        "Você é a minha melodia preferida, não consigo tirar você da minha mente",
+        "Você é como uma música que eu não consigo parar de ouvir, sempre presente em minha mente",
+        "Você é a letra mais bonita que eu já escrevi, a canção que eu sempre quis ouvir",
+        "Você é o meu ritmo, a batida do meu coração, a música que me faz feliz",
+        "Você é como uma sinfonia perfeita, cada nota, cada acorde, é como música para os meus ouvidos",
+        "Você é como uma música que toca no meu coração, que me faz sorrir, que me faz sonhar",
+        "Você é a trilha sonora da minha vida, a melodia que eu quero cantar para sempre",
+        "Você é como uma música que eu não consigo parar de ouvir, que me faz dançar, que me faz feliz",
+        "Você é a música que eu sempre quis escrever, a canção que eu sempre quis cantar",
+        "Você é como uma música que me faz sentir vivo, que me faz sonhar, que me faz amar",
+        "Você é o meu filme favorito, não consigo parar de assistir a você.",
+        "Você é o meu par perfeito para assistir ao filme ‘Um Amor Para Recordar’",
+        "Eu gostaria de convidá-lo para assistir a um filme comigo. Qualquer um, desde que você esteja lá.",
+        "Você é a minha cena favorita em cada filme",
+        "Você é tão incrível que eu me sinto como se estivesse em um filme de ação toda vez que estou com você",
+        "Eu queria ser a sua mocinha em um filme de aventura",
+        "Você é o meu final feliz em cada filme romântico",
+        "Você é a minha ‘Era Uma Vez’ preferida. E eu adoraria ser o seu ‘Felizes Para Sempre’",
+        "Gato, você é tão lindo que poderia ser o protagonista de qualquer filme",
+        "Você é o meu filme de terror favorito, porque eu sempre tenho um susto quando você chega perto.",
+        "Eu poderia passar o dia inteiro assistindo a filmes com você. Vamos tentar isso?",
+        "Gato, eu adoraria ser a protagonista do seu filme de amor",
+        "Você é o meu ator favorito, e eu adoraria ter uma cena romântica com você",
+        "Gata, você é tão incrível que eu sinto como se estivesse em um filme de comédia romântica toda vez que estou com você",
+        "Você é o meu herói de ação preferido, e eu adoraria ser a sua parceira em qualquer missão",
+        "Você é um sol em um dia de chuva.",
+        "Com você, o meu clima interno está sempre ensolarado.",
+        "Não precisa chover, só quero você molhada(o) de suor.",
+        "Você é como um arco-íris em um dia cinzento.",
+        "Você me faz sentir como se estivesse em um dia ensolarado mesmo quando está chovendo.",
+        "Com você, o clima sempre fica quente.",
+        "Você é a brisa fresca que eu preciso em um dia quente.",
+        "Você é como uma tempestade de verão, intensa e inesquecível.",
+        "Você é o meu clima ideal para qualquer dia.",
+        "Com você, eu não preciso de sol para me aquecer.",
+        "Você é como uma nevasca, linda e mágica.",
+        "Com você, o inverno se torna a minha estação favorita.",
+        "Você é a brisa suave que me acalma em um dia quente.",
+        "Com você, até mesmo uma tempestade fica tranquila.",
+        "Você é como um raio de sol em um dia nublado.",
+        "Seu sorriso é como a resposta certa na prova, me faz sentir um verdadeiro vencedor.",
+        "Você é como o lápis HB, sempre presente nas minhas anotações.",
+        "Com você, eu me sinto como em uma aula de química, atraído pela sua química pessoal.",
+        "Com você, eu sinto que posso conquistar qualquer coisa, assim como conquistei minha formatura.",
+        "Com você, eu me sinto como em uma aula de matemática, encontrando a solução perfeita.",
+        "Com você, eu me sinto como em uma aula de artes, apreciando a beleza de cada detalhe.",
+        "Você é a luz do meu palco, iluminando todos os meus passos.",
+        "Com você, eu me sinto como em uma peça de Shakespeare, vivendo um amor proibido.",
+        "Você é como um ator de primeira classe, me fazendo querer aplaudir cada gesto seu.",
+        "Você é como uma obra-prima teatral, capaz de me fazer sentir emoções intensas.",
+        "Você é como uma trilha sonora emocionante, capaz de me fazer sentir cada nota.",
+        "Seu sorriso é como o motor de um carro, me faz acelerar o coração.",
+        "Você é como uma Harley Davidson, intensa e cheia de estilo.",
+        "Você é como uma Lamborghini, exótica e fascinante.",
+        "Se eu tivesse que escolher entre ter uma Ferrari e passar um tempo com você, escolheria você. Porque a única coisa melhor do que uma Ferrari é uma companhia maravilhosa."
+    ];
+    const TICK = { order: [], i: 0, on: false, t: 0 };
+    const tickNext = () => {
+        if (TICK.i >= TICK.order.length) {
+            TICK.order = CANTADAS.map((_, k) => k);
+            for (let k = TICK.order.length - 1; k > 0; k--) { const j = Math.floor(Math.random() * (k + 1)); [TICK.order[k], TICK.order[j]] = [TICK.order[j], TICK.order[k]]; }
+            TICK.i = 0;
+        }
+        return CANTADAS[TICK.order[TICK.i++]];
+    };
+    function tickStart() {
+        const t = $('ink-title'); if (!t) return;
+        if (TICK.on && t.querySelector('.ia-tick-in')) return;
+        TICK.on = true;
+        t.textContent = '';
+        t.classList.add('tick');
+        const sp = document.createElement('span');
+        sp.className = 'ia-tick-in';
+        t.appendChild(sp);
+        let reduce = false; try { reduce = matchMedia('(prefers-reduced-motion:reduce)').matches; } catch (e) { }
+        const show = () => {
+            if (!TICK.on || !sp.isConnected) return;
+            const s = tickNext();
+            sp.textContent = s;
+            sp.style.animation = 'none'; void sp.offsetWidth;
+            if (reduce) { sp.style.paddingLeft = '0'; TICK.t = setTimeout(show, 6000); }
+            else sp.style.animation = `ink-tick ${Math.max(9, (s.length * 5.5 + 170) / 38).toFixed(1)}s linear 1`;
+        };
+        sp.addEventListener('animationend', show);
+        show();
+    }
+    function tickStop() {
+        TICK.on = false; clearTimeout(TICK.t);
+        const t = $('ink-title'); if (!t) return;
+        t.classList.remove('tick');
+        t.textContent = '';
+    }
+
     function applyTheme() {
         const u = $('ink-panel'); if (!u) return;
         u.classList.toggle('boy', !cfg.girl);
         SKINS.forEach(k => u.classList.toggle('skin-' + k.id, cfg.girl && curSkin().id === k.id));
         $$('[data-skin]', u).forEach(b => b.classList.toggle('on', b.dataset.skin === curSkin().id));
         const t = $('ink-title');
-        if (t) t.textContent = (cfg.girl ? curSkin().nome : 'Ink') + ' ' + VERSION;
+        if (t) {
+            t.title = (cfg.girl ? curSkin().nome : 'Ink') + ' ' + VERSION;
+            if (cfg.girl) tickStart();
+            else { tickStop(); t.textContent = (cfg.girl ? curSkin().nome : 'Ink') + ' ' + VERSION; }
+        }
         const g = $('ink-girl');
         if (g) g.classList.toggle('on', cfg.girl);
     }
