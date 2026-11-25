@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Ink Leitor (leitura automática)
+// @name         Ink Leitor
 // @namespace    ink-leitor
-// @version      3.3.1
-// @description  Leitura automática, ordem das bolhas e modo menina (skins Gatinha/Lobo) para ink.app.br
+// @version      4.0.0
+// @description  Leitor automático, OCR, TTS e ordenador mangá/HQ para ink.app.br
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
 // @run-at       document-idle
@@ -10,36 +10,67 @@
 // @updateURL    https://raw.githubusercontent.com/lucateli/ink-atualizacoes/main/content.js
 // @downloadURL  https://raw.githubusercontent.com/lucateli/ink-atualizacoes/main/content.js
 // ==/UserScript==
-/* =====================================================================
-   REGRA OBRIGATÓRIA PARA QUALQUER IA / PESSOA QUE EDITAR ESTE ARQUIVO:
-   - O arquivo DEVE se chamar SEMPRE "content.js" (nunca leitor.js nem outro nome).
-   - @updateURL e @downloadURL DEVEM apontar para .../ink-atualizacoes/main/content.js
-   - Ao entregar uma nova versão, aumente @version e INK_VERSION e entregue o arquivo como content.js.
-   ===================================================================== */
 (() => {
-    if (window.__inkLeitorV3) return;
-    window.__inkLeitorV3 = true;
-    const INK_VERSION = 'v3.3.1';
-    try { console.info('[Ink] leitor ' + INK_VERSION + ' carregado'); } catch (e) { }
+    'use strict';
+    if (window.__ink) return;
+    window.__ink = true;
 
-    /* =====================================================================
-       PATCH ANDROID v2 — remove o popup/tela preta SEM quebrar o layout do site
-       (v1 apagava qualquer elemento fixed/absolute "transparente" — inclusive
-       o conteúdo do próprio site — e forçava position:static no html/body)
-       ===================================================================== */
-    (function androidFixes() {
+    const VERSION = '4.0.0';
+    const IS_MOBILE = (() => {
+        try { return matchMedia('(pointer:coarse)').matches || innerWidth < 700; }
+        catch (e) { return innerWidth < 700; }
+    })();
+
+    /* ================================================================== *
+     *  1. UTILS
+     * ================================================================== */
+    const $ = id => document.getElementById(id);
+    const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+    const rnd = (a, b) => a + Math.random() * (b - a);
+    const gauss = () => { let u = 0, v = 0; while (!u) u = Math.random(); while (!v) v = Math.random(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); };
+
+    /* ================================================================== *
+     *  2. CONFIG
+     * ================================================================== */
+    const CFG_KEY = 'ink_cfg_v4';
+    const DEFAULTS = {
+        speed: 1.5, auto: true, voice: false, vrate: 1, vname: '',
+        manga: false, method: '', methodM: '',
+        girl: true, skin: 'gato',
+        eye: false, eyeLvl: 0.25,
+        perf: null, anx: 0, metaGoal: 10,
+        pos: null, min: false,
+        musicUrl: '', musicKey: '', musicVol: 0.6,
+    };
+    const cfg = { ...DEFAULTS };
+    try { Object.assign(cfg, JSON.parse(localStorage.getItem(CFG_KEY) || '{}')); } catch (e) { }
+
+    let _saveT;
+    const saveCfg = () => { clearTimeout(_saveT); _saveT = setTimeout(() => { try { localStorage.setItem(CFG_KEY, JSON.stringify(cfg)); } catch (e) { } }, 150); };
+    const isPerf = () => cfg.perf == null ? IS_MOBILE : !!cfg.perf;
+
+    const SKINS = [
+        { id: 'gato', nome: 'Gatinha', emo: '🐱' },
+        { id: 'lobo', nome: 'Lobo', emo: '🐺' },
+    ];
+    const curSkin = () => SKINS.find(s => s.id === cfg.skin) || SKINS[0];
+
+    const setStatus = msg => { const el = $('ink-status'); if (el && el.textContent !== msg) el.textContent = msg; };
+
+    /* ================================================================== *
+     *  3. ANDROID POPUP FIX
+     * ================================================================== */
+    (() => {
         const KEY = 'serei sempre legal';
-        const LOCK_TOKENS = new Set(['modal-open', 'no-scroll', 'locked', 'overflow-hidden', 'is-locked', 'scroll-lock', 'blur']);
-        const MINE = '#ink-auto-ui,#ink-eye,#ink-ord-bar,#ink-ord-st,#ink-dbg';
+        const LOCKS = new Set(['modal-open', 'no-scroll', 'locked', 'overflow-hidden', 'is-locked', 'scroll-lock', 'blur']);
+        const MINE = '#ink-panel,#ink-eye,#ink-order,#ink-dbg';
         let popupAt = 0, timer = 0, lastRun = 0;
 
         const isMine = el => !!(el && el.closest && el.closest(MINE));
 
-        // Acha o texto do popup (ignora <script>/<style>) e devolve o elemento onde ele está
-        function findPopupText() {
-            const root = document.body;
-            if (!root) return null;
-            const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+        const findPopup = () => {
+            const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
                 acceptNode: n => {
                     const p = n.parentElement;
                     if (!p || /^(SCRIPT|STYLE|NOSCRIPT|TEXTAREA)$/.test(p.tagName)) return NodeFilter.FILTER_REJECT;
@@ -47,17 +78,16 @@
                 }
             });
             let n;
-            while ((n = walker.nextNode())) {
+            while ((n = w.nextNode())) {
                 if (n.nodeValue && n.nodeValue.toLowerCase().includes(KEY) && !isMine(n.parentElement)) return n.parentElement;
             }
             return null;
-        }
+        };
 
-        // Sobe até o contêiner mais externo do popup (fixed / dialog), sem nunca pegar o site inteiro
-        function popupContainer(hit) {
-            const ui = document.getElementById('ink-auto-ui');
+        const containerOf = hit => {
+            const ui = $('ink-panel');
             let best = null, el = hit;
-            for (let i = 0; el && el !== document.body && el !== document.documentElement && i < 12; i++, el = el.parentElement) {
+            for (let i = 0; el && el !== document.body && i < 12; i++, el = el.parentElement) {
                 if (ui && el.contains(ui)) break;
                 if (el.querySelector && el.querySelector('canvas,video,.comic-page,.bz-order')) break;
                 if (el.querySelectorAll && el.querySelectorAll('img').length > 3) break;
@@ -66,74 +96,63 @@
                 if (el.tagName === 'DIALOG' || el.getAttribute('role') === 'dialog' || el.getAttribute('aria-modal') === 'true' || pos === 'fixed') best = el;
             }
             if (best) return best;
-            // fallback: primeiro DIV/SECTION acima do texto
-            for (el = hit; el && el !== document.body && el !== document.documentElement; el = el.parentElement) {
+            for (el = hit; el && el !== document.body; el = el.parentElement) {
                 if (el.tagName === 'DIV' || el.tagName === 'SECTION') return el;
             }
             return null;
-        }
-
-        function removePopup() {
-            const hit = findPopupText();
-            if (!hit) return false;
-            const box = popupContainer(hit);
-            if (!box) return false;
-            box.remove();
-            return true;
-        }
+        };
 
         const isDark = c => {
             const m = /rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)(?:[,\s/]+([\d.]+))?/.exec(c || '');
             if (!m) return false;
             const a = m[4] == null ? 1 : parseFloat(m[4]);
-            return a >= 0.3 && (+m[1] + +m[2] + +m[3]) < 120;   // transparente (alpha 0) NÃO conta
+            return a >= 0.3 && (+m[1] + +m[2] + +m[3]) < 120;
         };
 
-        // Remove só "cortinas": vazias, fixed, cobrindo ~a tela toda e escuras
-        function killBackdrops() {
-            document.querySelectorAll('body > *, body > * > *').forEach(el => {
+        const killBackdrops = () => {
+            $$('body > *, body > * > *').forEach(el => {
                 if (isMine(el) || el.childElementCount > 0 || (el.textContent || '').trim()) return;
                 let cs; try { cs = getComputedStyle(el); } catch (e) { return; }
                 if (cs.position !== 'fixed' || !isDark(cs.backgroundColor)) return;
                 const r = el.getBoundingClientRect();
                 if (r.width >= innerWidth * 0.9 && r.height >= innerHeight * 0.9) el.remove();
             });
-        }
+        };
 
-        // Só desfaz o que o popup travou (evidência inline/classe) — não força nada no resto
-        function unlock() {
-            const html = document.documentElement, body = document.body;
-            if (!html || !body) return;
-            [html, body].forEach(el => {
+        const unlock = () => {
+            [document.documentElement, document.body].forEach(el => {
                 const s = el.style;
                 if (/hidden|clip/.test(s.overflow + ' ' + s.overflowY)) { s.removeProperty('overflow'); s.removeProperty('overflow-y'); }
                 if (s.pointerEvents === 'none') s.removeProperty('pointer-events');
                 if (s.touchAction === 'none') s.removeProperty('touch-action');
                 if (s.filter && /blur/.test(s.filter)) s.removeProperty('filter');
                 if (typeof el.className === 'string' && el.className) {
-                    const keep = el.className.split(/\s+/).filter(t => t && !LOCK_TOKENS.has(t.toLowerCase()));
+                    const keep = el.className.split(/\s+/).filter(t => t && !LOCKS.has(t.toLowerCase()));
                     const nc = keep.join(' ');
                     if (nc !== el.className.trim()) el.className = nc;
                 }
             });
-            if (body.style.position === 'fixed') {      // padrão "scroll lock": restaura a posição de rolagem
-                const top = parseInt(body.style.top || '0', 10) || 0;
-                ['position', 'top', 'width', 'left', 'right'].forEach(p => body.style.removeProperty(p));
+            if (document.body.style.position === 'fixed') {
+                const top = parseInt(document.body.style.top || '0', 10) || 0;
+                ['position', 'top', 'width', 'left', 'right'].forEach(p => document.body.style.removeProperty(p));
                 try { scrollTo(0, -top); } catch (e) { }
             }
-        }
+        };
 
-        function tick() {
-            if (removePopup()) popupAt = Date.now();
+        const tick = () => {
+            const hit = findPopup();
+            if (hit) {
+                const box = containerOf(hit);
+                if (box) { box.remove(); popupAt = Date.now(); }
+            }
             if (Date.now() - popupAt < 6000) { killBackdrops(); unlock(); }
-        }
+        };
 
-        // Debounce: no máx. 1 execução a cada ~600 ms (evita travar o celular)
-        function schedule() {
+        const schedule = () => {
             if (timer) return;
             timer = setTimeout(() => { timer = 0; lastRun = Date.now(); try { tick(); } catch (e) { } },
                 Math.max(50, 600 - (Date.now() - lastRun)));
-        }
+        };
 
         const hasKey = n => {
             try {
@@ -147,62 +166,35 @@
             new MutationObserver(muts => {
                 if (Date.now() - popupAt < 6000) { schedule(); return; }
                 for (const m of muts) for (const n of m.addedNodes) if (hasKey(n)) { schedule(); return; }
-            }).observe(document.documentElement, { childList: true, subtree: true });   // sem 'attributes' → sem loop
-            setInterval(schedule, 3000);                                                // backup leve
+            }).observe(document.documentElement, { childList: true, subtree: true });
+            setInterval(schedule, 3000);
         };
         if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
         else start();
     })();
 
-    /* =====================================================================
-       COMUM
-       ===================================================================== */
-    const sleep = ms => new Promise(r => setTimeout(r, ms));
-    const rnd = (a, b) => a + Math.random() * (b - a);
-    const gauss = () => { let u = 0, v = 0; while (!u) u = Math.random(); while (!v) v = Math.random(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); };
-    const MOBILE = (() => { try { return matchMedia('(pointer:coarse)').matches || innerWidth < 700; } catch (e) { return innerWidth < 700; } })();
-
-    /* =====================================================================
-       PARTE A — LEITURA AUTOMÁTICA (só em /ler/...)
-       ===================================================================== */
-    const LS = 'ink_autoread_cfg_v3';
-    let cfg = { speed: 1.5, method: '', methodM: '', manga: false, min: null, eye: false, eyeLvl: 0.25, pos: null, auto: true, voice: false, vrate: 1, vname: '', dbg: false, perf: null, bin: false, bin1: false, smooth: true, metaGoal: 10, girl: true, anx: 0, skin: 'gato', musicUrl: '', musicKey: '', musicVol: 0.6 };
-    try { Object.assign(cfg, JSON.parse(localStorage.getItem(LS) || '{}')); } catch (e) { }
-    cfg.smooth = true;
-    cfg.anx = cfg.anx === true ? 1 : (+cfg.anx === 1 || +cfg.anx === 2 ? +cfg.anx : 0);
-    // skins do modo menina (para criar outra: some um item aqui + um bloco CSS .skin-<id> no INK_CSS)
-    const SKINS = [
-        { id: 'gato', nome: 'Gatinha', emo: '🐱', mascote: '🐾', msg: 'Skin Gatinha 🐱' },
-        { id: 'lobo', nome: 'Lobo', emo: '🐺', mascote: '🐺', msg: 'Skin Lobo 🐺 Auuuu!' }
-    ];
-    const curSkin = () => SKINS.find(k => k.id === cfg.skin) || SKINS[0];
-    const mascot = () => curSkin().mascote;
-    const isPerf = () => cfg.perf == null ? MOBILE : !!cfg.perf;
-    let saveT = 0;
-    const save = () => { clearTimeout(saveT); saveT = setTimeout(() => { try { localStorage.setItem(LS, JSON.stringify(cfg)); } catch (e) { } }, 150); };
-
-    let running = false, runId = 0, lastUser = 0;
-    const alive = id => running && id === runId;
-    const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 3, 4, 5, 6];
-
+    /* ================================================================== *
+     *  4. DETECÇÃO DE ESTADO (balão/página)
+     * ================================================================== */
     const RX_CTR = /^\s*(\d+)\s*\/\s*(\d+)\s*[·•|-]\s*(\d+)\s*\/\s*(\d+)\s*$/;
     const RX_PG = /^\s*(\d+)\s*\/\s*(\d+)\s*$/;
     const RX_PCT = /^\s*(\d{1,3})\s*%\s*$/;
-    const cache = { ctr: null, pg: null, pct: null, t: 0 };
+    const _cache = { ctr: null, pg: null, pct: null, t: 0 };
+    const _bad = new WeakSet();
+    let _frozen = 0;
 
-    const badEl = new WeakSet();
-    let ctrFrozen = 0;
     const visible = n => { const r = n.getBoundingClientRect(); return r.width > 0 && r.height > 0 && r.height < 120 && r.width < 320; };
     const sane = {
         ctr: m => +m[1] >= 1 && +m[1] <= +m[2] && +m[3] >= 1 && +m[3] <= +m[4],
         pg: m => +m[2] > 1 && +m[1] >= 1 && +m[1] <= +m[2],
         pct: m => +m[1] >= 0 && +m[1] <= 100
     };
-    function scan() {
-        const mine = document.getElementById('ink-auto-ui');
+
+    const scanState = () => {
+        const mine = $('ink-panel');
         let c = null, g = null, p = null;
-        for (const n of document.querySelectorAll('div,span,p,button')) {
-            if (n.childElementCount > 3 || (mine && mine.contains(n)) || badEl.has(n) || !visible(n)) continue;
+        for (const n of $$('div,span,p,button')) {
+            if (n.childElementCount > 3 || (mine && mine.contains(n)) || _bad.has(n) || !visible(n)) continue;
             const t = n.textContent;
             if (!t || t.length > 30) continue;
             let m;
@@ -211,58 +203,62 @@
             else if ((m = RX_PCT.exec(t)) && sane.pct(m)) { if (!p || p.contains(n)) p = n; }
         }
         if (c && g && c.contains(g)) g = null;
-        cache.ctr = c; cache.pg = g; cache.pct = p;
-    }
+        _cache.ctr = c; _cache.pg = g; _cache.pct = p;
+    };
+
     const stale = (el, rx) => !el || !el.isConnected || !rx.test(el.textContent || '') || !visible(el);
 
-    function camSig() {
+    const camSig = () => {
         let list;
         try { list = document.elementsFromPoint(innerWidth / 2, innerHeight * 0.45); } catch (e) { return ''; }
         const out = [];
         const maxN = isPerf() ? 2 : 5;
         for (const e of list) {
-            if (e === document.documentElement || e === document.body || e.closest('#ink-auto-ui,#ink-eye')) continue;
+            if (e === document.documentElement || e === document.body || e.closest('#ink-panel,#ink-eye')) continue;
             const r = e.getBoundingClientRect();
-            if (isPerf()) {
-                out.push((r.left | 0) + ',' + (r.top | 0) + ',' + (r.width | 0) + ',' + (r.height | 0));
-            } else {
+            if (isPerf()) out.push(`${r.left | 0},${r.top | 0},${r.width | 0},${r.height | 0}`);
+            else {
                 const cs = getComputedStyle(e);
-                out.push((r.left | 0) + ',' + (r.top | 0) + ',' + (r.width | 0) + ',' + (r.height | 0) + ',' + cs.transform + ',' + cs.backgroundPosition + ',' + cs.objectPosition);
+                out.push(`${r.left | 0},${r.top | 0},${r.width | 0},${r.height | 0},${cs.transform},${cs.backgroundPosition},${cs.objectPosition}`);
             }
             if (out.length >= maxN) break;
         }
-        return out.join(';') + '|' + (scrollX | 0) + ',' + (scrollY | 0);
-    }
+        return out.join(';') + `|${scrollX | 0},${scrollY | 0}`;
+    };
 
-    function readState() {
+    const readState = () => {
         const now = performance.now();
         const reScanMs = isPerf() ? 2800 : 1500;
-        const bad = (cache.ctr && stale(cache.ctr, RX_CTR)) || (cache.pg && stale(cache.pg, RX_PG)) || (cache.pct && stale(cache.pct, RX_PCT));
-        const none = !cache.ctr && !cache.pg && !cache.pct;
-        if ((bad && now - cache.t > reScanMs) || (none && now - cache.t > reScanMs * 3) || now - cache.t > 8000) {
-            scan(); cache.t = now;
+        const bad = (_cache.ctr && stale(_cache.ctr, RX_CTR)) || (_cache.pg && stale(_cache.pg, RX_PG)) || (_cache.pct && stale(_cache.pct, RX_PCT));
+        const none = !_cache.ctr && !_cache.pg && !_cache.pct;
+        if ((bad && now - _cache.t > reScanMs) || (none && now - _cache.t > reScanMs * 3) || now - _cache.t > 8000) {
+            scanState(); _cache.t = now;
         }
         const o = {};
         let m;
-        if (cache.ctr && (m = RX_CTR.exec(cache.ctr.textContent)) && sane.ctr(m)) { o.b = +m[1]; o.bt = +m[2]; o.p = +m[3]; o.pt = +m[4]; }
-        if (cache.pg && (m = RX_PG.exec(cache.pg.textContent)) && sane.pg(m)) { o.pg = +m[1]; o.pgt = +m[2]; }
-        if (cache.pct && (m = RX_PCT.exec(cache.pct.textContent)) && sane.pct(m)) { o.pct = +m[1]; }
+        if (_cache.ctr && (m = RX_CTR.exec(_cache.ctr.textContent)) && sane.ctr(m)) { o.b = +m[1]; o.bt = +m[2]; o.p = +m[3]; o.pt = +m[4]; }
+        if (_cache.pg && (m = RX_PG.exec(_cache.pg.textContent)) && sane.pg(m)) { o.pg = +m[1]; o.pgt = +m[2]; }
+        if (_cache.pct && (m = RX_PCT.exec(_cache.pct.textContent)) && sane.pct(m)) { o.pct = +m[1]; }
         o.cam = camSig();
         o.sig = [o.b, o.bt, o.p, o.pt, o.pg, o.pgt, o.pct, o.cam].join('|');
         return o;
-    }
+    };
     const atEnd = st => st.p != null && st.p === st.pt && st.b === st.bt;
     const nearEnd = st => atEnd(st) || (st.pg != null && st.pg === st.pgt) || (st.pct != null && st.pct >= 98);
-    const label = st => st.b != null ? `balão ${st.b}/${st.bt} · pág ${st.p}/${st.pt}` : (st.pg != null ? `pág ${st.pg}/${st.pgt}` : (st.pct != null ? `${st.pct}%` : 'lendo'));
+    const stateLabel = st => st.b != null ? `balão ${st.b}/${st.bt} · pág ${st.p}/${st.pt}` : (st.pg != null ? `pág ${st.pg}/${st.pgt}` : (st.pct != null ? `${st.pct}%` : 'lendo'));
 
-    function sendKey(k, code, kc) {
+    /* ================================================================== *
+     *  5. NAVEGAÇÃO (métodos de avançar)
+     * ================================================================== */
+    const sendKey = (k, code, kc) => {
         const t = document.activeElement || document.body;
         const o = { key: k, code, keyCode: kc, which: kc, bubbles: true, cancelable: true };
         t.dispatchEvent(new KeyboardEvent('keydown', o));
         t.dispatchEvent(new KeyboardEvent('keyup', o));
         return true;
-    }
-    function stageRect() {
+    };
+
+    const stageRect = () => {
         let e = document.elementFromPoint(innerWidth / 2, innerHeight * 0.45);
         while (e && e !== document.body) {
             const r = e.getBoundingClientRect();
@@ -270,16 +266,18 @@
             e = e.parentElement;
         }
         return { left: innerWidth * .05, width: innerWidth * .9, top: innerHeight * .2, height: innerHeight * .5 };
-    }
-    function clickAt(x, y) {
+    };
+
+    const clickAt = (x, y) => {
         const t = document.elementFromPoint(x, y) || document.body;
         const o = { bubbles: true, cancelable: true, composed: true, clientX: x, clientY: y, view: window, button: 0 };
         ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(tp => {
             t.dispatchEvent(tp.startsWith('pointer') ? new PointerEvent(tp, { ...o, pointerId: 1, pointerType: 'mouse', isPrimary: true }) : new MouseEvent(tp, o));
         });
         return true;
-    }
-    function swipe(dir) {
+    };
+
+    const swipe = dir => {
         const r = stageRect(), y = r.top + r.height * 0.5;
         const x0 = r.left + r.width * (dir < 0 ? 0.75 : 0.25);
         const t = document.elementFromPoint(x0, y) || document.body;
@@ -287,10 +285,7 @@
             try {
                 const tc = new Touch({ identifier: 9, target: t, clientX: x, clientY: y, screenX: x, screenY: y, pageX: x, pageY: y });
                 const end = type === 'touchend';
-                t.dispatchEvent(new TouchEvent(type, {
-                    bubbles: true, cancelable: true, composed: true,
-                    touches: end ? [] : [tc], targetTouches: end ? [] : [tc], changedTouches: [tc]
-                }));
+                t.dispatchEvent(new TouchEvent(type, { bubbles: true, cancelable: true, composed: true, touches: end ? [] : [tc], targetTouches: end ? [] : [tc], changedTouches: [tc] }));
                 return true;
             } catch (e) { return false; }
         };
@@ -299,7 +294,8 @@
         for (let i = 1; i <= 5; i++) send('touchmove', x0 + dir * W * i / 5);
         send('touchend', x0 + dir * W);
         return true;
-    }
+    };
+
     const METHODS = {
         ArrowRight: () => sendKey('ArrowRight', 'ArrowRight', 39),
         clickDir: () => { const r = stageRect(); return clickAt(r.left + r.width * 0.82, r.top + r.height * 0.5); },
@@ -313,18 +309,183 @@
         PageDown: () => sendKey('PageDown', 'PageDown', 34),
         wheel: () => {
             const r = stageRect(); const t = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2) || document.body;
-            t.dispatchEvent(new WheelEvent('wheel', { deltaY: 120, bubbles: true, cancelable: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 })); return true;
+            t.dispatchEvent(new WheelEvent('wheel', { deltaY: 120, bubbles: true, cancelable: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 }));
+            return true;
         },
         botao: () => {
-            const b = [...document.querySelectorAll('button,[role=button]')].find(x =>
-                /pr[oó]xim|avan[cç]|next|seguinte/i.test((x.getAttribute('aria-label') || '') + ' ' + (x.title || '')) && !x.closest('#ink-auto-ui'));
+            const b = $$('button,[role=button]').find(x =>
+                /pr[oó]xim|avan[cç]|next|seguinte/i.test((x.getAttribute('aria-label') || '') + ' ' + (x.title || '')) && !x.closest('#ink-panel'));
             if (b) { b.click(); return true; }
             return false;
         }
     };
-    const WEST = ['ArrowRight', 'clickDir', 'swipeL'], MANGA = ['ArrowLeft', 'clickEsq', 'swipeR'];
+    const WEST = ['ArrowRight', 'clickDir', 'swipeL'];
+    const MANGA = ['ArrowLeft', 'clickEsq', 'swipeR'];
 
+    /* ================================================================== *
+     *  6. ORDER BAR — ordenação de mangá/HQ
+     * ================================================================== */
+    const OrderBar = (() => {
+        const KEY = 'ink_ord_cfg';
+        const CAP_LINK = 'a[href*="/ler/"],a[href*="/capitulo/"],a[href*="/cap/"],a[href*="/chapter/"]';
+        const RX_NUM = /(?:capitulo|cap|ch|chapter|ler|ep)[\-\/]?(\d+(?:[.,]\d+)?)/i;
+        const state = { mode: 'asc', dir: 'west', orig: new WeakMap() };
+        try { const j = JSON.parse(localStorage.getItem(KEY) || '{}'); if (j.mode) state.mode = j.mode; if (j.dir) state.dir = j.dir; } catch (e) { }
+
+        const save = () => { try { localStorage.setItem(KEY, JSON.stringify({ mode: state.mode, dir: state.dir })); } catch (e) { } };
+        const status = t => { const el = $('ink-order-status'); if (el && el.textContent !== t) el.textContent = t; };
+
+        function findContainer() {
+            const links = $$(CAP_LINK);
+            if (links.length < 2) return null;
+            const counts = new Map();
+            links.forEach(a => { if (a.parentElement) counts.set(a.parentElement, (counts.get(a.parentElement) || 0) + 1); });
+            let best = null, max = 1;
+            counts.forEach((n, p) => { if (n > max) { max = n; best = p; } });
+            return best;
+        }
+
+        function chapterNum(href) {
+            try {
+                const u = new URL(href, location.href);
+                const m = RX_NUM.exec(u.pathname + u.search);
+                if (m) return parseFloat(m[1].replace(',', '.'));
+                const nums = (u.pathname + u.search).match(/\d+(?:[.,]\d+)?/g);
+                if (nums) return parseFloat(nums[nums.length - 1].replace(',', '.'));
+            } catch (e) { }
+            return 0;
+        }
+
+        function collectItems(box) {
+            const links = $$(CAP_LINK, box);
+            const out = [], seen = new Set();
+            links.forEach(a => {
+                let item = a;
+                for (let i = 0; i < 5; i++) {
+                    if (!item.parentElement || item.parentElement === box || item.parentElement === document.body) break;
+                    item = item.parentElement;
+                    if ($$(CAP_LINK, item).length > 1) { item = item.firstElementChild || a; break; }
+                }
+                if (seen.has(item)) return;
+                seen.add(item);
+                out.push({ el: item, num: chapterNum(a.getAttribute('href') || ''), href: (a.getAttribute('href') || '').split('?')[0] });
+            });
+            return out;
+        }
+
+        function apply() {
+            const box = findContainer();
+            if (!box) { status('⚠ Lista de capítulos não encontrada'); return false; }
+            const items = collectItems(box);
+            if (!items.length) { status('⚠ Lista vazia'); return false; }
+            if (!state.orig.has(box)) state.orig.set(box, items.map(x => x.el));
+
+            const sorted = items.slice();
+            if (state.mode === 'asc') sorted.sort((a, b) => a.num - b.num);
+            else if (state.mode === 'desc') sorted.sort((a, b) => b.num - a.num);
+            else { const o = state.orig.get(box); sorted.sort((a, b) => o.indexOf(a.el) - o.indexOf(b.el)); }
+
+            const frag = document.createDocumentFragment();
+            sorted.forEach(it => frag.appendChild(it.el));
+            box.appendChild(frag);
+
+            if (state.dir === 'manga') { box.style.direction = 'rtl'; box.style.flexDirection = 'row-reverse'; }
+            else { box.style.direction = ''; box.style.flexDirection = ''; }
+
+            cfg.manga = state.dir === 'manga';
+            saveCfg();
+            status(`✓ ${modeLabel()} · ${dirLabel()}`);
+            paint();
+            return true;
+        }
+
+        function clean() {
+            const box = findContainer();
+            if (!box) { status('⚠ Lista não encontrada'); return false; }
+            const items = collectItems(box);
+            const seen = new Set();
+            let removed = 0;
+            for (const it of items) {
+                const k = it.href.replace(/\/$/, '');
+                if (seen.has(k)) { it.el.remove(); removed++; } else seen.add(k);
+            }
+            status(`✓ ${removed} duplicata(s) removida(s)`);
+            return true;
+        }
+
+        function reset() {
+            const box = findContainer();
+            if (!box) { status('⚠ Lista não encontrada'); return false; }
+            const o = state.orig.get(box);
+            if (!o || !o.length) { status('⚠ Sem ordem salva — recarregue a página'); return false; }
+            for (const el of o) { try { el.isConnected && box.appendChild(el); } catch (e) { } }
+            box.style.direction = ''; box.style.flexDirection = '';
+            state.mode = 'orig';
+            save();
+            status('✓ Ordem original restaurada');
+            return true;
+        }
+
+        function cycleMode() {
+            state.mode = state.mode === 'asc' ? 'desc' : state.mode === 'desc' ? 'orig' : 'asc';
+            save(); apply(); paint();
+        }
+
+        const modeLabel = () => ({ asc: 'Crescente', desc: 'Decrescente', orig: 'Original' }[state.mode] || 'Ordenar');
+        const dirLabel = () => state.dir === 'manga' ? 'Mangá (dir→esq)' : 'Ocidental (esq→dir)';
+
+        function paint() {
+            const bar = $('ink-order');
+            if (!bar) return;
+            const pb = bar.querySelector('[data-ord="sort"] span');
+            if (pb) pb.textContent = modeLabel();
+            bar.querySelectorAll('[data-dir]').forEach(b => b.classList.toggle('on', b.dataset.dir === state.dir));
+        }
+
+        function build() {
+            if ($('ink-order')) return;
+            if (!location.pathname.startsWith('/ler/') && !/(manga|manhwa|hq|comic|obra|capitulo)/i.test(location.pathname)) return;
+            const box = findContainer();
+            if (!box || collectItems(box).length < 2) return;
+
+            const bar = document.createElement('div');
+            bar.id = 'ink-order';
+            bar.innerHTML = `
+                <button class="io-pill" data-ord="sort" title="Alternar ordem">${ICO.sort}<span>Ordenar</span></button>
+                <button class="io-pill" data-ord="clean" title="Remover duplicatas">${ICO.clean}<span>Limpar</span></button>
+                <button class="io-pill" data-ord="reset" title="Ordem original">${ICO.reset}<span>Zerar</span></button>
+                <div class="io-seg">
+                    <button data-dir="west">Ocidental</button>
+                    <button data-dir="manga">Mangá</button>
+                </div>`;
+            const st = document.createElement('div');
+            st.id = 'ink-order-status';
+
+            const parent = box.parentElement || document.body;
+            parent.insertBefore(bar, box);
+            parent.insertBefore(st, box);
+
+            bar.querySelector('[data-ord="sort"]').onclick = cycleMode;
+            bar.querySelector('[data-ord="clean"]').onclick = clean;
+            bar.querySelector('[data-ord="reset"]').onclick = reset;
+            bar.querySelectorAll('[data-dir]').forEach(b => b.onclick = () => { state.dir = b.dataset.dir; save(); apply(); paint(); });
+
+            paint();
+            if (state.mode !== 'orig' || state.dir !== 'west') apply();
+        }
+
+        return { build, apply, paint };
+    })();
+
+    /* ================================================================== *
+     *  7. READER LOOP (motor)
+     * ================================================================== */
+    let running = false, runId = 0, lastUser = 0;
+    const alive = id => running && id === runId;
+
+    const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 3, 4, 5, 6];
     const prog = s => s.b != null ? s.p * 100000 + s.b : (s.pg != null ? s.pg : (s.pct != null ? s.pct : null));
+
     async function waitChange(before, id, maxMs) {
         const t0 = performance.now(), p0 = prog(before);
         while (performance.now() - t0 < maxMs) {
@@ -332,20 +493,20 @@
             if (!alive(id)) return false;
             const s = readState(), pn = prog(s);
             if (p0 != null && pn != null) {
-                if (pn > p0) { ctrFrozen = 0; return true; }
+                if (pn > p0) { _frozen = 0; return true; }
                 if (s.cam !== before.cam && performance.now() - t0 > 450) {
-                    if (++ctrFrozen >= 2) {
-                        [cache.ctr, cache.pg, cache.pct].forEach(e => { if (e) badEl.add(e); });
-                        cache.ctr = cache.pg = cache.pct = null; cache.t = 0; ctrFrozen = 0;
+                    if (++_frozen >= 2) {
+                        [_cache.ctr, _cache.pg, _cache.pct].forEach(e => { if (e) _bad.add(e); });
+                        _cache.ctr = _cache.pg = _cache.pct = null; _cache.t = 0; _frozen = 0;
                     }
                     return true;
                 }
-            }
-            else if (s.sig !== before.sig) return true;
+            } else if (s.sig !== before.sig) return true;
         }
         return false;
     }
-    async function advance(before, onlyLearned, id) {
+
+    async function advancePage(before, onlyLearned, id) {
         const names = Object.keys(METHODS).filter(n => cfg.manga ? !WEST.includes(n) : !MANGA.includes(n));
         const learned = cfg.manga ? cfg.methodM : cfg.method;
         const has = learned && names.includes(learned);
@@ -356,12 +517,13 @@
             const ok = await waitChange(before, id, has && name === learned ? 1100 : 650);
             if (ok) {
                 const k = cfg.manga ? 'methodM' : 'method';
-                if (cfg[k] !== name) { cfg[k] = name; save(); }
+                if (cfg[k] !== name) { cfg[k] = name; saveCfg(); }
                 return true;
             }
         }
         return false;
     }
+
     async function settle(id) {
         const maxIt = isPerf() ? 6 : 12;
         const step = isPerf() ? 70 : 50;
@@ -391,57 +553,60 @@
         while (alive(id) && left > 0) {
             await sleep(Math.min(isPerf() ? 160 : 120, Math.max(20, left)));
             const now = performance.now(), dt = now - last; last = now;
-            if (paused()) { setSt('⏸ Em pausa…'); continue; }
+            if (paused()) { setStatus('⏸ Em pausa…'); continue; }
             if (cfg.auto && now - chk > chkEvery) { chk = now; if (findEndBtn()) return; }
             left -= dt;
-            if (now - ui > uiEvery) { ui = now; setSt(`📖 ${label(st)} · próximo em ${Math.max(0, left / 1000).toFixed(1)}s`); }
+            if (now - ui > uiEvery) { ui = now; setStatus(`📖 ${stateLabel(st)} · próximo em ${Math.max(0, left / 1000).toFixed(1)}s`); }
         }
     }
 
     const visited = new Set();
     const pathOf = h => { try { return new URL(h, location.href).pathname; } catch (e) { return ''; } };
     const RX_END_BTN = /^pr[oó]xima\s+em\s+\d+\s*s$|^pr[oó]ximo\s+cap[ií]tulo$/i;
+
     function findEndBtn() {
-        const mine = document.getElementById('ink-auto-ui');
-        for (const el of document.querySelectorAll('button,a,[role=button]')) {
+        const mine = $('ink-panel');
+        for (const el of $$('button,a,[role=button]')) {
             if (mine && mine.contains(el)) continue;
             const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
             if (t.length < 40 && RX_END_BTN.test(t) && el.getBoundingClientRect().width > 0) return el;
         }
         return null;
     }
+
     function findNextEl() {
         const eb = findEndBtn();
         if (eb) return eb;
-        const mine = document.getElementById('ink-auto-ui');
+        const mine = $('ink-panel');
         const ok = el => el && !(mine && mine.contains(el)) && el.getBoundingClientRect().width > 0;
-        const usable = a => { const pth = pathOf(a.getAttribute('href') || ''); return pth !== location.pathname && !visited.has(pth); };
-        for (const el of document.querySelectorAll('a,button,[role=button]')) {
+        const usable = a => { const p = pathOf(a.getAttribute('href') || ''); return p !== location.pathname && !visited.has(p); };
+        for (const el of $$('a,button,[role=button]')) {
             if (!ok(el)) continue;
             const t = (el.textContent || '') + ' ' + (el.getAttribute('aria-label') || '') + ' ' + (el.title || '');
             if (t.length < 90 && /pr[oó]xim[oa]\s+(cap|edi)|next\s+chapter/i.test(t)) return el;
         }
         let head = null;
-        for (const n of document.querySelectorAll('div,span,p,h1,h2,h3,h4,section')) {
+        for (const n of $$('div,span,p,h1,h2,h3,h4,section')) {
             if (n.childElementCount > 2) continue;
             if (/^\s*pr[oó]ximas?\s+leituras?\s*$/i.test(n.textContent || '')) { head = n; break; }
         }
         if (!head) return null;
         let box = head.parentElement;
         for (let i = 0; i < 5 && box; i++, box = box.parentElement) {
-            const link = [...box.querySelectorAll('a[href*="/ler/"]')].find(a => ok(a) && usable(a));
+            const link = $$('a[href*="/ler/"]', box).find(a => ok(a) && usable(a));
             if (link) return link;
-            const img = [...box.querySelectorAll('img')].find(ok);
+            const img = $$('img', box).find(ok);
             if (img) return img.closest('a,button,[role=button]') || img;
         }
         return null;
     }
+
     async function nextChapter(id, pre) {
         const from = location.pathname;
         visited.add(from);
         await sleep(700);
         const el = pre || findNextEl();
-        if (!el) { console.info('[Ink] não achei o próximo capítulo'); return false; }
+        if (!el) { console.info('[Ink] próximo capítulo não encontrado'); return false; }
         try { el.scrollIntoView({ block: 'nearest', inline: 'center' }); } catch (e) { }
         const changed = async ms => {
             const t0 = performance.now();
@@ -479,62 +644,60 @@
     }
     const isRoot = el => el === (document.scrollingElement || document.documentElement);
     const atBottom = el => el.scrollTop + (isRoot(el) ? innerHeight : el.clientHeight) >= el.scrollHeight - 4;
+
     function moveSig() {
         let list; try { list = document.elementsFromPoint(innerWidth / 2, innerHeight * 0.45); } catch (e) { return ''; }
         const out = [];
         for (const e of list) {
-            if (e === document.documentElement || e === document.body || e.closest('#ink-auto-ui,#ink-eye')) continue;
+            if (e === document.documentElement || e === document.body || e.closest('#ink-panel,#ink-eye')) continue;
             const r = e.getBoundingClientRect();
             let tf = ''; try { tf = getComputedStyle(e).transform; } catch (x) { }
-            out.push((r.top | 0) + ',' + (r.height | 0) + ',' + tf);
+            out.push(`${r.top | 0},${r.height | 0},${tf}`);
             if (out.length >= 4) break;
         }
-        return out.join(';') + '|' + (scrollY | 0);
+        return out.join(';') + `|${scrollY | 0}`;
     }
+
     function wheelAt(dy) {
         const r = stageRect(), x = r.left + r.width / 2, y = r.top + r.height / 2;
         const t = document.elementFromPoint(x, y) || document.body;
         t.dispatchEvent(new WheelEvent('wheel', { deltaY: dy, deltaMode: 0, bubbles: true, cancelable: true, composed: true, clientX: x, clientY: y, view: window }));
     }
 
-    const anxS = { until: 0, mul: 1, phase: 'calm', phaseUntil: 0, t0: 0, lvl: 0 };
+    const anx = { until: 0, mul: 1, phase: 'calm', phaseUntil: 0, t0: 0, lvl: 0 };
     function anxMul(now) {
         const lvl = cfg.anx | 0;
-        if (!lvl) { anxS.until = 0; anxS.t0 = 0; anxS.lvl = 0; return 1; }
-        if (anxS.lvl !== lvl || !anxS.t0) { anxS.lvl = lvl; anxS.t0 = now; anxS.until = 0; anxS.phase = 'calm'; anxS.phaseUntil = now + rnd(8000, 18000); }
+        if (!lvl) { anx.until = 0; anx.t0 = 0; anx.lvl = 0; return 1; }
+        if (anx.lvl !== lvl || !anx.t0) { anx.lvl = lvl; anx.t0 = now; anx.until = 0; anx.phase = 'calm'; anx.phaseUntil = now + rnd(8000, 18000); }
         if (lvl === 1) {
-            if (now > anxS.phaseUntil) {
-                if (anxS.phase === 'calm') { anxS.phase = 'tense'; anxS.phaseUntil = now + rnd(6000, 14000); }
-                else { anxS.phase = 'calm'; anxS.phaseUntil = now + rnd(20000, 45000); }
-                anxS.until = 0;
+            if (now > anx.phaseUntil) {
+                if (anx.phase === 'calm') { anx.phase = 'tense'; anx.phaseUntil = now + rnd(6000, 14000); }
+                else { anx.phase = 'calm'; anx.phaseUntil = now + rnd(20000, 45000); }
+                anx.until = 0;
             }
-            if (now > anxS.until) {
-                if (anxS.phase === 'calm') { anxS.mul = rnd(0.92, 1.08); anxS.until = now + rnd(1500, 3000); }
+            if (now > anx.until) {
+                if (anx.phase === 'calm') { anx.mul = rnd(0.92, 1.08); anx.until = now + rnd(1500, 3000); }
                 else {
                     const r = Math.random();
-                    if (r < 0.5) { anxS.mul = rnd(1.4, 1.9); anxS.until = now + rnd(800, 2000); }
-                    else if (r < 0.8) { anxS.mul = rnd(0.3, 0.6); anxS.until = now + rnd(400, 900); }
-                    else { anxS.mul = -rnd(0.6, 1.0); anxS.until = now + rnd(250, 450); }
+                    if (r < 0.5) { anx.mul = rnd(1.4, 1.9); anx.until = now + rnd(800, 2000); }
+                    else if (r < 0.8) { anx.mul = rnd(0.3, 0.6); anx.until = now + rnd(400, 900); }
+                    else { anx.mul = -rnd(0.6, 1.0); anx.until = now + rnd(250, 450); }
                 }
             }
-            return anxS.mul;
+            return anx.mul;
         }
-        if (now > anxS.until) {
+        if (now > anx.until) {
             const r = Math.random();
-            if (r < 0.30) { anxS.mul = rnd(1.5, 2.3); anxS.until = now + rnd(700, 2200); }
-            else if (r < 0.58) { anxS.mul = rnd(0, 0.12); anxS.until = now + rnd(600, 1800); }
-            else if (r < 0.78) { anxS.mul = -rnd(0.8, 1.6); anxS.until = now + rnd(300, 700); }
-            else { anxS.mul = rnd(0.55, 1.25); anxS.until = now + rnd(300, 800); }
+            if (r < 0.30) { anx.mul = rnd(1.5, 2.3); anx.until = now + rnd(700, 2200); }
+            else if (r < 0.58) { anx.mul = rnd(0, 0.12); anx.until = now + rnd(600, 1800); }
+            else if (r < 0.78) { anx.mul = -rnd(0.8, 1.6); anx.until = now + rnd(300, 700); }
+            else { anx.mul = rnd(0.55, 1.25); anx.until = now + rnd(300, 800); }
         }
-        const fadiga = 1 - Math.min(0.3, (now - anxS.t0) / 600000);
-        return anxS.mul * (anxS.mul > 0 ? fadiga : 1);
+        const fadiga = 1 - Math.min(0.3, (now - anx.t0) / 600000);
+        return anx.mul * (anx.mul > 0 ? fadiga : 1);
     }
     const ANX_LBL = ['Ansiedade', 'Ans. normal', 'Ans. crônica'];
-    const ANX_MSG = [
-        'Modo ansiedade desligado.',
-        '😬 Ansiedade normal: tensão em episódios curtos, depois passa.',
-        '😰 Ansiedade crônica: inquieta o tempo todo, perde o foco, relê e cansa.'
-    ];
+
     async function smoothRun(id) {
         if (readState().b != null) return 'none';
         let el = scrollerEl(), mode = el ? 'scroll' : 'wheel';
@@ -545,7 +708,7 @@
             const now = performance.now(), dt = Math.min(100, now - last); last = now;
             if (paused()) {
                 ramp = 0; if (el && mode === 'scroll') pos = el.scrollTop; lastMove = now; t0 = now; sig0 = moveSig();
-                if (now - lastUi > 400) { lastUi = now; setSt('⏸ Em pausa…'); }
+                if (now - lastUi > 400) { lastUi = now; setStatus('⏸ Em pausa…'); }
                 continue;
             }
             if (cfg.auto && findEndBtn()) return 'cont';
@@ -570,10 +733,7 @@
                     if (now - bottomSince > 1500) return 'end';
                     continue;
                 }
-                if (mode === 'scroll' && !triedWheel) {
-                    triedWheel = true; mode = 'wheel'; lastMove = now; wacc = 0;
-                    continue;
-                }
+                if (mode === 'scroll' && !triedWheel) { triedWheel = true; mode = 'wheel'; lastMove = now; wacc = 0; continue; }
                 smoothOff = true; return 'none';
             } else bottomSince = 0;
             if (mode === 'scroll') {
@@ -584,14 +744,14 @@
                 } else bottomSince = 0;
                 lastH = el.scrollHeight;
             }
-            if (now - lastUi > 500) { lastUi = now; setSt(`${cfg.anx === 2 ? '😰' : cfg.anx === 1 ? '😬' : '📖'} ${label(readState())} · rolando ${Math.round(pxs)} px/s (${mode})`); }
+            if (now - lastUi > 500) { lastUi = now; setStatus(`${cfg.anx === 2 ? '😰' : cfg.anx === 1 ? '😬' : '📖'} ${stateLabel(readState())} · rolando (${mode})`); }
         }
         return 'cont';
     }
 
-    async function loop() {
+    async function mainLoop() {
         const id = ++runId;
-        running = true; refreshBtn(); keepAwake(true);
+        running = true; refreshPanel(); keepAwake(true);
         let stuck = 0, endFails = 0;
         visited.clear();
         try {
@@ -599,14 +759,14 @@
                 if (cfg.auto) {
                     const eb = findEndBtn();
                     if (eb) {
-                        setSt('✓ Fim do capítulo. Indo para o próximo…');
+                        setStatus('✓ Fim do capítulo. Próximo…');
                         if (await nextChapter(id, eb)) { stuck = 0; endFails = 0; continue; }
                         if (!alive(id)) break;
-                        if (++endFails >= 3) { finish('✓ Fim do capítulo, mas o botão "Próxima" não respondeu.'); return; }
+                        if (++endFails >= 3) { finish('✓ Fim, mas "Próxima" não respondeu.'); return; }
                         await sleep(1000); continue;
                     }
                 }
-                if (!cfg.voice && cfg.smooth !== false && !smoothOff) {
+                if (!cfg.voice && !smoothOff) {
                     const r = await smoothRun(id);
                     if (!alive(id)) break;
                     if (r === 'cont') continue;
@@ -615,12 +775,12 @@
                         if (!alive(id)) break;
                         if (cfg.auto && findEndBtn()) continue;
                         if (cfg.auto) {
-                            setSt('✓ Fim do capítulo. Indo para o próximo…');
+                            setStatus('✓ Fim. Próximo…');
                             if (await nextChapter(id)) { stuck = 0; continue; }
                             if (!alive(id)) break;
-                            finish('✓ Fim do capítulo, mas não achei o próximo.'); return;
+                            finish('✓ Fim, mas próximo cap. não encontrado.'); return;
                         }
-                        finish('✓ Chegou ao fim do capítulo.'); return;
+                        finish('✓ Chegou ao fim.'); return;
                     }
                 }
                 const st = readState();
@@ -633,74 +793,62 @@
                 await sleep(rnd(30, 140));
                 const before = readState();
                 const end = nearEnd(before);
-                const ok = await advance(before, end, id);
+                const ok = await advancePage(before, end, id);
                 if (!alive(id)) break;
                 if (ok) { stuck = 0; continue; }
                 if (end) {
                     await sleep(900);
-                    if (alive(id) && await advance(readState(), true, id)) { stuck = 0; continue; }
+                    if (alive(id) && await advancePage(readState(), true, id)) { stuck = 0; continue; }
                     if (!alive(id)) break;
                     if (cfg.auto) {
-                        setSt('✓ Fim do capítulo. Indo para o próximo…');
+                        setStatus('✓ Fim. Próximo…');
                         if (await nextChapter(id)) { stuck = 0; continue; }
                         if (!alive(id)) break;
-                        finish('✓ Fim do capítulo, mas não achei o próximo.'); return;
+                        finish('✓ Fim, mas próximo cap. não encontrado.'); return;
                     }
-                    finish('✓ Chegou ao fim do capítulo.'); return;
+                    finish('✓ Chegou ao fim.'); return;
                 }
-                if (++stuck >= 3) { finish('Não consegui avançar. Como você vira para o próximo balão (toque, tecla)?'); return; }
+                if (++stuck >= 3) { finish('Não consegui avançar.'); return; }
             }
         } finally {
-            if (id === runId) { running = false; refreshBtn(); keepAwake(false); }
+            if (id === runId) { running = false; refreshPanel(); keepAwake(false); }
         }
     }
-    function finish(msg) { running = false; runId++; cancelSpeech(); if (typeof musDuck === 'function') musDuck(false); setSt(msg); refreshBtn(); keepAwake(false); }
-    function stop(msg) { if (!running) return; running = false; runId++; cancelSpeech(); if (typeof musDuck === 'function') musDuck(false); setSt(msg || 'Parado.'); refreshBtn(); keepAwake(false); }
 
-    let wl = null;
+    const finish = msg => { running = false; runId++; cancelSpeech(); musDuck(false); setStatus(msg); refreshPanel(); keepAwake(false); };
+    const stop = msg => { if (!running) return; running = false; runId++; cancelSpeech(); musDuck(false); setStatus(msg || 'Parado.'); refreshPanel(); keepAwake(false); };
+
+    let wakeLock = null;
     async function keepAwake(on) {
         try {
             if (on) {
-                if (!wl && navigator.wakeLock && !document.hidden) {
-                    wl = await navigator.wakeLock.request('screen');
-                    wl.addEventListener('release', () => { wl = null; });
+                if (!wakeLock && navigator.wakeLock && !document.hidden) {
+                    wakeLock = await navigator.wakeLock.request('screen');
+                    wakeLock.addEventListener('release', () => { wakeLock = null; });
                 }
-            } else if (wl) { const w = wl; wl = null; await w.release(); }
-        } catch (e) { wl = null; }
+            } else if (wakeLock) { const w = wakeLock; wakeLock = null; await w.release(); }
+        } catch (e) { wakeLock = null; }
     }
     document.addEventListener('visibilitychange', () => { if (running && !document.hidden) keepAwake(true); });
 
+    /* ================================================================== *
+     *  8. VOZ / TTS
+     * ================================================================== */
     const TTS = window.speechSynthesis || null;
-    let ttsVoices = [];
-    function loadVoices() { try { ttsVoices = TTS ? TTS.getVoices() : []; } catch (e) { ttsVoices = []; } }
-    if (TTS) { loadVoices(); try { TTS.addEventListener('voiceschanged', () => { loadVoices(); refreshBtn(); }); } catch (e) { } }
+    let voices = [];
+    const loadVoices = () => { try { voices = TTS ? TTS.getVoices() : []; } catch (e) { voices = []; } };
+    if (TTS) { loadVoices(); try { TTS.addEventListener('voiceschanged', () => { loadVoices(); refreshPanel(); }); } catch (e) { } }
 
     const VRATES = [0.7, 0.8, 0.9, 1, 1.1, 1.2, 1.3, 1.5, 1.7, 2];
     const isNatural = v => /natural|neural|online/i.test(v.name);
     function ptVoices() {
-        const pt = ttsVoices.filter(v => /^pt([-]|$)/i.test(v.lang));
+        const pt = voices.filter(v => /^pt([-]|$)/i.test(v.lang));
         const br = pt.filter(v => /^pt[-]BR$/i.test(v.lang));
         return (br.length ? br : pt).slice().sort((a, b) => isNatural(b) - isNatural(a));
     }
-    function currentVoice() {
-        const l = ptVoices();
-        return l.find(v => v.name === cfg.vname) || l[0] || null;
-    }
+    const currentVoice = () => { const l = ptVoices(); return l.find(v => v.name === cfg.vname) || l[0] || null; };
     const shortVoice = n => n.replace(/^Microsoft\s+|^Google\s+/i, '').replace(/\s*[-–(].*$/, '').trim() || n;
-    function cycleVoice() {
-        const l = ptVoices();
-        if (!l.length) { setSt('Nenhuma voz em português neste navegador.'); return; }
-        const cur = currentVoice();
-        const i = l.findIndex(v => cur && v.name === cur.name);
-        cfg.vname = l[(i + 1) % l.length].name; save(); refreshBtn();
-        try { TTS.cancel(); TTS.speak(mkUtt('Olá! Esta é a voz do audiolivro.')); } catch (e) { }
-    }
-    function setVRate(dir) {
-        let i = 0, best = 1e9;
-        VRATES.forEach((v, k) => { const d = Math.abs(v - (cfg.vrate || 1)); if (d < best) { best = d; i = k; } });
-        cfg.vrate = VRATES[Math.min(VRATES.length - 1, Math.max(0, i + dir))];
-        save(); refreshBtn();
-    }
+
     function mkUtt(text) {
         const u = new SpeechSynthesisUtterance(text);
         const v = currentVoice();
@@ -733,41 +881,31 @@
     }
     const cancelSpeech = () => { try { if (TTS) TTS.cancel(); } catch (e) { } };
 
-    /* =====================================================================
-       PATCH 2: OCR COM FALLBACK
-       ===================================================================== */
-    const OCR = { w: null, p: null };
-    function ocrBase() {
+    /* ================================================================== *
+     *  9. OCR
+     * ================================================================== */
+    const OCR = { worker: null, promise: null };
+    const ocrBase = () => {
         let b = window.__inkOcrBase || (document.documentElement.dataset && document.documentElement.dataset.inkOcr) || '';
         if (!b) { try { if (chrome && chrome.runtime && chrome.runtime.getURL) b = chrome.runtime.getURL('ocr'); } catch (e) { } }
-        if (!b || b === 'file:///android_asset/ocr') {
-            console.log("[Ink-OCR] Usando caminho local ou fallback CDN");
-        }
         return b.replace(/\/$/, '');
-    }
+    };
     function ocrWorker() {
-        if (OCR.w) return Promise.resolve(OCR.w);
-        if (OCR.p) return OCR.p;
-        OCR.p = (async () => {
+        if (OCR.worker) return Promise.resolve(OCR.worker);
+        if (OCR.promise) return OCR.promise;
+        OCR.promise = (async () => {
             if (typeof Tesseract === 'undefined') throw new Error('Tesseract não carregou.');
+            setStatus('⏳ Carregando OCR…');
             const base = ocrBase();
-            setSt('⏳ Carregando o OCR…');
-
-            const options = { logger: () => { }, errorHandler: e => console.warn('[Ink-OCR]', e) };
-            if (base) {
-                options.workerPath = base + '/worker.min.js';
-                options.corePath = base;
-                options.langPath = base;
-                options.gzip = true;
-            }
-
-            const w = await Tesseract.createWorker('por', 1, options);
+            const opts = { logger: () => { }, errorHandler: e => console.warn('[Ink-OCR]', e) };
+            if (base) { opts.workerPath = base + '/worker.min.js'; opts.corePath = base; opts.langPath = base; opts.gzip = true; }
+            const w = await Tesseract.createWorker('por', 1, opts);
             await w.setParameters({ tessedit_pageseg_mode: '11', preserve_interword_spaces: '1', user_defined_dpi: '300' });
-            OCR.w = w;
+            OCR.worker = w;
             return w;
         })();
-        OCR.p.catch(() => { OCR.p = null; });
-        return OCR.p;
+        OCR.promise.catch(() => { OCR.promise = null; });
+        return OCR.promise;
     }
 
     let capSeq = 0;
@@ -781,7 +919,7 @@
     function capture() {
         return new Promise((res, rej) => {
             const id = ++capSeq;
-            const t = setTimeout(() => { capWait.delete(id); rej(new Error('a captura de tela não respondeu (o modo Voz precisa do app/extensão que faz a captura).')); }, 5000);
+            const t = setTimeout(() => { capWait.delete(id); rej(new Error('captura não respondeu')); }, 5000);
             capWait.set(id, d => { clearTimeout(t); d.err ? rej(new Error(d.err)) : res(d.data); });
             window.postMessage({ inkCap: id }, '*');
         });
@@ -794,173 +932,18 @@
         }
     }
 
-    const descEl = e => e.tagName + (typeof e.className === 'string' && e.className.trim() ? '.' + e.className.trim().split(/\s+/)[0] : '');
-    function pageImgEl(x, y) {
-        let list = [];
-        try { list = document.elementsFromPoint(x, y); } catch (e) { }
-        for (const e of list) {
-            if (e === document.documentElement || e === document.body) break;
-            if (e.closest && e.closest('#ink-auto-ui,#ink-eye,#ink-dbg')) continue;
-            if (e.tagName === 'IMG' || e.tagName === 'CANVAS') return e;
-        }
-        return null;
-    }
-    async function grabView() {
-        const cx0 = innerWidth / 2, cy0 = innerHeight * 0.45;
-        let x0 = 0, y0 = 0, x1 = innerWidth, y1 = innerHeight;
-        const pe = pageImgEl(cx0, cy0);
-        if (pe) {
-            const r = pe.getBoundingClientRect();
-            x0 = Math.max(r.left, 0); y0 = Math.max(r.top, 0); x1 = Math.min(r.right, innerWidth); y1 = Math.min(r.bottom, innerHeight);
-            if (x1 - x0 < 40 || y1 - y0 < 40) { x0 = 0; y0 = 0; x1 = innerWidth; y1 = innerHeight; }
-        } else if (innerWidth > 700) {
-            x0 = 0; x1 = innerWidth;
-            y0 = Math.max(0, cy0 - innerHeight * 0.45); y1 = Math.min(innerHeight, cy0 + innerHeight * 0.42);
-        }
-        const dbg = document.getElementById('ink-dbg'); if (dbg) dbg.remove();
-        const panel = document.getElementById('ink-auto-ui');
-        const eye = document.getElementById('ink-eye');
-        const hideList = [];
-        [panel, eye].forEach(el => {
-            if (!el) return;
-            hideList.push({ el, vis: el.style.visibility, disp: el.style.display });
-            el.style.visibility = 'hidden';
-        });
-        let shot;
-        try {
-            if (hideList.length) await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
-            shot = await captureRetry();
-        } finally {
-            hideList.forEach(({ el, vis, disp }) => { el.style.visibility = vis; el.style.display = disp; });
-        }
-        const img = new Image();
-        img.src = shot;
-        await img.decode();
-        const kx = img.naturalWidth / innerWidth, ky = img.naturalHeight / innerHeight;
-        const sx = x0 * kx, sy = y0 * ky, sw = (x1 - x0) * kx, sh = (y1 - y0) * ky;
-        let sc = Math.min(4, Math.max(2, 2000 / sw));
-        if (sw * sc > 3000) sc = 3000 / sw;
-        const pad = 16;
-        const c = document.createElement('canvas');
-        c.width = Math.round(sw * sc) + pad * 2; c.height = Math.round(sh * sc) + pad * 2;
-        const g = c.getContext('2d');
-        g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
-        g.imageSmoothingQuality = 'high';
-        try { g.filter = 'grayscale(1) contrast(1.5)'; } catch (e) { }
-        g.drawImage(img, sx, sy, sw, sh, pad, pad, sw * sc, sh * sc);
-        return {
-            canvas: c,
-            tx: (cx0 - x0) * kx * sc + pad, ty: (cy0 - y0) * ky * sc + pad,
-            view: { x: x0, y: y0, w: x1 - x0, h: y1 - y0 },
-            toScr: (px, py) => ({ x: x0 + (px - pad) / sc / kx, y: y0 + (py - pad) / sc / ky })
-        };
-    }
-
-    function linesOf(d) {
-        if (!d) return [];
-        let L = d.lines;
-        if (!L || !L.length) {
-            L = [];
-            (d.blocks || []).forEach(b => (b.paragraphs || []).forEach(p => (p.lines || []).forEach(l => L.push(l))));
-        }
-        return L;
-    }
-    function refineLine(l) {
-        const ws = l && l.words;
-        if (!ws || !ws.length) return l;
-        const hOf = w => w.bbox ? w.bbox.y1 - w.bbox.y0 : 0;
-        const hs = ws.map(hOf).filter(h => h > 0).sort((a, b) => a - b);
-        const mh = hs.length ? hs[hs.length >> 1] : 0;
-        const SHORT = new Set(['a', 'e', 'o', 'é', 'à', 'as', 'os', 'um', 'de', 'do', 'da', 'em', 'no', 'na', 'se', 'me', 'te', 'eu', 'ou', 'ao', 'já', 'só', 'há', 'vi', 'ir', 'vê', 'lá', 'aí']);
-        const keep = ws.filter(w => {
-            const t = (w.text || '').replace(/[^\p{L}\p{N}]/gu, '');
-            if (!t) return false;
-            const c = w.confidence != null ? w.confidence : 100;
-            const common = SHORT.has(t.toLowerCase());
-            if (c < (common ? 25 : 45)) return false;
-            if (t.length === 1 && !common && c < 85) return false;
-            if (t.length <= 2 && !common && c < 70) return false;
-            if (mh && hOf(w) && (hOf(w) < mh * 0.5 || hOf(w) > mh * 2)) return false;
-            return true;
-        });
-        if (!keep.length) return null;
-        if (keep.length === ws.length) return l;
-        const bb = keep.filter(w => w.bbox).map(w => w.bbox);
-        if (!bb.length) return l;
-        return {
-            text: keep.map(w => w.text).join(' '),
-            confidence: keep.reduce((a, w) => a + (w.confidence != null ? w.confidence : 100), 0) / keep.length,
-            bbox: { x0: Math.min(...bb.map(b => b.x0)), y0: Math.min(...bb.map(b => b.y0)), x1: Math.max(...bb.map(b => b.x1)), y1: Math.max(...bb.map(b => b.y1)) }
-        };
-    }
-    const RX_UI = /leitura\s*autom[aá]tica|modo\s*meninas|audiolivro|pr[oó]ximo\s*cap|conforto|desempenho|mang[aá]\s*:|pausar|ler\s*sozinho|francisca|em\s*pausa\s*|aba\s*oculta|voc[eê]\s*mexendo|online\s*$|sem\s*voz\s*pt/i;
+    const RX_UI = /leitura\s*autom[aá]tica|modo\s*meninas|audiolivro|pr[oó]ximo\s*cap|conforto|desempenho|mang[aá]\s*:|pausar|ler\s*sozinho|em\s*pausa\s*|aba\s*oculta|voc[eê]\s*mexendo/i;
 
     function cleanLine(l, relaxed) {
-        l = refineLine(l);
         if (!l || !l.bbox) return null;
-        const t = (l.text || '').replace(/[^\p{L}\p{N}\s.,!?…:;'"’“”()–—¡¿%-]/gu, ' ').replace(/\s+/g, ' ').trim();
+        const t = (l.text || '').replace(/[^\p{L}\p{N}\s.,!?…:;'"’“”()–—%-]/gu, ' ').replace(/\s+/g, ' ').trim();
         if (RX_UI.test(t)) return null;
         const letters = (t.match(/\p{L}/gu) || []).length;
         const conf = l.confidence != null ? l.confidence : 100;
         if (letters < 2 || letters < t.length * 0.45 || conf < (relaxed ? 28 : 35)) return null;
-        const ws = t.split(' ').map(w => w.replace(/[^\p{L}]/gu, '')).filter(Boolean);
+        const ws = t.split(' ').filter(w => /\p{L}/u.test(w));
         if (!ws.some(w => w.length >= 2)) return null;
-        const good = relaxed
-            ? letters >= 2 && letters >= t.length * 0.45 && conf >= 38 && ws.some(w => w.length >= 2)
-            : letters >= 3 && letters >= t.length * 0.55 && conf >= 55 &&
-            ws.some(w => w.length >= 3) && !ws.some(w => /\p{Ll}\p{Lu}/u.test(w));
-        return { bbox: l.bbox, text: t, good };
-    }
-    function pickBubble(lines, tx, ty, W, H) {
-        if (!lines.length) return [];
-        const dist = l => { const b = l.bbox; return Math.hypot(Math.max(b.x0 - tx, 0, tx - b.x1), Math.max(b.y0 - ty, 0, ty - b.y1)); };
-        const letters = l => (l.text.match(/\p{L}/gu) || []).length;
-        const hs = lines.map(l => l.bbox.y1 - l.bbox.y0).sort((a, b) => a - b);
-        const lh = hs[hs.length >> 1] || 20;
-        const pool = lines.filter(l => l.good && letters(l) >= 4);
-        const pool2 = pool.length ? pool : lines.filter(l => l.good);
-        if (!pool2.length) return [];
-        const hOf = l => l.bbox.y1 - l.bbox.y0;
-        const maxH = Math.max(...pool2.map(hOf));
-        const lowH = hs[Math.floor(hs.length * 0.25)] || lh;
-        const big = pool2.length >= 2 && maxH >= lowH * 2 && maxH >= 24 ? pool2.filter(l => hOf(l) >= maxH * 0.75) : [];
-        let seed;
-        if (big.length >= 1) {
-            seed = big.reduce((a, l) => {
-                const da = dist(a), dl = dist(l);
-                if (dl < da - 4) return l;
-                if (Math.abs(dl - da) <= 4 && letters(l) > letters(a)) return l;
-                return a;
-            });
-        } else {
-            seed = pool2.reduce((a, l) => {
-                const da = dist(a), dl = dist(l);
-                if (dl < da - 4) return l;
-                if (Math.abs(dl - da) <= 4 && letters(l) > letters(a)) return l;
-                return a;
-            });
-            if (dist(seed) > 0.55 * Math.min(W, H)) return [];
-        }
-        const sel = new Set([seed]);
-        for (let grew = true; grew;) {
-            grew = false;
-            for (const l of lines) {
-                if (sel.has(l)) continue;
-                const hl = hOf(l), hs0 = hOf(seed);
-                if (hl < hs0 * 0.5 || hl > hs0 * 2.0) continue;
-                for (const s of sel) {
-                    const a = l.bbox, b = s.bbox;
-                    const gapY = Math.max(a.y0 - b.y1, b.y0 - a.y1, 0);
-                    const gapX = Math.max(a.x0 - b.x1, b.x0 - a.x1, 0);
-                    const ov = Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0);
-                    if ((gapY <= lh * 2.0 && ov > -lh * 0.3) || (gapY <= lh * 0.8 && gapX <= lh * 2.0)) { sel.add(l); grew = true; break; }
-                }
-            }
-        }
-        const out = [...sel];
-        const totalLet = out.reduce((n, l) => n + letters(l), 0);
-        if (totalLet < 6 && out.length <= 2) return [];
-        return out;
+        return { bbox: l.bbox, text: t };
     }
     function joinLines(ls) {
         const lh = Math.max(10, ...ls.map(l => l.bbox.y1 - l.bbox.y0));
@@ -981,540 +964,107 @@
         t = t.replace(/\s+/g, ' ').trim();
         if (RX_UI.test(t)) return '';
         const up = (t.match(/\p{Lu}/gu) || []).length, lo = (t.match(/\p{Ll}/gu) || []).length;
-        if (up >= 3 && up > 3 * lo)
-            t = t.toLowerCase().replace(/(^|[.!?…]\s+)(\p{L})/gu, (m, a, b) => a + b.toUpperCase());
+        if (up >= 3 && up > 3 * lo) t = t.toLowerCase().replace(/(^|[.!?…]\s+)(\p{L})/gu, (m, a, b) => a + b.toUpperCase());
         return t.replace(/\.{3,}/g, '…').replace(/([!?])[!?]+/g, '$1');
     }
 
-    let dbgT = 0;
-    function drawDbg(g, pick) {
-        let o = document.getElementById('ink-dbg');
-        if (!o) { o = document.createElement('div'); o.id = 'ink-dbg'; o.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:2147482500'; document.body.appendChild(o); }
-        o.innerHTML = '';
-        const box = (r, col) => {
-            const d = document.createElement('div');
-            d.style.cssText = `position:fixed;left:${r.x}px;top:${r.y}px;width:${r.w}px;height:${r.h}px;border:2px solid ${col};box-sizing:border-box;`;
-            o.appendChild(d);
-        };
-        box(g.view, '#39f');
-        pick.forEach(l => { const a = g.toScr(l.bbox.x0, l.bbox.y0), b = g.toScr(l.bbox.x1, l.bbox.y1); box({ x: a.x, y: a.y, w: b.x - a.x, h: b.y - a.y }, '#f33'); });
-        clearTimeout(dbgT); dbgT = setTimeout(() => { const e = document.getElementById('ink-dbg'); if (e) e.remove(); }, 4000);
-    }
     async function ocrView() {
         for (let i = 0; i < 3; i++) {
-            const t = await ocrViewOnce();
+            const t = await ocrOnce();
             if (t) return t;
-            if (i < 2) { if (!running && !cfg.dbg) break; await sleep(550); }
+            if (i < 2) { if (!running) break; await sleep(550); }
         }
         return '';
     }
-    function preprocessBalloon(canvas, C = 10) {
-        const w = canvas.width, h = canvas.height;
-        const ctx = canvas.getContext('2d', { willReadFrequently: true });
-        const img = ctx.getImageData(0, 0, w, h), d = img.data;
-        const gray = new Uint8ClampedArray(w * h);
-        for (let i = 0, j = 0; i < d.length; i += 4, j++) gray[j] = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
-        const W = w + 1, S = new Float64Array(W * (h + 1));
-        for (let y = 0; y < h; y++) {
-            let row = 0;
-            for (let x = 0; x < w; x++) { row += gray[y * w + x]; S[(y + 1) * W + x + 1] = S[y * W + x + 1] + row; }
-        }
-        const r = Math.max(8, Math.round(Math.min(w, h) / 24));
-        const bin = new Uint8ClampedArray(w * h);
-        for (let y = 0; y < h; y++) {
-            const y0 = Math.max(0, y - r), y1 = Math.min(h, y + r + 1);
-            for (let x = 0; x < w; x++) {
-                const x0 = Math.max(0, x - r), x1 = Math.min(w, x + r + 1);
-                const sum = S[y1 * W + x1] - S[y0 * W + x1] - S[y1 * W + x0] + S[y0 * W + x0];
-                bin[y * w + x] = gray[y * w + x] < sum / ((x1 - x0) * (y1 - y0)) - C ? 0 : 255;
-            }
-        }
-        const pass = (src, max) => {
-            const out = Uint8ClampedArray.from(src);
-            for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
-                let e = max ? 0 : 255;
-                for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
-                    const v = src[(y + dy) * w + x + dx];
-                    e = max ? Math.max(e, v) : Math.min(e, v);
-                }
-                out[y * w + x] = e;
-            }
-            return out;
-        };
-        const clean = pass(pass(bin, false), true);
-        for (let i = 0, j = 0; i < d.length; i += 4, j++) { d[i] = d[i + 1] = d[i + 2] = clean[j]; d[i + 3] = 255; }
-        ctx.putImageData(img, 0, 0);
-        return canvas;
-    }
-    async function ocrViewOnce() {
+
+    async function ocrOnce() {
         const w = await ocrWorker();
-        const g = await grabView();
-        let src = g.canvas;
-        const tryRead = async cv => {
-            let cvr = cv;
-            if (cfg.bin1) {
-                cvr = document.createElement('canvas'); cvr.width = cv.width; cvr.height = cv.height;
-                cvr.getContext('2d', { willReadFrequently: true }).drawImage(cv, 0, 0);
-                preprocessBalloon(cvr);
+        const pe = (() => {
+            let list = [];
+            try { list = document.elementsFromPoint(innerWidth / 2, innerHeight * 0.45); } catch (e) { }
+            for (const e of list) {
+                if (e === document.documentElement || e === document.body) break;
+                if (e.closest && e.closest('#ink-panel,#ink-eye,#ink-dbg')) continue;
+                if (e.tagName === 'IMG' || e.tagName === 'CANVAS') return e;
             }
-            const rr = await w.recognize(cvr, {}, { blocks: true, text: true });
-            const raw = linesOf(rr.data);
-            for (const relaxed of [false, true]) {
-                const ls = raw.map(l => cleanLine(l, relaxed)).filter(Boolean);
-                const pk = pickBubble(ls, g.tx, g.ty, cv.width, cv.height);
-                if (pk.length) return pk;
-            }
-            return [];
-        };
-        let pick = await tryRead(g.canvas);
-        if (!pick.length) {
-            const inv = document.createElement('canvas'); inv.width = g.canvas.width; inv.height = g.canvas.height;
-            const gi = inv.getContext('2d'); gi.drawImage(g.canvas, 0, 0);
-            try { const id = gi.getImageData(0, 0, inv.width, inv.height), d = id.data; for (let i = 0; i < d.length; i += 4) { d[i] = d[i + 1] = d[i + 2] = 255 - d[i]; } gi.putImageData(id, 0, 0); } catch (e) { }
-            pick = await tryRead(inv);
-            if (pick.length) src = inv;
-        }
-        if (!pick.length) { if (cfg.dbg) { drawDbg(g, pick); } return ''; }
-        const first = toSpeech(joinLines(pick));
+            return null;
+        })();
+        const panel = $('ink-panel');
+        const eye = $('ink-eye');
+        const hidden = [];
+        [panel, eye].forEach(el => { if (!el) return; hidden.push({ el, vis: el.style.visibility }); el.style.visibility = 'hidden'; });
+        let shot;
         try {
-            const hs = pick.map(l => l.bbox.y1 - l.bbox.y0).sort((a, b) => a - b);
-            const lh = hs[hs.length >> 1] || 20;
-            let bx0 = Math.min(...pick.map(l => l.bbox.x0)), by0 = Math.min(...pick.map(l => l.bbox.y0));
-            let bx1 = Math.max(...pick.map(l => l.bbox.x1)), by1 = Math.max(...pick.map(l => l.bbox.y1));
-            const mx = Math.max(lh * 1.2, 18), my = Math.max(lh * 2.4, 28);
-            bx0 = Math.max(0, bx0 - mx); by0 = Math.max(0, by0 - my);
-            bx1 = Math.min(g.canvas.width, bx1 + mx); by1 = Math.min(g.canvas.height, by1 + my);
-            const f = Math.min(5, Math.max(1.4, 52 / lh)), pad = 20;
-            const c2 = document.createElement('canvas');
-            c2.width = Math.round((bx1 - bx0) * f) + pad * 2; c2.height = Math.round((by1 - by0) * f) + pad * 2;
-            const g2 = c2.getContext('2d', { willReadFrequently: true });
-            g2.fillStyle = '#fff'; g2.fillRect(0, 0, c2.width, c2.height);
-            g2.imageSmoothingQuality = 'high';
-            g2.drawImage(src, bx0, by0, bx1 - bx0, by1 - by0, pad, pad, (bx1 - bx0) * f, (by1 - by0) * f);
-            try {
-                const id = g2.getImageData(pad, pad, c2.width - pad * 2, c2.height - pad * 2), d = id.data;
-                let sum = 0, n = 0;
-                for (let i = 0; i < d.length; i += 16) { sum += d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114; n++; }
-                const dark = n && (sum / n) < 120;
-                for (let i = 0; i < d.length; i += 4) {
-                    let L = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
-                    L = Math.max(0, Math.min(255, (L - 128) * (cfg.bin ? 1.0 : 1.55) + 128));
-                    if (dark) L = 255 - L;
-                    d[i] = d[i + 1] = d[i + 2] = L;
-                }
-                g2.putImageData(id, pad, pad);
-                if (cfg.bin) preprocessBalloon(c2);
-            } catch (e) { }
-            await w.setParameters({ tessedit_pageseg_mode: '6' });
-            let r2;
-            try {
-                r2 = await w.recognize(c2, {}, { blocks: true, text: true });
-            } finally {
-                await w.setParameters({ tessedit_pageseg_mode: '11' });
-            }
-            const raw2 = linesOf(r2.data);
-            const cx = ((bx0 + bx1) / 2 - bx0) * f + pad, cy = ((by0 + by1) / 2 - by0) * f + pad;
-            let pick2 = [];
-            for (const rl of [false, true]) {
-                pick2 = pickBubble(raw2.map(l => cleanLine(l, rl)).filter(Boolean), cx, cy, c2.width, c2.height);
-                if (pick2.length) break;
-            }
-            if (!pick2.length) {
-                const all = raw2.map(l => cleanLine(l, true)).filter(Boolean);
-                if (all.length) pick2 = all;
-            }
-            const letters = t => (t.match(/\p{L}/gu) || []).length;
-            const text2 = pick2.length ? toSpeech(joinLines(pick2)) : '';
-            if (cfg.dbg) { drawDbg(g, pick2.length ? pick2 : pick); }
-            if (text2 && letters(text2) >= letters(first) * 0.7 && letters(text2) <= letters(first) * 2.2) return text2;
-            if (text2 && letters(text2) > letters(first) && letters(text2) <= letters(first) * 2.5) return text2;
-        } catch (e) { try { await w.setParameters({ tessedit_pageseg_mode: '11' }); } catch (_) { } }
-        return first;
+            if (hidden.length) await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+            shot = await captureRetry();
+        } finally {
+            hidden.forEach(({ el, vis }) => { el.style.visibility = vis; });
+        }
+        const img = new Image(); img.src = shot; await img.decode();
+        const kx = img.naturalWidth / innerWidth, ky = img.naturalHeight / innerHeight;
+        let x0 = 0, y0 = 0, x1 = innerWidth, y1 = innerHeight;
+        if (pe) {
+            const r = pe.getBoundingClientRect();
+            x0 = Math.max(r.left, 0); y0 = Math.max(r.top, 0); x1 = Math.min(r.right, innerWidth); y1 = Math.min(r.bottom, innerHeight);
+        }
+        const sx = x0 * kx, sy = y0 * ky, sw = (x1 - x0) * kx, sh = (y1 - y0) * ky;
+        const sc = Math.min(4, Math.max(2, 2000 / sw));
+        const pad = 16;
+        const c = document.createElement('canvas');
+        c.width = Math.round(sw * sc) + pad * 2; c.height = Math.round(sh * sc) + pad * 2;
+        const g = c.getContext('2d');
+        g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
+        g.imageSmoothingQuality = 'high';
+        g.drawImage(img, sx, sy, sw, sh, pad, pad, sw * sc, sh * sc);
+        const rr = await w.recognize(c, {}, { blocks: true, text: true });
+        const lines = (rr.data.lines || []).map(l => cleanLine(l, true)).filter(Boolean);
+        if (!lines.length) return '';
+        const cx = (innerWidth / 2 - x0) * kx * sc + pad, cy = (innerHeight * 0.45 - y0) * ky * sc + pad;
+        const dist = l => { const b = l.bbox; return Math.hypot(Math.max(b.x0 - cx, 0, cx - b.x1), Math.max(b.y0 - cy, 0, cy - b.y1)); };
+        const sorted = lines.slice().sort((a, b) => dist(a) - dist(b));
+        const seed = sorted[0];
+        const lh = seed.bbox.y1 - seed.bbox.y0;
+        const sel = lines.filter(l => {
+            const a = l.bbox, b = seed.bbox;
+            return Math.abs(a.y0 - b.y0) < lh * 2 || Math.abs(a.y1 - b.y1) < lh * 2;
+        });
+        return toSpeech(joinLines(sel));
     }
 
     async function narrate(st, id) {
         try { await narrate0(st, id); }
-        finally { if (typeof musDuck === 'function') musDuck(false); }   // solta a música assim que o balão termina
+        finally { musDuck(false); }
     }
     async function narrate0(st, id) {
-        if (typeof musDuck === 'function') musDuck(true);
-        while (alive(id) && paused()) { setSt('⏸ Em pausa…'); await sleep(200); }
+        musDuck(true);
+        while (alive(id) && paused()) { setStatus('⏸ Em pausa…'); await sleep(200); }
         if (!alive(id) || (cfg.auto && findEndBtn())) return;
         await settle(id);
         if (!alive(id)) return;
-        setSt(`🔎 ${label(st)} · lendo o balão…`);
+        setStatus(`🔎 ${stateLabel(st)} · lendo…`);
         let text = '';
         try { text = await ocrView(); }
-        catch (e) {
-            if (alive(id)) finish('🎧 Não consegui ler: ' + (e.message || e));
-            return;
-        }
+        catch (e) { if (alive(id)) finish('🎧 Erro: ' + (e.message || e)); return; }
         if (!alive(id)) return;
-        if (!text) { setSt(`🎧 ${label(st)} · sem texto aqui`); await humanWait(Math.max(400, 800 / (cfg.vrate || 1)), st, id); return; }
-        setSt(`🎧 ${label(st)} · ${text.length > 70 ? text.slice(0, 67) + '…' : text}`);
+        if (!text) { setStatus(`🎧 ${stateLabel(st)} · sem texto`); await humanWait(600, st, id); return; }
+        setStatus(`🎧 ${text.length > 70 ? text.slice(0, 67) + '…' : text}`);
         await speak(text, id);
         if (alive(id)) await sleep(250);
     }
-    function toggleVoice() {
-        cfg.voice = !cfg.voice; save(); refreshBtn();
-        if (!cfg.voice) { cancelSpeech(); if (typeof musDuck === 'function') musDuck(false); return; }
-        if (!TTS || !ptVoices().length) setSt('⚠ Nenhuma voz em português encontrada.');
-        else ocrWorker().then(() => { if (!running) setSt('Audiolivro pronto. Toque em Ler sozinho.' + (cfg.girl ? ' ' + mascot() : '')); }).catch(e => setSt('⚠ OCR: ' + (e.message || e)));
-    }
 
-    function setSt(t) {
-        const s = document.getElementById('ink-auto-st');
-        if (s && s.textContent !== t) s.textContent = t;
-    }
-    const svg = (p, fill) => `<svg viewBox="0 0 24 24" width="16" height="16" ${fill ? 'fill="currentColor"' : 'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"'} aria-hidden="true">${p}</svg>`;
-    const ICO = {
-        play: svg('<path d="M8 5.5v13a1 1 0 0 0 1.5.86l10.5-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5z"/>', true),
-        pause: svg('<path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z"/>', true),
-        book: svg('<path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v16H6.5A2.5 2.5 0 0 0 4 21.5z"/><path d="M4 5.5v16"/>'),
-        down: svg('<path d="M6 9l6 6 6-6"/>'),
-        up: svg('<path d="M6 15l6-6 6 6"/>'),
-        voice: svg('<path d="M11 5L6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/>')
-    };
-    const ICO_O = {
-        'ink-ord-btn': svg('<path d="M7 4v16M7 4L3.5 7.5M7 4l3.5 3.5M17 20V4M17 20l-3.5-3.5M17 20l3.5-3.5"/>'),
-        'ink-ord-clean': svg('<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M19 17v4M17 19h4"/>'),
-        'ink-ord-zero': svg('<path d="M3 12a9 9 0 1 0 3-6.7M3 4v5h5"/>')
-    };
-    const INK_CSS = `
-#ink-auto-ui{--ia-bg:rgba(255,240,245,.95);--ia-card:rgba(255,182,193,.4);--ia-card2:rgba(255,105,180,.5);--ia-line:rgba(255,192,203,.8);--ia-txt:#5c4a4a;--ia-dim:#a88b8b;--ia-ac:#ff69b4;--ia-ac2:#ffb6c1;
-position:fixed;z-index:2147483000;width:min(236px,calc(100vw - 16px));box-sizing:border-box;padding:8px;padding-top:12px;color:var(--ia-txt);
-background:var(--ia-bg);-webkit-backdrop-filter:blur(16px) saturate(1.4);backdrop-filter:blur(16px) saturate(1.4);
-border:2px solid var(--ia-ac2);border-radius:24px;font:12.5px/1.3 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
-box-shadow:0 8px 24px rgba(255,105,180,.3),inset 0 1px 0 rgba(255,255,255,.5);
-overscroll-behavior:contain;touch-action:manipulation;-webkit-tap-highlight-color:transparent;pointer-events:auto;
-overflow:visible !important;
-}
-#ink-auto-ui::before,#ink-auto-ui::after{content:"";position:absolute;top:-12px;width:0;height:0;border-left:14px solid transparent;border-right:14px solid transparent;border-bottom:20px solid var(--ia-ac2);z-index:-1}
-#ink-auto-ui::before{left:24px;transform:rotate(-15deg)}
-#ink-auto-ui::after{right:24px;transform:rotate(15deg)}
-#ink-auto-ui.min::before,#ink-auto-ui.min::after{display:none}
-#ink-auto-ui.min{padding-top:8px !important}
-#ink-auto-body{max-height:calc(100vh - 40px);max-height:calc(100dvh - 40px);overflow:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none}
-#ink-auto-body::-webkit-scrollbar{display:none}
-#ink-auto-ui.mob{background:rgba(255,240,245,.98);-webkit-backdrop-filter:none;backdrop-filter:none}
-#ink-auto-ui *{box-sizing:border-box}
-#ink-auto-ui button{all:unset;box-sizing:border-box;cursor:pointer;user-select:none;-webkit-user-select:none;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
-#ink-auto-ui button:focus-visible{outline:2px solid var(--ia-ac);outline-offset:1px}
-#ink-auto-ui .ia-head{display:flex;align-items:center;gap:6px;cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none}
-#ink-auto-ui .ia-logo{width:24px;height:24px;border-radius:8px;display:grid;place-items:center;color:#fff;flex:none;background:linear-gradient(135deg,var(--ia-ac),var(--ia-ac2))}
-#ink-auto-ui .ia-title{flex:1;font-weight:800;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#ff1493;font-family:'Comic Sans MS','Nunito',sans-serif}
-#ink-auto-ui .ia-ib{width:26px;height:26px;border-radius:8px;display:grid;place-items:center;background:var(--ia-card);color:var(--ia-txt);flex:none}
-#ink-auto-ui #ink-auto-mini-go{display:none;color:#fff;background:linear-gradient(135deg,var(--ia-ac),var(--ia-ac2))}
-#ink-auto-ui.min{width:auto;padding:6px}
-#ink-auto-ui.min .ia-title,#ink-auto-ui.min #ink-auto-body{display:none}
-#ink-auto-ui.min #ink-auto-mini-go{display:grid}
-#ink-auto-ui.mob .ia-ib{width:36px;height:36px;border-radius:11px}
-#ink-auto-ui .ia-st{margin:6px 0 0;padding:5px 9px;border-radius:10px;background:var(--ia-card);color:var(--ia-txt);font-size:11.5px;line-height:1.3;word-break:break-word;border:1px solid var(--ia-line);
-display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2;overflow:hidden;transition:border-color .2s}
-#ink-auto-ui .ia-st:empty{display:none}
-#ink-auto-ui.run .ia-st{border-color:var(--ia-ac)}
-#ink-auto-ui .ia-main{display:flex;gap:6px;align-items:center;margin-top:6px}
-#ink-auto-ui #ink-auto-go{flex:1;height:36px;border-radius:11px;display:flex;align-items:center;justify-content:center;gap:6px;font-weight:800;font-size:12.5px;color:#fff;
-background:linear-gradient(135deg,var(--ia-ac),var(--ia-ac2));box-shadow:0 4px 12px rgba(255,105,180,.4);transition:transform .08s,filter .15s}
-#ink-auto-ui #ink-auto-go:active{transform:scale(.97)}
-#ink-auto-ui.run #ink-auto-go{background:var(--ia-card2);box-shadow:none;color:var(--ia-txt)}
-#ink-auto-ui.mob #ink-auto-go{height:44px}
-#ink-auto-ui .ia-step{display:flex;align-items:center;border-radius:11px;background:var(--ia-card);flex:none}
-#ink-auto-ui .ia-step button{width:26px;height:36px;border-radius:9px;display:grid;place-items:center;font-size:16px;line-height:1}
-#ink-auto-ui .ia-step button:active{background:var(--ia-card2)}
-#ink-auto-ui.mob .ia-step button{width:32px;height:44px}
-#ink-auto-ui .ia-val{min-width:34px;text-align:center;font-weight:600;font-size:12px;font-variant-numeric:tabular-nums}
-#ink-auto-ui .ia-chips{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;margin-top:6px}
-#ink-auto-ui .ia-chip{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;min-height:42px;padding:5px 1px 4px;border-radius:11px;
-background:var(--ia-card);border:1px solid var(--ia-line);color:var(--ia-txt);font-size:9.5px;font-weight:600;letter-spacing:.1px;transition:background .12s,color .12s,border-color .12s}
-#ink-auto-ui.mob .ia-chip{min-height:50px}
-#ink-auto-ui .ia-chip:active{background:var(--ia-card2)}
-#ink-auto-ui .ia-chip.on{color:#fff;background:var(--ia-ac);border-color:#ff1493}
-#ink-auto-ui .ia-chip svg{width:16px;height:16px;color:var(--ia-ac)}
-#ink-auto-ui .ia-chip.on svg{color:#fff}
-#ink-auto-ui .ia-sub{display:flex;gap:4px;align-items:stretch;margin-top:5px}
-#ink-auto-ui .ia-sub .ia-row{flex:1;min-width:0}
-#ink-auto-ui .ia-sub .ia-step button{height:32px}
-#ink-auto-ui.mob .ia-sub .ia-step button{height:40px}
-#ink-auto-ui .ia-sec{margin:9px 2px 4px;font-size:9.5px;letter-spacing:.9px;text-transform:uppercase;color:var(--ia-dim);font-weight:700}
-#ink-auto-ui .ia-row{display:flex;align-items:center;gap:7px;width:100%;padding:7px 9px;border-radius:11px;background:var(--ia-card);border:1px solid var(--ia-line);font-size:11.5px;transition:background .12s,border-color .12s;color:var(--ia-txt)}
-#ink-auto-ui.mob .ia-row{min-height:40px}
-#ink-auto-ui .ia-row:active{background:var(--ia-card2)}
-#ink-auto-ui .ia-row.on{border-color:var(--ia-ac);background:var(--ia-ac);color:#fff}
-#ink-auto-ui .ia-lbl{flex:1;min-width:0;font-weight:550;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-#ink-auto-ui .ia-ico{display:grid;place-items:center;color:var(--ia-dim);flex:none}
-#ink-auto-ui .ia-sub.dim{display:none}
-#ink-auto-ui:has(#ink-eye-btn:not(.on)) #ink-eye-sub{display:none}
-@media (hover:hover){
-#ink-auto-ui .ia-row:hover,#ink-auto-ui .ia-chip:hover{background:var(--ia-card2)}
-#ink-auto-ui .ia-ib:hover,#ink-auto-ui .ia-step button:hover{background:var(--ia-card2)}
-#ink-auto-ui #ink-auto-go:hover{filter:brightness(1.08)}
-}
-#ink-auto-ui.boy{--ia-bg:rgba(16,16,20,.84);--ia-card:rgba(255,255,255,.06);--ia-card2:rgba(255,255,255,.12);--ia-line:rgba(255,255,255,.08);--ia-txt:#f4f2ef;--ia-dim:#a19eac;--ia-ac:#e8573f;--ia-ac2:#ff8a4c;
-border:1px solid var(--ia-line);border-radius:18px;padding-top:8px;box-shadow:0 10px 30px rgba(0,0,0,.5),inset 0 1px 0 rgba(255,255,255,.05)}
-#ink-auto-ui.boy::before,#ink-auto-ui.boy::after{display:none}
-#ink-auto-ui.boy.mob{background:rgba(16,16,20,.96)}
-#ink-auto-ui.boy .ia-title{color:var(--ia-txt);font-weight:650;font-size:12.5px;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
-#ink-auto-ui.boy .ia-st{color:#d9d6df;border-color:transparent}
-#ink-auto-ui.boy.run .ia-st{border-color:rgba(232,87,63,.45)}
-#ink-auto-ui.boy #ink-auto-go{font-weight:650;box-shadow:0 4px 12px rgba(232,87,63,.3)}
-#ink-auto-ui.boy.run #ink-auto-go{box-shadow:none;color:var(--ia-txt)}
-#ink-auto-ui.boy .ia-chip{border-color:transparent;color:var(--ia-dim)}
-#ink-auto-ui.boy .ia-chip.on{color:#fff;background:rgba(232,87,63,.2);border-color:rgba(232,87,63,.55)}
-#ink-auto-ui.boy .ia-chip svg{color:currentColor}
-#ink-auto-ui.boy .ia-row{border-color:transparent}
-#ink-auto-ui.boy .ia-row.on{border-color:rgba(232,87,63,.55);background:rgba(232,87,63,.16)}
-/* seletor de skin (só aparece no modo menina) */
-#ink-auto-ui .ia-skins{margin-top:2px}
-#ink-auto-ui .ia-skin-btns{display:flex;gap:4px}
-#ink-auto-ui .ia-skin{flex:1;display:flex;align-items:center;justify-content:center;gap:4px;min-height:32px;padding:6px 4px;border-radius:11px;font-size:11.5px;font-weight:600;
-background:var(--ia-card);border:1px solid var(--ia-line);color:var(--ia-txt);white-space:nowrap;transition:background .12s,border-color .12s}
-#ink-auto-ui.mob .ia-skin{min-height:40px}
-#ink-auto-ui .ia-skin:active{background:var(--ia-card2)}
-#ink-auto-ui .ia-skin.on{color:#fff;background:var(--ia-ac);border-color:var(--ia-ac2)}
-#ink-auto-ui.boy .ia-skins{display:none}
-/* ===== SKIN LOBO ===== */
-#ink-auto-ui.skin-lobo{--ia-bg:rgba(28,34,48,.95);--ia-card:rgba(150,170,205,.16);--ia-card2:rgba(150,170,205,.30);--ia-line:rgba(170,190,225,.30);--ia-txt:#e9eef7;--ia-dim:#8f9bb5;--ia-ac:#5f8fd0;--ia-ac2:#aebfdc;
-box-shadow:0 8px 24px rgba(10,16,32,.55),0 0 18px rgba(120,160,230,.18),inset 0 1px 0 rgba(255,255,255,.12)}
-#ink-auto-ui.skin-lobo.mob{background:rgba(28,34,48,.98)}
-#ink-auto-ui.skin-lobo::before,#ink-auto-ui.skin-lobo::after{top:-28px;width:30px;height:38px;border:0;clip-path:polygon(50% 0,100% 100%,0 100%);
-background:radial-gradient(ellipse 45% 55% at 50% 100%,#3a4666 0 55%,var(--ia-ac2) 58%)}
-#ink-auto-ui.skin-lobo::before{left:18px;transform:rotate(-10deg)}
-#ink-auto-ui.skin-lobo::after{right:18px;transform:rotate(10deg)}
-#ink-auto-ui.skin-lobo .ia-title{color:#cfe0ff;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;letter-spacing:.2px}
-#ink-auto-ui.skin-lobo #ink-auto-go{box-shadow:0 4px 12px rgba(95,143,208,.35)}
-#ink-auto-ui.skin-lobo.run #ink-auto-go{box-shadow:none}
-#ink-auto-ui.skin-lobo .ia-chip.on{border-color:var(--ia-ac2)}
-#ink-auto-ui.skin-lobo .ia-row.on{border-color:var(--ia-ac2)}
-#ink-ord-bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:10px 0 4px}
-#ink-ord-bar .io-pill{display:inline-flex;align-items:center;gap:6px;font:600 12.5px/1 system-ui,-apple-system,"Segoe UI",sans-serif;color:#f1efec;
-background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.1);border-radius:12px;padding:9px 12px;cursor:pointer;white-space:nowrap;
-transition:background .12s,transform .06s;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
-#ink-ord-bar .io-pill:hover{background:rgba(255,255,255,.13)}
-#ink-ord-bar .io-pill:active{transform:scale(.97)}
-#ink-ord-bar .io-pill svg{opacity:.85}
-#ink-ord-bar .io-seg{display:flex;gap:2px;margin-left:auto;padding:3px;background:rgba(0,0,0,.3);border:1px solid rgba(255,255,255,.1);border-radius:14px}
-#ink-ord-bar .io-seg button{font:600 12.5px/1 system-ui,-apple-system,"Segoe UI",sans-serif;border:0;border-radius:11px;padding:8px 12px;cursor:pointer;white-space:nowrap;
-color:#bdbac6;background:transparent;transition:background .15s,color .15s;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
-#ink-ord-bar .io-seg button.on{color:#fff;background:linear-gradient(135deg,#e8573f,#ff8a4c);box-shadow:0 2px 10px rgba(232,87,63,.35)}
-#ink-ord-st{font:12.5px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif;padding:8px 11px;margin:6px 0 2px;border-radius:11px;
-background:rgba(90,170,255,.1);border:1px solid rgba(90,170,255,.22);color:#a9d2ff}
-#ink-ord-st:empty{display:none}
-#ink-ord-bar .io-pill,#ink-ord-bar .io-seg button{-webkit-user-select:none;user-select:none}
-@media (pointer:coarse),(max-width:700px){
-#ink-ord-bar{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:12px 0 6px}
-#ink-ord-bar .io-pill{justify-content:center;min-height:48px;padding:10px 6px;font-size:13.5px;border-radius:14px}
-#ink-ord-bar .io-pill span{overflow:hidden;text-overflow:ellipsis}
-#ink-ord-bar .io-seg{grid-column:1/-1;margin:0;width:100%}
-#ink-ord-bar .io-seg button{flex:1;min-height:44px;font-size:14px;text-align:center}
-#ink-ord-st{font-size:13px;padding:10px 12px}
-}
-`;
-    function injectCSS() {
-        const old = document.getElementById('ink-ui-css');
-        if (old && old.dataset.v === '3.1') return;
-        if (old) old.remove();   // CSS de versão antiga: troca pelo novo (senão a skin nova não aparece)
-        const s = document.createElement('style');
-        s.id = 'ink-ui-css'; s.dataset.v = '3.1'; s.textContent = INK_CSS;
-        (document.head || document.documentElement).appendChild(s);
-    }
-
-    const sw = (id, on) => {
-        const e = document.getElementById(id);
-        if (e) { e.classList.toggle('on', !!on); e.setAttribute('aria-pressed', on ? 'true' : 'false'); }
-    };
-    const speedTxt = () => String(+(cfg.speed || 1).toFixed(2)) + '×';
-    function refreshBtn() {
-        const u = document.getElementById('ink-auto-ui');
-        if (u) u.classList.toggle('run', running);
-        const b = document.getElementById('ink-auto-go');
-        if (b) b.innerHTML = running ? ICO.pause + '<span>Pausar</span>' : ICO.play + '<span>Ler sozinho</span>';
-        const mg = document.getElementById('ink-auto-mini-go');
-        if (mg) { mg.innerHTML = running ? ICO.pause : ICO.play; mg.title = running ? 'Pausar' : 'Ler sozinho'; }
-        sw('ink-auto-manga', cfg.manga);
-        sw('ink-auto-next', cfg.auto);
-        sw('ink-voice-btn', cfg.voice);
-        sw('ink-perf-btn', isPerf());
-        sw('ink-anx-btn', cfg.anx > 0);
-        const ab = document.getElementById('ink-anx-btn');
-        if (ab) {
-            const sp = ab.querySelector('span'); if (sp) sp.textContent = ANX_LBL[cfg.anx | 0];
-            ab.title = 'Toque para alternar: desligado → ansiedade normal → ansiedade crônica';
-        }
-        const sp = document.getElementById('ink-auto-sp');
-        if (sp) sp.textContent = speedTxt();
-        const vp = document.getElementById('ink-voice-name');
-        if (vp) { const v = currentVoice(); vp.textContent = v ? shortVoice(v.name) : 'sem voz pt'; }
-        const vs = document.getElementById('ink-voice-sp');
-        if (vs) vs.textContent = String(+(cfg.vrate || 1).toFixed(2)) + '×';
-        const vc = document.getElementById('ink-voice-combo');
-        if (vc) vc.classList.toggle('dim', !cfg.voice);
-        const pb = document.getElementById('ink-perf-btn');
-        if (pb) pb.title = isPerf()
-            ? 'Modo leve ativo (menos CPU/GPU). Toque para alternar.'
-            : 'Modo leve desligado. Toque para alternar (recomendado no celular).';
-    }
-    function applyTheme() {
-        const u = document.getElementById('ink-auto-ui'); if (!u) return;
-        u.classList.toggle('boy', !cfg.girl);
-        SKINS.forEach(k => u.classList.toggle('skin-' + k.id, cfg.girl && curSkin().id === k.id));
-        u.querySelectorAll('[data-skin]').forEach(b => {
-            const on = b.dataset.skin === curSkin().id;
-            b.classList.toggle('on', on);
-            b.setAttribute('aria-pressed', on ? 'true' : 'false');
-        });
-        const t = document.getElementById('ink-auto-title');
-        if (t) t.textContent = (cfg.girl ? 'Modo Meninas ' + mascot() : 'Leitura automática') + ' ' + INK_VERSION;
-        const l = document.getElementById('ink-gender-lbl');
-        if (l) l.textContent = cfg.girl ? '👧 Menina · toque p/ menino' : '👦 Menino · toque p/ menina';
-    }
-    function applyMin() {
-        const u = document.getElementById('ink-auto-ui'); if (!u) return;
-        const mn = cfg.min == null ? false : !!cfg.min;
-        u.classList.toggle('min', mn);
-        const m = u.querySelector('#ink-auto-min');
-        if (m) { m.innerHTML = mn ? ICO.up : ICO.down; m.title = mn ? 'expandir' : 'minimizar'; }
-        applyPos();
-    }
-    function applyPos() {
-        const u = document.getElementById('ink-auto-ui');
-        if (!u || !cfg.pos) return;
-        const r = u.getBoundingClientRect();
-        const x = Math.min(Math.max(0, cfg.pos.x), Math.max(0, innerWidth - r.width));
-        const y = Math.min(Math.max(0, cfg.pos.y), Math.max(0, innerHeight - r.height));
-        u.style.left = x + 'px'; u.style.top = y + 'px'; u.style.bottom = 'auto';
-    }
-    function toggle() {
-        if (running) stop('Parado.');
-        else loop();
-    }
-    function setSpeed(dir) {
-        let i = 0, best = 1e9;
-        SPEEDS.forEach((v, k) => { const d = Math.abs(v - (cfg.speed || 1)); if (d < best) { best = d; i = k; } });
-        cfg.speed = SPEEDS[Math.min(SPEEDS.length - 1, Math.max(0, i + dir))];
-        save(); refreshBtn();
-    }
-    function applyEye() {
-        let o = document.getElementById('ink-eye');
-        if (!cfg.eye || !location.pathname.startsWith('/ler/')) { if (o) o.remove(); }
-        else {
-            if (!o) {
-                o = document.createElement('div');
-                o.id = 'ink-eye';
-                o.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:2147482000' + (MOBILE ? '' : ';mix-blend-mode:multiply');
-                (document.body || document.documentElement).appendChild(o);
-            }
-            const a = Math.min(0.6, Math.max(0.05, cfg.eyeLvl || 0.25));
-            const bg = MOBILE
-                ? `rgba(255,150,40,${(0.04 + a * 0.3).toFixed(3)})`
-                : `rgba(255,${Math.round(190 - a * 150)},${Math.round(110 - a * 150)},${(0.35 + a * 0.9).toFixed(2)})`;
-            if (o.dataset.bg !== bg) { o.dataset.bg = bg; o.style.background = bg; }
-        }
-        sw('ink-eye-btn', cfg.eye);
-        const l = document.getElementById('ink-eye-lvl');
-        if (l) l.textContent = Math.round((cfg.eyeLvl || 0.25) * 100) + '%';
-    }
-    function toggleEye() { cfg.eye = !cfg.eye; save(); applyEye(); }
-    function setEyeLvl(d) {
-        cfg.eyeLvl = Math.min(0.6, Math.max(0.05, Math.round(((cfg.eyeLvl || 0.25) + d) * 100) / 100));
-        if (!cfg.eye) cfg.eye = true;
-        save(); applyEye();
-    }
-
-    const MS_KEY = 'ink_missions';
-    function scanMissions() {
-        if (document.hidden) return;
-        const lis = document.querySelectorAll('li.event-mission');
-        if (!lis.length) return;
-        const out = [];
-        lis.forEach(li => {
-            const el = li.querySelector('strong');
-            const t = (el ? el.textContent : '').replace(/\s+/g, ' ').trim();
-            if (!/^ler\s+\d+\s+p[aá]ginas/i.test(t)) return;
-            const fe = li.querySelector('.event-mission__frac');
-            const fr = fe ? fe.textContent : '';
-            const m = /(\d+)\s*\/\s*(\d+)/.exec(fr);
-            const done = li.classList.contains('is-done') || /resgatad/i.test(fr);
-            const tot = +/\d+/.exec(t)[0];
-            out.push({ t, c: m ? +m[1] : (done ? tot : 0), n: m ? +m[2] : tot, done, rep: !!li.querySelector('.event-mission__repeat'), fac: /fac[cç][aã]o/i.test(t) });
-        });
-        if (out.length) { try { localStorage.setItem(MS_KEY, JSON.stringify({ ts: Date.now(), list: out })); } catch (e) { } }
-    }
-    setInterval(scanMissions, 2500);
-    const pendingMissions = () => { try { return (JSON.parse(localStorage.getItem(MS_KEY) || '{}').list || []).filter(x => !x.done && x.n > x.c); } catch (e) { return []; } };
-    let metaSel = -1;
-    const allTargets = L => { const nf = L.filter(x => !x.fac); return (nf.length ? nf : L).slice().sort((a, b) => (a.n - a.c) - (b.n - b.c)); };
-    function metaPick() {
-        const L = pendingMissions();
-        if (!L.length) { setSt('Sem missões de leitura pendentes. Abra o painel do evento uma vez e volte.'); return; }
-        metaSel = (metaSel + 1) % (L.length + 1);
-        if (metaSel === L.length) {
-            cfg.metaGoal = Math.max(1, ...allTargets(L).map(x => x.n - x.c));
-        } else {
-            cfg.metaGoal = Math.max(1, L[metaSel].n - L[metaSel].c);
-            if (L[metaSel].fac) setSt('Missão de facção: leia uma HQ do herói da sua facção.');
-        }
-        save(); metaPaint();
-    }
-    const meta = { on: false, done: 0, seen: new Set(), targets: [] };
-    const metaKey = st => { const c = st.p != null ? st.p : st.pg; return c == null ? null : location.pathname + '#' + c; };
-    function metaPaint() {
-        const l = document.getElementById('ink-meta-lbl'), v = document.getElementById('ink-meta-val');
-        if (l) l.textContent = meta.on ? `${meta.done}/${cfg.metaGoal} págs` + (meta.targets.length ? ` · ✓${meta.targets.filter(x => meta.done >= x.r).length}/${meta.targets.length}` : '') : 'Ligar meta';
-        if (v) v.textContent = cfg.metaGoal;
-        const pl = document.getElementById('ink-meta-pick-lbl');
-        if (pl) {
-            const L = pendingMissions(), x = L[metaSel];
-            const short = t => (t.replace(/^ler\s+\d+\s+p[aá]ginas\s*/i, '').replace(/\s+hoje$/i, '') || 'qualquer HQ');
-            const txt = (metaSel >= 0 && metaSel === L.length) ? `Todas (${allTargets(L).length}) · ${cfg.metaGoal} págs` : x ? `${x.fac ? '🏰 ' : ''}Faltam ${x.n - x.c} · ${short(x.t)}` : (L.length ? `Escolher missão (${L.length} pendentes)` : 'Abra o painel do evento p/ ler missões');
-            pl.textContent = txt; pl.title = txt;
-        }
-        sw('ink-meta-btn', meta.on);
-    }
-    function metaToggle() {
-        if (meta.on) { meta.on = false; metaPaint(); setSt('Meta desligada.'); return; }
-        meta.on = true; meta.done = 0; meta.seen.clear();
-        { const L = pendingMissions(); meta.targets = (metaSel >= 0 && metaSel === L.length) ? allTargets(L).map(x => ({ t: x.t, r: x.n - x.c })) : []; }
-        const k = metaKey(readState()); if (k) meta.seen.add(k);
-        metaPaint();
-        if (!running) loop();
-    }
-    function metaGoalStep(d) { cfg.metaGoal = Math.max(1, Math.min(300, (cfg.metaGoal || 10) + d)); save(); metaPaint(); }
-    function metaTick() {
-        if (!meta.on || !running) return;
-        const k = metaKey(readState());
-        if (!k || meta.seen.has(k)) return;
-        meta.seen.add(k); meta.done++;
-        const hit = meta.targets.filter(x => x.r === meta.done).map(x => x.t);
-        if (hit.length) console.info('[Ink] missão completa:', hit.join(' | '));
-        if (meta.done >= cfg.metaGoal) {
-            meta.on = false;
-            const fac = pendingMissions().some(x => x.fac) ? ' Missões de facção: leia HQs do herói da sua facção.' : '';
-            finish(`✓ Meta cumprida: ${meta.done} páginas lidas.${fac} Abra o painel do evento para atualizar.`);
-        }
-        metaPaint();
-    }
-    setInterval(metaTick, 500);
-
-    /* =====================================================================
-       ABA MÚSICA — banco de dados no Google Drive (via Apps Script "Code.gs")
-       ===================================================================== */
-    const MUS = { list: [], cur: -1, a: null, blob: null, shuffle: false, tab: 'read', synced: false };
-    const MUS_LS = 'ink_music_list';
-    try { MUS.list = JSON.parse(localStorage.getItem(MUS_LS) || '[]'); } catch (e) { }
-    const musVolNow = () => cfg.musicVol == null ? 0.6 : cfg.musicVol;
-    const musSt = t => { const s = document.getElementById('ink-mus-st'); if (s && s.textContent !== t) s.textContent = t; };
-    const musDirect = u => {
-        u = (u || '').trim();
-        const m = /drive\.google\.com\/(?:file\/d\/|open\?id=|uc\?(?:export=\w+&)?id=)([\w-]{10,})/.exec(u);
-        return m ? 'https://drive.google.com/uc?export=download&id=' + m[1] : u;
-    };
+    /* ================================================================== *
+     * 10. MÚSICA (Drive via Apps Script)
+     * ================================================================== */
+    const MUS = { list: [], cur: -1, audio: null, blob: null, shuffle: false };
+    try { MUS.list = JSON.parse(localStorage.getItem('ink_music_list') || '[]'); } catch (e) { }
+    const musVol = () => cfg.musicVol == null ? 0.6 : cfg.musicVol;
+    const musStatus = t => { const el = $('ink-music-status'); if (el && el.textContent !== t) el.textContent = t; };
 
     async function musApi(action, data) {
-        if (!cfg.musicUrl) throw new Error('Toque em "Drive" e cole a URL do app da web.');
+        if (!cfg.musicUrl) throw new Error('URL do app da web não configurada');
         const r = await fetch(cfg.musicUrl, {
             method: 'POST',
-            headers: { 'Content-Type': 'text/plain;charset=utf-8' },   // "simple request" → sem preflight CORS
+            headers: { 'Content-Type': 'text/plain;charset=utf-8' },
             body: JSON.stringify({ action, key: cfg.musicKey || '', ...data })
         });
         const j = await r.json();
@@ -1523,86 +1073,30 @@ background:rgba(90,170,255,.1);border:1px solid rgba(90,170,255,.22);color:#a9d2
     }
     function musSetList(l) {
         MUS.list = l || [];
-        try { localStorage.setItem(MUS_LS, JSON.stringify(MUS.list)); } catch (e) { }
+        try { localStorage.setItem('ink_music_list', JSON.stringify(MUS.list)); } catch (e) { }
         musPaintList();
     }
-    async function musSync(full) {
-        try {
-            musSt('☁ Sincronizando…');
-            const j = await musApi(full ? 'sync' : 'list');
-            musSetList(j.list);
-            musSt('☁ ' + j.list.length + ' faixa(s)' + (j.added ? ' · +' + j.added + ' nova(s)' : ''));
-        } catch (e) { musSt('⚠ ' + (e.message || e)); }
+    async function musSync() {
+        try { musStatus('☁ Sincronizando…'); const j = await musApi('sync'); musSetList(j.list); musStatus(`☁ ${j.list.length} faixa(s)`); }
+        catch (e) { musStatus('⚠ ' + (e.message || e)); }
     }
-
     function musAudio() {
-        if (!MUS.a) {
+        if (!MUS.audio) {
             const a = new Audio();
-            a.preload = 'auto'; a.volume = musVolNow();
+            a.preload = 'auto'; a.volume = musVol();
             a.addEventListener('ended', () => musNext(1));
             a.addEventListener('play', musPaintBtn);
             a.addEventListener('pause', musPaintBtn);
-            MUS.a = a;
+            MUS.audio = a;
         }
-        return MUS.a;
+        return MUS.audio;
     }
-
-    // Ducka (abaixa) a música enquanto o audiolivro fala. Idempotente.
     function musDuck(on) {
-        const a = MUS.a;
+        const a = MUS.audio;
         if (!a || !a.src || a.paused) return;
-        if (on) {
-            if (a._ducked) return;
-            a._ducked = true;
-            a._preVol = a.volume;
-            a.volume = Math.min(a.volume, 0.12);
-        } else if (a._ducked) {
-            a._ducked = false;
-            a.volume = a._preVol != null ? a._preVol : musVolNow();
-            a._preVol = null;
-        }
+        if (on) { if (a._ducked) return; a._ducked = true; a._preVol = a.volume; a.volume = Math.min(a.volume, 0.12); }
+        else if (a._ducked) { a._ducked = false; a.volume = a._preVol != null ? a._preVol : musVol(); a._preVol = null; }
     }
-
-    // Cache das faixas do Drive no IndexedDB (evita baixar de novo até 20 MB a cada play)
-    const MUS_DB = 'ink_music_cache', MUS_MAX = 8;
-    function musIdb() {
-        return new Promise((res, rej) => {
-            try {
-                const r = indexedDB.open(MUS_DB, 1);
-                r.onupgradeneeded = () => r.result.createObjectStore('t', { keyPath: 'fid' });
-                r.onsuccess = () => res(r.result);
-                r.onerror = () => rej(r.error);
-            } catch (e) { rej(e); }
-        });
-    }
-    async function musCacheGet(fid) {
-        try {
-            const db = await musIdb();
-            return await new Promise(res => {
-                const q = db.transaction('t').objectStore('t').get(fid);
-                q.onsuccess = () => res(q.result || null);
-                q.onerror = () => res(null);
-            });
-        } catch (e) { return null; }
-    }
-    async function musCachePut(fid, blob) {
-        try {
-            const db = await musIdb();
-            const all = await new Promise(res => {
-                const q = db.transaction('t').objectStore('t').getAll();
-                q.onsuccess = () => res(q.result || []);
-                q.onerror = () => res([]);
-            });
-            const tx = db.transaction('t', 'readwrite'), st = tx.objectStore('t');
-            all.filter(x => x.fid !== fid).sort((a, b) => a.at - b.at)
-                .slice(0, Math.max(0, all.length - (MUS_MAX - 1))).forEach(x => st.delete(x.fid));
-            st.put({ fid, blob, at: Date.now() });
-        } catch (e) { }
-    }
-    function musKeep(fid) {   // marca como usada agora (LRU simples)
-        musCacheGet(fid).then(r => { if (r) musCachePut(fid, r.blob); });
-    }
-
     async function musPlay(i) {
         const t = MUS.list[i];
         if (!t) return;
@@ -1611,417 +1105,359 @@ background:rgba(90,170,255,.1);border:1px solid rgba(90,170,255,.22);color:#a9d2
         try {
             let src = t.url;
             if (t.fid) {
-                let blob = null;
-                const hit = await musCacheGet(t.fid);
-                if (hit && hit.blob) { blob = hit.blob; musKeep(t.fid); }
-                else {
-                    musSt('⏳ Baixando do Drive…');
-                    const j = await musApi('file', { fid: t.fid });
-                    if (MUS.cur !== i) return;                      // trocou de faixa enquanto baixava
-                    const bin = atob(j.b64), u8 = new Uint8Array(bin.length);
-                    for (let k = 0; k < bin.length; k++) u8[k] = bin.charCodeAt(k);
-                    blob = new Blob([u8], { type: j.mime || 'audio/mpeg' });
-                    musCachePut(t.fid, blob);
-                }
+                musStatus('⏳ Baixando…');
+                const j = await musApi('file', { fid: t.fid });
                 if (MUS.cur !== i) return;
+                const bin = atob(j.b64), u8 = new Uint8Array(bin.length);
+                for (let k = 0; k < bin.length; k++) u8[k] = bin.charCodeAt(k);
                 if (MUS.blob) URL.revokeObjectURL(MUS.blob);
-                MUS.blob = URL.createObjectURL(blob);
+                MUS.blob = URL.createObjectURL(new Blob([u8], { type: j.mime || 'audio/mpeg' }));
                 src = MUS.blob;
             }
             a.src = src;
             await a.play();
-            MUS.fail = 0;
-            musSt('🎵 ' + t.title);
+            musStatus('🎵 ' + t.title);
         } catch (e) {
             if (MUS.cur !== i) return;
-            if (e && (e.name === 'NotAllowedError' || e.name === 'AbortError')) {   // bloqueio de autoplay/interrupção: não é erro da faixa
-                MUS.fail = 0; musSt('⚠ Toque em ▶ para tocar (o navegador bloqueou o início automático).'); return;
-            }
-            // faixa com erro: pula para a próxima (no máximo uma volta na lista)
-            MUS.fail = (MUS.fail || 0) + 1;
-            if (MUS.list.length > 1 && MUS.fail < MUS.list.length) {
-                musSt('⚠ ' + (e.message || e) + ' — pulando…');
-                setTimeout(() => { if (MUS.cur === i) musNext(1); }, 1200);
-            } else { MUS.fail = 0; musSt('⚠ ' + (e.message || e)); }
+            if (e && (e.name === 'NotAllowedError' || e.name === 'AbortError')) { musStatus('⚠ Toque ▶ para tocar'); return; }
+            musStatus('⚠ ' + (e.message || e));
         }
     }
     function musNext(d) {
         const n = MUS.list.length;
         if (!n) return;
-        if (MUS.shuffle && n > 1) {
-            let j;
-            do { j = Math.floor(Math.random() * n); } while (j === MUS.cur);
-            musPlay(j);
-            return;
-        }
-        // se nada está tocando: d>0 começa do 0, d<0 começa do último
+        if (MUS.shuffle && n > 1) { let j; do { j = Math.floor(Math.random() * n); } while (j === MUS.cur); musPlay(j); return; }
         const base = MUS.cur < 0 ? (d > 0 ? -1 : 0) : MUS.cur;
         musPlay(((base + d) % n + n) % n);
     }
     function musToggle() {
         const a = musAudio();
-        if (!a.src) {
-            if (MUS.list.length) musPlay(Math.max(0, MUS.cur));
-            else musSt('Lista vazia. Coloque áudios na pasta do Drive e toque em Sincronizar.');
-            return;
-        }
+        if (!a.src) { if (MUS.list.length) musPlay(Math.max(0, MUS.cur)); else musStatus('Lista vazia'); return; }
         if (a.paused) a.play().catch(() => { }); else a.pause();
     }
-    function musVol(d) {
-        cfg.musicVol = Math.min(1, Math.max(0, Math.round((musVolNow() + d) * 10) / 10));
-        save();
-        if (MUS.a) {
-            if (MUS.a._ducked) MUS.a._preVol = cfg.musicVol;   // abaixada: guarda o novo volume para restaurar depois
-            else MUS.a.volume = cfg.musicVol;
-        }
+    function musVolStep(d) {
+        cfg.musicVol = Math.min(1, Math.max(0, Math.round((musVol() + d) * 10) / 10));
+        saveCfg();
+        if (MUS.audio) { if (MUS.audio._ducked) MUS.audio._preVol = cfg.musicVol; else MUS.audio.volume = cfg.musicVol; }
         musPaintBtn();
     }
-
     function musPaintBtn() {
-        const playing = !!(MUS.a && !MUS.a.paused && MUS.a.src);
-        const p = document.getElementById('ink-mus-play');
-        if (p) {
-            p.classList.toggle('on', playing);
-            p.innerHTML = '<span style="font-size:15px">' + (playing ? '⏸' : '▶') + '</span><span>' + (playing ? 'Pausar' : 'Tocar') + '</span>';
-        }
-        const s = document.getElementById('ink-mus-shuf');
-        if (s) s.classList.toggle('on', MUS.shuffle);
-        const v = document.getElementById('ink-mus-vol');
-        if (v) v.textContent = Math.round(musVolNow() * 100) + '%';
+        const playing = !!(MUS.audio && !MUS.audio.paused && MUS.audio.src);
+        const p = $('ink-music-play');
+        if (p) p.textContent = playing ? '⏸' : '▶';
+        const v = $('ink-music-vol');
+        if (v) v.textContent = Math.round(musVol() * 100) + '%';
     }
     function musPaintList() {
-        const box = document.getElementById('ink-mus-list');
+        const box = $('ink-music-list');
         if (!box) return;
-        box.textContent = '';
-        if (!MUS.list.length) { box.textContent = 'Nenhuma faixa ainda.'; return; }
+        box.textContent = MUS.list.length ? '' : 'Sem faixas';
         MUS.list.forEach((t, i) => {
             const row = document.createElement('div');
             row.className = 'ia-trk' + (i === MUS.cur ? ' on' : '');
             const b = document.createElement('button');
-            b.type = 'button'; b.className = 'ia-trk-t'; b.textContent = t.title; b.title = t.title;
+            b.className = 'ia-trk-t'; b.textContent = t.title; b.title = t.title;
             b.onclick = () => musPlay(i);
-            const x = document.createElement('button');
-            x.type = 'button'; x.className = 'ia-trk-x'; x.textContent = '×'; x.title = 'Remover da lista (não apaga do Drive)';
-            x.onclick = async () => {
-                try {
-                    const j = await musApi('del', { id: t.id });
-                    if (MUS.cur === i) {
-                        MUS.cur = -1;
-                        if (MUS.a) { MUS.a.pause(); MUS.a.removeAttribute('src'); MUS.a.load(); musPaintBtn(); }
-                    } else if (MUS.cur > i) {
-                        MUS.cur--;
-                    }
-                    musSetList(j.list);
-                } catch (e) { musSt('⚠ ' + (e.message || e)); }
-            };
-            row.append(b, x);
+            row.appendChild(b);
             box.appendChild(row);
         });
     }
 
-    function musCss() {
-        if (document.getElementById('ink-mus-css')) return;
-        const s = document.createElement('style');
-        s.id = 'ink-mus-css';
-        s.textContent = `
-#ink-auto-ui .ia-tabs{display:flex;gap:4px;margin:2px 0 6px}
-#ink-auto-ui .ia-tab{flex:1;display:flex;align-items:center;justify-content:center;gap:4px;min-height:32px;padding:5px 4px;border-radius:11px;font-size:11.5px;font-weight:700;background:var(--ia-card);border:1px solid var(--ia-line);color:var(--ia-txt)}
-#ink-auto-ui.mob .ia-tab{min-height:40px}
-#ink-auto-ui .ia-tab.on{color:#fff;background:var(--ia-ac);border-color:var(--ia-ac2)}
-#ink-auto-ui .ia-trks{margin-top:6px;max-height:150px;overflow:auto;border-radius:11px;background:var(--ia-card);border:1px solid var(--ia-line);font-size:11.5px;color:var(--ia-dim);padding:2px}
-#ink-auto-ui .ia-trk{display:flex;align-items:center;gap:2px;border-radius:8px}
-#ink-auto-ui .ia-trk.on{background:var(--ia-ac);color:#fff}
-#ink-auto-ui .ia-trk-t{flex:1;min-width:0;padding:7px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--ia-txt)}
-#ink-auto-ui .ia-trk.on .ia-trk-t{color:#fff}
-#ink-auto-ui .ia-trk-x{width:28px;text-align:center;padding:7px 0;color:inherit;opacity:.7}
-#ink-auto-ui .ia-in{display:block;width:100%;margin-top:4px;padding:7px 9px;border-radius:10px;border:1px solid var(--ia-line);background:var(--ia-card);color:var(--ia-txt);font:inherit;outline:none}
-#ink-auto-ui .ia-in:focus{border-color:var(--ia-ac)}
+    /* ================================================================== *
+     * 11. MISSÕES
+     * ================================================================== */
+    const meta = { on: false, done: 0, seen: new Set() };
+    const metaKey = st => { const c = st.p != null ? st.p : st.pg; return c == null ? null : location.pathname + '#' + c; };
+    const pendingMissions = () => { try { return (JSON.parse(localStorage.getItem('ink_missions') || '{}').list || []).filter(x => !x.done && x.n > x.c); } catch (e) { return []; } };
+
+    function metaToggle() {
+        if (meta.on) { meta.on = false; metaPaint(); setStatus('Meta desligada'); return; }
+        meta.on = true; meta.done = 0; meta.seen.clear();
+        const k = metaKey(readState()); if (k) meta.seen.add(k);
+        metaPaint();
+        if (!running) mainLoop();
+    }
+    function metaTick() {
+        if (!meta.on || !running) return;
+        const k = metaKey(readState());
+        if (!k || meta.seen.has(k)) return;
+        meta.seen.add(k); meta.done++;
+        if (meta.done >= cfg.metaGoal) { meta.on = false; finish(`✓ Meta cumprida: ${meta.done} págs`); }
+        metaPaint();
+    }
+    setInterval(metaTick, 500);
+    function metaPaint() {
+        const l = $('ink-meta-lbl');
+        if (l) l.textContent = meta.on ? `${meta.done}/${cfg.metaGoal}` : 'Ligar meta';
+        const b = $('ink-meta-btn');
+        if (b) b.classList.toggle('on', meta.on);
+    }
+
+    /* ================================================================== *
+     * 12. ÍCONES + CSS
+     * ================================================================== */
+    const svg = (p, fill) => `<svg viewBox="0 0 24 24" width="16" height="16" ${fill ? 'fill="currentColor"' : 'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"'} aria-hidden="true">${p}</svg>`;
+    const ICO = {
+        play: svg('<path d="M8 5.5v13a1 1 0 0 0 1.5.86l10.5-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5z"/>', true),
+        pause: svg('<path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z"/>', true),
+        sort: svg('<path d="M7 4v16M7 4L3.5 7.5M7 4l3.5 3.5M17 20V4M17 20l-3.5-3.5M17 20l3.5-3.5"/>'),
+        clean: svg('<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M19 17v4M17 19h4"/>'),
+        reset: svg('<path d="M3 12a9 9 0 1 0 3-6.7M3 4v5h5"/>'),
+        book: svg('<path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v16H6.5A2.5 2.5 0 0 0 4 21.5z"/><path d="M4 5.5v16"/>'),
+        min: svg('<path d="M6 9l6 6 6-6"/>'),
+        max: svg('<path d="M6 15l6-6 6 6"/>'),
+        voice: svg('<path d="M11 5L6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/>'),
+    };
+
+    const CSS = `
+#ink-panel{position:fixed;bottom:12px;right:12px;z-index:2147483000;width:min(248px,calc(100vw - 16px));font:12.5px/1.3 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+box-sizing:border-box;padding:8px;border:2px solid var(--ib-line);border-radius:20px;background:var(--ib-bg);color:var(--ib-txt);
+--ib-bg:rgba(255,240,245,.96);--ib-card:rgba(255,182,193,.42);--ib-card2:rgba(255,105,180,.55);--ib-line:rgba(255,192,203,.85);--ib-txt:#5c4a4a;--ib-dim:#a88b8b;--ib-ac:#ff69b4;
+box-shadow:0 8px 24px rgba(255,105,180,.28),inset 0 1px 0 rgba(255,255,255,.5);-webkit-backdrop-filter:blur(14px) saturate(1.3);backdrop-filter:blur(14px) saturate(1.3);}
+#ink-panel.mob{background:rgba(255,240,245,.99)}
+#ink-panel.boy{--ib-bg:rgba(16,16,20,.9);--ib-card:rgba(255,255,255,.06);--ib-card2:rgba(255,255,255,.14);--ib-line:rgba(255,255,255,.1);--ib-txt:#f4f2ef;--ib-dim:#a19eac;--ib-ac:#e8573f;border-radius:16px}
+#ink-panel.skin-lobo{--ib-bg:rgba(28,34,48,.95);--ib-card:rgba(150,170,205,.16);--ib-card2:rgba(150,170,205,.3);--ib-line:rgba(170,190,225,.32);--ib-txt:#e9eef7;--ib-dim:#8f9bb5;--ib-ac:#5f8fd0}
+#ink-panel *{box-sizing:border-box}
+#ink-panel button{all:unset;box-sizing:border-box;cursor:pointer;user-select:none;touch-action:manipulation;-webkit-tap-highlight-color:transparent;display:inline-flex;align-items:center;justify-content:center;gap:5px}
+#ink-panel .ia-head{display:flex;align-items:center;gap:6px;cursor:grab;touch-action:none;padding-bottom:6px}
+#ink-panel .ia-title{flex:1;font-weight:800;font-size:13px;color:var(--ib-ac);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#ink-panel .ia-ib{width:26px;height:26px;border-radius:8px;background:var(--ib-card);color:var(--ib-txt);flex:none}
+#ink-panel.mob .ia-ib{width:36px;height:36px;border-radius:11px}
+#ink-panel .ia-go{width:100%;height:38px;border-radius:12px;font-weight:800;font-size:13px;color:#fff;background:linear-gradient(135deg,var(--ib-ac),#ffb6c1);box-shadow:0 4px 12px rgba(255,105,180,.4);margin-top:4px}
+#ink-panel.mob .ia-go{height:46px}
+#ink-panel.run .ia-go{background:var(--ib-card2);box-shadow:none;color:var(--ib-txt)}
+#ink-panel .ia-row{display:flex;gap:4px;margin-top:6px;align-items:stretch}
+#ink-panel .ia-step{display:flex;align-items:center;border-radius:11px;background:var(--ib-card);flex:none}
+#ink-panel .ia-step button{width:28px;height:32px;font-size:16px;line-height:1;color:var(--ib-txt)}
+#ink-panel.mob .ia-step button{width:34px;height:42px}
+#ink-panel .ia-val{min-width:34px;text-align:center;font-weight:600;font-size:12px;align-self:center;color:var(--ib-txt)}
+#ink-panel .ia-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;margin-top:6px}
+#ink-panel .ia-chip{flex-direction:column;min-height:42px;padding:4px;border-radius:11px;background:var(--ib-card);border:1px solid var(--ib-line);color:var(--ib-txt);font-size:9.5px;font-weight:600;gap:2px}
+#ink-panel.mob .ia-chip{min-height:50px}
+#ink-panel .ia-chip.on{background:var(--ib-ac);color:#fff;border-color:var(--ib-ac)}
+#ink-panel .ia-chip svg{width:15px;height:15px}
+#ink-panel .ia-status{margin-top:6px;padding:5px 8px;border-radius:9px;background:var(--ib-card);color:var(--ib-txt);font-size:11.5px;line-height:1.3;word-break:break-word;min-height:20px;border:1px solid var(--ib-line)}
+#ink-panel.run .ia-status{border-color:var(--ib-ac)}
+#ink-panel .ia-sec{margin:8px 2px 4px;font-size:9.5px;letter-spacing:.9px;text-transform:uppercase;color:var(--ib-dim);font-weight:700}
+#ink-panel .ia-skins{display:flex;gap:4px}
+#ink-panel .ia-skin{flex:1;min-height:30px;border-radius:10px;background:var(--ib-card);border:1px solid var(--ib-line);color:var(--ib-txt);font-size:11.5px;font-weight:600}
+#ink-panel .ia-skin.on{background:var(--ib-ac);color:#fff;border-color:var(--ib-ac)}
+#ink-panel.min{width:auto;padding:6px;border-radius:14px}
+#ink-panel.min .ia-title,#ink-panel.min #ink-body{display:none}
+#ink-panel.min #ink-mini-go{display:inline-flex}
+#ink-panel #ink-mini-go{display:none;width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,var(--ib-ac),#ffb6c1);color:#fff}
+#ink-panel .ia-trk{display:flex;align-items:center;padding:4px;border-radius:6px;font-size:11px;color:var(--ib-dim)}
+#ink-panel .ia-trk.on{background:var(--ib-ac);color:#fff}
+#ink-panel .ia-trk-t{flex:1;text-align:left;padding:3px 5px;border-radius:4px;color:inherit;font-size:11px}
+#ink-panel .ia-music-list{max-height:100px;overflow:auto;margin-top:4px;padding:2px;background:var(--ib-card);border-radius:8px;border:1px solid var(--ib-line)}
+
+#ink-order{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:10px 0 4px;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
+#ink-order .io-pill{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:600;color:#f1efec;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.12);border-radius:11px;padding:8px 12px;cursor:pointer;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
+#ink-order .io-pill:hover{background:rgba(255,255,255,.14)}
+#ink-order .io-seg{display:flex;gap:2px;margin-left:auto;padding:3px;background:rgba(0,0,0,.3);border:1px solid rgba(255,255,255,.1);border-radius:13px}
+#ink-order .io-seg button{font-size:12.5px;font-weight:600;border:0;border-radius:10px;padding:7px 12px;cursor:pointer;color:#bdbac6;background:transparent;touch-action:manipulation}
+#ink-order .io-seg button.on{color:#fff;background:linear-gradient(135deg,#e8573f,#ff8a4c)}
+#ink-order-status{font:12.5px/1.4 system-ui,-apple-system,sans-serif;padding:8px 11px;margin:6px 0 2px;border-radius:10px;background:rgba(90,170,255,.1);border:1px solid rgba(90,170,255,.22);color:#a9d2ff}
+#ink-order-status:empty{display:none}
+@media (pointer:coarse),(max-width:700px){
+#ink-order{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+#ink-order .io-pill{justify-content:center;min-height:48px;font-size:13.5px}
+#ink-order .io-seg{grid-column:1/-1;margin:0;width:100%}
+#ink-order .io-seg button{flex:1;min-height:44px;font-size:14px}
+}
 `;
+
+    function injectCSS() {
+        if ($('ink-css') && $('ink-css').dataset.v === '4.0.0') return;
+        const old = $('ink-css'); if (old) old.remove();
+        const s = document.createElement('style');
+        s.id = 'ink-css'; s.dataset.v = '4.0.0'; s.textContent = CSS;
         (document.head || document.documentElement).appendChild(s);
     }
 
-    function musTab(t) {
-        MUS.tab = t;
-        const r = document.getElementById('ink-tab-read'), m = document.getElementById('ink-tab-music');
-        if (r) r.style.display = t === 'read' ? '' : 'none';
-        if (m) m.style.display = t === 'music' ? '' : 'none';
-        document.querySelectorAll('#ink-auto-ui [data-tab]').forEach(b => b.classList.toggle('on', b.dataset.tab === t));
-        if (t === 'music') {
-            musPaintList(); musPaintBtn();
-            if (!MUS.synced) {
-                MUS.synced = true;
-                if (cfg.musicUrl) musSync(false);
-                else { const c = document.getElementById('ink-mus-cfg'); if (c) c.style.display = ''; musSt('Configure o Drive para começar.'); }
-            }
-        }
-        if (typeof applyPos === 'function') applyPos();
-    }
+    /* ================================================================== *
+     * 13. PAINEL
+     * ================================================================== */
+    function buildPanel() {
+        if ($('ink-panel')) return;
+        const u = document.createElement('div');
+        u.id = 'ink-panel';
+        if (IS_MOBILE) u.classList.add('mob');
+        if (cfg.min) u.classList.add('min');
+        u.innerHTML = `
+<div class="ia-head" id="ink-head">
+  <div class="ia-title" id="ink-title">Ink ${VERSION}</div>
+  <button class="ia-ib" id="ink-mini-go" title="Ler">${ICO.play}</button>
+  <button class="ia-ib" id="ink-min" title="minimizar">${ICO.min}</button>
+</div>
+<div id="ink-body">
+  <button class="ia-go" id="ink-go">${ICO.play}<span>Ler sozinho</span></button>
+  <div class="ia-row">
+    <button class="ia-chip" id="ink-spd-">−</button>
+    <span class="ia-val" id="ink-spd">1.5×</span>
+    <button class="ia-chip" id="ink-spd+">+</button>
+  </div>
+  <div class="ia-grid">
+    <button class="ia-chip" id="ink-manga">${ICO.book}<span>Mangá</span></button>
+    <button class="ia-chip" id="ink-auto">✓<span>Auto-próx</span></button>
+    <button class="ia-chip" id="ink-voice">${ICO.voice}<span>Voz</span></button>
+    <button class="ia-chip" id="ink-eye">🌙<span>Olho</span></button>
+    <button class="ia-chip" id="ink-girl">👧<span>Menina</span></button>
+    <button class="ia-chip" id="ink-perf">⚡<span>Leve</span></button>
+  </div>
+  <div class="ia-sec">Skins</div>
+  <div class="ia-skins">
+    ${SKINS.map(k => `<button class="ia-skin" data-skin="${k.id}">${k.emo} ${k.nome}</button>`).join('')}
+  </div>
+  <div class="ia-sec">Missão</div>
+  <div class="ia-row">
+    <button class="ia-chip" id="ink-meta-btn" style="flex:1">🎯 <span id="ink-meta-lbl">Ligar meta</span></button>
+    <button class="ia-chip" id="ink-meta-">−</button>
+    <span class="ia-val" id="ink-meta-val">10</span>
+    <button class="ia-chip" id="ink-meta+">+</button>
+  </div>
+  <div class="ia-status" id="ink-status"></div>
+</div>`;
+        (document.body || document.documentElement).appendChild(u);
 
-    function musMount(d) {
-        const body = d.querySelector('#ink-auto-body');
-        if (!body || body.querySelector('#ink-tabs')) return;
-        musCss();
-
-        // 1) move TODO o conteúdo atual (inclusive #ink-auto-st) para a aba Leitura
-        const read = document.createElement('div');
-        read.id = 'ink-tab-read';
-        [...body.children].forEach(c => read.appendChild(c));
-
-        // 2) barra de abas
-        const tabs = document.createElement('div');
-        tabs.id = 'ink-tabs'; tabs.className = 'ia-tabs';
-        tabs.innerHTML = '<button type="button" class="ia-tab" data-tab="read">📖 Leitura</button><button type="button" class="ia-tab" data-tab="music">🎵 Música</button>';
-
-        // 3) aba Música
-        const pane = document.createElement('div');
-        pane.id = 'ink-tab-music'; pane.style.display = 'none';
-        const chip = (id, ico, txt) => '<button id="' + id + '" class="ia-chip" type="button"><span style="font-size:15px">' + ico + '</span><span>' + txt + '</span></button>';
-        pane.innerHTML =
-            '<div id="ink-mus-st" class="ia-st">Música no Drive.</div>' +
-            '<div class="ia-chips">' +
-            chip('ink-mus-prev', '⏮', 'Anterior') +
-            '<button id="ink-mus-play" class="ia-chip" type="button"></button>' +
-            chip('ink-mus-next', '⏭', 'Próxima') +
-            chip('ink-mus-shuf', '🔀', 'Aleatória') +
-            chip('ink-mus-sync', '☁', 'Sincronizar') +
-            chip('ink-mus-cfgb', '🔗', 'Drive') +
-            '</div>' +
-            '<div class="ia-sub"><span class="ia-row" style="cursor:default"><span class="ia-lbl">Volume</span></span>' +
-            '<div class="ia-step"><button id="ink-mus-vless" type="button">−</button><span id="ink-mus-vol" class="ia-val"></span><button id="ink-mus-vmore" type="button">+</button></div></div>' +
-            '<div id="ink-mus-list" class="ia-trks"></div>' +
-            '<button id="ink-mus-addb" class="ia-row" type="button" style="margin-top:6px"><span class="ia-lbl">+ Adicionar por link</span></button>' +
-            '<div id="ink-mus-add" style="display:none">' +
-            '<input id="ink-mus-addt" class="ia-in" placeholder="Nome da faixa" autocomplete="off">' +
-            '<input id="ink-mus-addu" class="ia-in" placeholder="Link do áudio (Drive ou direto)" autocomplete="off" inputmode="url">' +
-            '<button id="ink-mus-adds" class="ia-row" type="button" style="margin-top:4px"><span class="ia-lbl">Salvar faixa</span></button></div>' +
-            '<div id="ink-mus-cfg" style="display:none">' +
-            '<input id="ink-mus-cu" class="ia-in" placeholder="URL do app da web (script.google.com/…/exec)" autocomplete="off" inputmode="url">' +
-            '<input id="ink-mus-ck" class="ia-in" placeholder="Senha (se definiu no Code.gs)" autocomplete="off">' +
-            '<button id="ink-mus-cs" class="ia-row" type="button" style="margin-top:4px"><span class="ia-lbl">Salvar e sincronizar</span></button></div>';
-
-        body.append(tabs, read, pane);
-
-        // teclas digitadas nos campos não viram atalhos do site
-        pane.addEventListener('keydown', e => e.stopPropagation());
-        pane.addEventListener('keyup', e => e.stopPropagation());
-
-        const $ = id => pane.querySelector(id);
-        tabs.querySelectorAll('[data-tab]').forEach(b => { b.onclick = () => musTab(b.dataset.tab); });
-        $('#ink-mus-play').onclick = musToggle;
-        $('#ink-mus-prev').onclick = () => musNext(-1);
-        $('#ink-mus-next').onclick = () => musNext(1);
-        $('#ink-mus-shuf').onclick = () => { MUS.shuffle = !MUS.shuffle; musPaintBtn(); };
-        $('#ink-mus-sync').onclick = () => musSync(true);
-        $('#ink-mus-vless').onclick = () => musVol(-0.1);
-        $('#ink-mus-vmore').onclick = () => musVol(0.1);
-        $('#ink-mus-cfgb').onclick = () => {
-            const c = $('#ink-mus-cfg');
-            $('#ink-mus-cu').value = cfg.musicUrl || ''; $('#ink-mus-ck').value = cfg.musicKey || '';
-            c.style.display = c.style.display === 'none' ? '' : 'none';
+        // Handlers
+        $('ink-go').onclick = () => { if (running) stop('Parado.'); else mainLoop(); };
+        $('ink-mini-go').onclick = $('ink-go').onclick;
+        $('ink-min').onclick = () => { cfg.min = !cfg.min; saveCfg(); applyMin(); };
+        $('ink-spd-').onclick = () => setSpeed(-1);
+        $('ink-spd+').onclick = () => setSpeed(1);
+        $('ink-manga').onclick = () => {
+            cfg.manga = !cfg.manga;
+            OrderBar.apply();
+            refreshPanel();
         };
-        $('#ink-mus-cs').onclick = () => {
-            const u = $('#ink-mus-cu').value.trim();
-            if (u && !/^https:\/\/script\.google(usercontent)?\.com\//.test(u)) { musSt('⚠ A URL deve começar com https://script.google.com/'); return; }
-            cfg.musicUrl = u; cfg.musicKey = $('#ink-mus-ck').value.trim(); save();
-            $('#ink-mus-cfg').style.display = 'none';
-            if (u) { MUS.synced = true; musSync(true); }
-        };
-        $('#ink-mus-addb').onclick = () => { const a = $('#ink-mus-add'); a.style.display = a.style.display === 'none' ? '' : 'none'; };
-        $('#ink-mus-adds').onclick = async () => {
-            const url = musDirect($('#ink-mus-addu').value);
-            if (!url) { musSt('⚠ Cole o link do áudio.'); return; }
-            try {
-                const j = await musApi('add', { title: $('#ink-mus-addt').value.trim() || 'Sem título', url });
-                musSetList(j.list);
-                $('#ink-mus-addt').value = ''; $('#ink-mus-addu').value = ''; $('#ink-mus-add').style.display = 'none';
-                musSt('✓ Faixa adicionada.');
-            } catch (e) { musSt('⚠ ' + (e.message || e)); }
-        };
+        $('ink-auto').onclick = () => { cfg.auto = !cfg.auto; saveCfg(); refreshPanel(); };
+        $('ink-voice').onclick = toggleVoice;
+        $('ink-eye').onclick = toggleEye;
+        $('ink-girl').onclick = () => { cfg.girl = !cfg.girl; saveCfg(); applyTheme(); };
+        $('ink-perf').onclick = () => { cfg.perf = !isPerf(); saveCfg(); refreshPanel(); };
+        $$('[data-skin]', u).forEach(b => b.onclick = () => { cfg.skin = b.dataset.skin; saveCfg(); applyTheme(); });
+        $('ink-meta-btn').onclick = metaToggle;
+        $('ink-meta-').onclick = () => { cfg.metaGoal = Math.max(1, cfg.metaGoal - 1); saveCfg(); metaPaint(); };
+        $('ink-meta+').onclick = () => { cfg.metaGoal = Math.min(300, cfg.metaGoal + 1); saveCfg(); metaPaint(); };
 
-        musTab(MUS.tab);
-    }
-
-    function mount() {
-        const stale = document.getElementById('ink-auto-ui');
-        if (stale && stale.dataset.v !== '3.1') stale.remove();
-        if (document.getElementById('ink-auto-ui') || !document.body) return;
-        injectCSS();
-        const d = document.createElement('div');
-        d.id = 'ink-auto-ui';
-        d.dataset.v = '3.1';
-        if (MOBILE) d.classList.add('mob');
-        d.style.left = (MOBILE ? 8 : 24) + 'px';
-        d.style.bottom = `calc(${MOBILE ? 96 : 120}px + env(safe-area-inset-bottom,0px))`;
-        const moon = svg('<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>');
-        const bolt = svg('<path d="M13 2L4 14h7l-1 8 9-12h-7z"/>');
-        const IC = {
-            manga: svg('<path d="M19 12H5M11 6l-6 6 6 6"/>'),
-            next: svg('<path d="M5 5l9 7-9 7zM18 5v14"/>'),
-            voice: ICO.voice,
-            eye: moon,
-            perf: bolt,
-            anx: svg('<path d="M3 12h4l2-6 4 12 2-6h6"/>')
-        };
-        const chip = (id, ico, txt, tip) => `<button id="${id}" class="ia-chip" type="button" title="${tip}">${ico}<span>${txt}</span></button>`;
-
-        d.innerHTML =
-            `<div id="ink-auto-head" class="ia-head">
-                <span class="ia-logo">${ICO.book}</span>
-                <span class="ia-title" id="ink-auto-title"></span>
-                <button id="ink-auto-mini-go" class="ia-ib" type="button"></button>
-                <button id="ink-auto-min" class="ia-ib" type="button"></button>
-            </div>
-            <div id="ink-auto-body">
-                <div id="ink-auto-st" class="ia-st">${MOBILE ? 'Parado. Toque em Ler sozinho.' : 'Parado. Alt+L liga/desliga.'}${cfg.girl ? ' ' + mascot() : ''}</div>
-                <div class="ia-main">
-                    <button id="ink-auto-go" type="button"></button>
-                    <div class="ia-step"><button id="ink-auto-slow" type="button" title="mais devagar">−</button><span id="ink-auto-sp" class="ia-val"></span><button id="ink-auto-fast" type="button" title="mais rápido">+</button></div>
-                </div>
-                <div class="ia-chips">
-                    ${chip('ink-auto-manga', IC.manga, 'Mangá', 'Modo mangá: leitura da direita para a esquerda')}
-                    ${chip('ink-auto-next', IC.next, 'Auto', 'Ao terminar o capítulo, abre o próximo e continua')}
-                    ${chip('ink-voice-btn', IC.voice, 'Voz', 'Lê os balões em voz alta (OCR + voz do navegador)')}
-                    ${chip('ink-eye-btn', IC.eye, 'Olhos', 'Filtro quente que reduz a luz azul (Alt+C)')}
-                    ${chip('ink-perf-btn', IC.perf, 'Leve', 'Modo desempenho (menos CPU/GPU)')}
-                    ${chip('ink-anx-btn', IC.anx, 'Ansiedade', 'Modo ansiedade: lê nervoso, em rajadas, com travadinhas e voltinhas')}
-                </div>
-                <div id="ink-voice-combo" class="ia-sub">
-                    <button id="ink-voice-pick" class="ia-row" type="button" title="Trocar a voz"><span class="ia-lbl" id="ink-voice-name"></span></button>
-                    <div class="ia-step"><button id="ink-voice-slow" type="button" title="voz mais devagar">−</button><span id="ink-voice-sp" class="ia-val"></span><button id="ink-voice-fast" type="button" title="voz mais rápida">+</button></div>
-                </div>
-                <div id="ink-eye-sub" class="ia-sub">
-                    <span class="ia-row" style="cursor:default"><span class="ia-lbl">Intensidade do filtro</span></span>
-                    <div class="ia-step"><button id="ink-eye-less" type="button" title="menos intenso">−</button><span id="ink-eye-lvl" class="ia-val"></span><button id="ink-eye-more" type="button" title="mais intenso">+</button></div>
-                </div>
-                <button id="ink-gender-btn" class="ia-row" type="button" title="Trocar entre menina e menino"><span class="ia-lbl" id="ink-gender-lbl"></span></button>
-                <div id="ink-skin-row" class="ia-skins" role="group" aria-label="Skin do modo menina">
-                    <span class="ia-sec">Skin</span>
-                    <div class="ia-skin-btns">${SKINS.map(k => `<button type="button" class="ia-skin" data-skin="${k.id}" title="Skin ${k.nome}">${k.emo} ${k.nome}</button>`).join('')}</div>
-                </div>
-                <div class="ia-sec">Missão</div>
-                <button id="ink-meta-pick" class="ia-row" type="button"><span class="ia-lbl" id="ink-meta-pick-lbl"></span></button>
-                <div class="ia-sub">
-                    <button id="ink-meta-btn" class="ia-row" type="button" title="Lê sozinho até completar a meta de páginas e para"><span class="ia-lbl" id="ink-meta-lbl"></span></button>
-                    <div class="ia-step"><button id="ink-meta-less" type="button" title="−1 página">−</button><span id="ink-meta-val" class="ia-val"></span><button id="ink-meta-more" type="button" title="+1 página">+</button></div>
-                </div>
-            </div>`;
-        document.body.appendChild(d);
-
-        const halt = e => { e.stopPropagation(); };
-        ['pointerdown', 'pointerup', 'touchstart', 'touchend', 'mousedown', 'mouseup', 'click'].forEach(ev => {
-            d.addEventListener(ev, halt, { passive: true });
-        });
-
-        d.querySelector('#ink-meta-pick').onclick = metaPick;
-        d.querySelector('#ink-meta-btn').onclick = metaToggle;
-        d.querySelector('#ink-meta-less').onclick = () => metaGoalStep(-1);
-        d.querySelector('#ink-meta-more').onclick = () => metaGoalStep(1);
-        metaPaint();
-        d.querySelector('#ink-auto-go').onclick = toggle;
-        d.querySelector('#ink-auto-mini-go').onclick = toggle;
-        d.querySelector('#ink-auto-slow').onclick = () => setSpeed(-1);
-        d.querySelector('#ink-auto-fast').onclick = () => setSpeed(1);
-        d.querySelector('#ink-auto-min').onclick = () => { cfg.min = !(cfg.min == null ? false : cfg.min); save(); applyMin(); };
-        d.querySelector('#ink-auto-manga').onclick = () => {
-            cfg.manga = !cfg.manga; save(); refreshBtn();
-            setSt(cfg.manga ? 'Modo mangá: avança para a esquerda.' : 'Modo ocidental: avança para a direita.');
-        };
-        d.querySelector('#ink-voice-btn').onclick = toggleVoice;
-        d.querySelector('#ink-voice-pick').onclick = cycleVoice;
-        d.querySelector('#ink-voice-slow').onclick = () => setVRate(-1);
-        d.querySelector('#ink-voice-fast').onclick = () => setVRate(1);
-        d.querySelector('#ink-auto-next').onclick = () => { cfg.auto = !cfg.auto; save(); refreshBtn(); };
-        d.querySelector('#ink-eye-btn').onclick = toggleEye;
-        d.querySelector('#ink-eye-less').onclick = () => setEyeLvl(-0.05);
-        d.querySelector('#ink-eye-more').onclick = () => setEyeLvl(0.05);
-        d.querySelector('#ink-perf-btn').onclick = () => {
-            if (cfg.perf == null) cfg.perf = true;
-            else if (cfg.perf === true) cfg.perf = false;
-            else cfg.perf = null;
-            save(); refreshBtn();
-            setSt(isPerf() ? '⚡ Modo desempenho ligado.' : '⚡ Modo desempenho desligado.');
-        };
-
-        d.querySelector('#ink-anx-btn').onclick = () => {
-            cfg.anx = ((cfg.anx | 0) + 1) % 3; save(); refreshBtn();
-            setSt(ANX_MSG[cfg.anx]);
-        };
-        d.querySelectorAll('[data-skin]').forEach(b => {
-            b.onclick = () => {
-                cfg.skin = b.dataset.skin; save(); applyTheme();
-                setSt(curSkin().msg);
-            };
-        });
-        d.querySelector('#ink-gender-btn').onclick = () => {
-            cfg.girl = !cfg.girl; save(); applyTheme();
-            setSt(cfg.girl ? 'Tema menina ' + mascot() : 'Tema menino.');
-        };
-
-        const head = d.querySelector('#ink-auto-head');
+        // Drag
+        const head = $('ink-head');
         let drag = null;
-        head.addEventListener('pointerdown', e => {
+        const onDown = e => {
             if (e.target.closest('button')) return;
-            e.stopPropagation();
-            const r = d.getBoundingClientRect();
-            drag = { dx: e.clientX - r.left, dy: e.clientY - r.top, id: e.pointerId, sx: e.clientX, sy: e.clientY, moved: false };
-            try { head.setPointerCapture(e.pointerId); } catch (_) { }
-            head.style.cursor = 'grabbing';
-        });
-        head.addEventListener('pointermove', e => {
-            if (!drag || e.pointerId !== drag.id) return;
-            if (!drag.moved) {
-                if (Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) < 8) return;
-                drag.moved = true;
-            }
-            cfg.pos = { x: e.clientX - drag.dx, y: e.clientY - drag.dy };
-            applyPos();
-        });
-        const end = () => { if (!drag) return; drag = null; head.style.cursor = 'grab'; save(); };
-        head.addEventListener('pointerup', end);
-        head.addEventListener('pointercancel', end);
+            const p = e.touches ? e.touches[0] : e;
+            const r = u.getBoundingClientRect();
+            drag = { ox: p.clientX - r.left, oy: p.clientY - r.top };
+            e.preventDefault();
+        };
+        const onMove = e => {
+            if (!drag) return;
+            const p = e.touches ? e.touches[0] : e;
+            const x = Math.max(0, Math.min(innerWidth - u.offsetWidth, p.clientX - drag.ox));
+            const y = Math.max(0, Math.min(innerHeight - u.offsetHeight, p.clientY - drag.oy));
+            u.style.left = x + 'px'; u.style.top = y + 'px'; u.style.bottom = 'auto'; u.style.right = 'auto';
+            cfg.pos = { x, y };
+        };
+        const onUp = () => { if (drag) { drag = null; saveCfg(); } };
+        head.addEventListener('mousedown', onDown);
+        head.addEventListener('touchstart', onDown, { passive: false });
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('touchmove', onMove, { passive: false });
+        document.addEventListener('mouseup', onUp);
+        document.addEventListener('touchend', onUp);
 
-        applyTheme(); refreshBtn(); applyMin(); applyEye();
-        if (typeof musMount === 'function') musMount(d);
+        u.addEventListener('pointerdown', () => { lastUser = Date.now(); });
+        document.addEventListener('keydown', () => { lastUser = Date.now(); });
+
+        refreshPanel(); applyTheme(); applyMin(); applyEye(); metaPaint();
     }
-    window.addEventListener('resize', () => { if (cfg.pos) applyPos(); }, { passive: true });
 
-    ['keydown', 'pointerdown', 'wheel', 'touchstart'].forEach(ev =>
-        window.addEventListener(ev, e => { if (e.isTrusted && !(e.target && e.target.closest && e.target.closest('#ink-auto-ui'))) lastUser = Date.now(); }, { capture: true, passive: true }));
-    window.addEventListener('keydown', e => {
-        if (!e.isTrusted || !e.altKey) return;
-        if (e.key === 'l' || e.key === 'L') { e.preventDefault(); if (location.pathname.startsWith('/ler/')) toggle(); }
-        else if (e.key === 'c' || e.key === 'C') { e.preventDefault(); if (location.pathname.startsWith('/ler/')) toggleEye(); }
-    });
-
-    let lastPath = location.pathname;
-    function route() {
-        const on = location.pathname.startsWith('/ler/');
-        if (location.pathname !== lastPath) { lastPath = location.pathname; cache.ctr = cache.pg = cache.pct = null; cache.t = 0; }
-        applyEye();
-        if (on) mount();
+    function applyMin() {
+        const u = $('ink-panel'); if (!u) return;
+        u.classList.toggle('min', !!cfg.min);
+        const b = $('ink-min');
+        if (b) b.innerHTML = cfg.min ? ICO.max : ICO.min;
+        applyPos();
+    }
+    function applyPos() {
+        const u = $('ink-panel'); if (!u || !cfg.pos) return;
+        const r = u.getBoundingClientRect();
+        const x = Math.min(Math.max(0, cfg.pos.x), Math.max(0, innerWidth - r.width));
+        const y = Math.min(Math.max(0, cfg.pos.y), Math.max(0, innerHeight - r.height));
+        u.style.left = x + 'px'; u.style.top = y + 'px'; u.style.bottom = 'auto'; u.style.right = 'auto';
+    }
+    function applyTheme() {
+        const u = $('ink-panel'); if (!u) return;
+        u.classList.toggle('boy', !cfg.girl);
+        SKINS.forEach(k => u.classList.toggle('skin-' + k.id, cfg.girl && curSkin().id === k.id));
+        $$('[data-skin]', u).forEach(b => b.classList.toggle('on', b.dataset.skin === curSkin().id));
+        const t = $('ink-title');
+        if (t) t.textContent = (cfg.girl ? curSkin().nome : 'Ink') + ' ' + VERSION;
+        const g = $('ink-girl');
+        if (g) g.classList.toggle('on', cfg.girl);
+    }
+    function applyEye() {
+        let o = $('ink-eye-el');
+        if (!cfg.eye || !location.pathname.startsWith('/ler/')) { if (o) o.remove(); }
         else {
-            const u = document.getElementById('ink-auto-ui'); if (u) u.remove();
-            stop('Parado.');
+            if (!o) {
+                o = document.createElement('div');
+                o.id = 'ink-eye-el';
+                o.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:2147482000' + (IS_MOBILE ? '' : ';mix-blend-mode:multiply');
+                document.body.appendChild(o);
+            }
+            const a = Math.min(0.6, Math.max(0.05, cfg.eyeLvl));
+            o.style.background = IS_MOBILE ? `rgba(255,150,40,${0.04 + a * 0.3})` : `rgba(255,${Math.round(190 - a * 150)},${Math.round(110 - a * 150)},${0.35 + a * 0.9})`;
         }
+        const b = $('ink-eye'); if (b) b.classList.toggle('on', cfg.eye);
     }
-    ['pushState', 'replaceState'].forEach(k => {
-        const o = history[k];
-        history[k] = function (...a) { const r = o.apply(this, a); setTimeout(route, 0); return r; };
-    });
-    window.addEventListener('popstate', route);
-    setInterval(route, 2500);
-    route();
-    window.lerAuto = {
-        meta: n => { if (n) cfg.metaGoal = n; if (!meta.on) metaToggle(); return cfg.metaGoal; },
-        metaStatus: () => ({ ...meta, seen: meta.seen.size, goal: cfg.metaGoal }),
-        start: () => { if (!running) loop(); },
-        stop: () => stop('Parado.'),
-        next: () => { const e = findNextEl(); console.log(e); return e; },
-        voices: () => ptVoices().map(v => v.name + ' (' + v.lang + ')'),
-        bin1: v => { cfg.bin1 = v !== false; save(); return cfg.bin1; },
-        bin: v => { cfg.bin = v !== false; save(); return cfg.bin; },
-        debug: v => { cfg.dbg = v !== false; save(); return cfg.dbg; },
-        counters: () => { scan(); cache.t = performance.now(); const s = readState(); return s; },
-        ocrTest: async () => { const t = await ocrView(); console.log('[Ink-Audio] texto:', t); return t; }
-    };
+    function toggleEye() { cfg.eye = !cfg.eye; saveCfg(); applyEye(); }
+    function toggleVoice() {
+        cfg.voice = !cfg.voice; saveCfg(); refreshPanel();
+        if (!cfg.voice) { cancelSpeech(); musDuck(false); return; }
+        if (!TTS || !ptVoices().length) setStatus('⚠ Nenhuma voz pt encontrada');
+        else ocrWorker().then(() => { if (!running) setStatus('Audiolivro pronto'); }).catch(e => setStatus('⚠ OCR: ' + (e.message || e)));
+    }
+    function setSpeed(d) {
+        let i = 0, best = 1e9;
+        SPEEDS.forEach((v, k) => { const dd = Math.abs(v - cfg.speed); if (dd < best) { best = dd; i = k; } });
+        cfg.speed = SPEEDS[Math.min(SPEEDS.length - 1, Math.max(0, i + d))];
+        saveCfg(); refreshPanel();
+    }
+    function refreshPanel() {
+        const u = $('ink-panel'); if (!u) return;
+        u.classList.toggle('run', running);
+        const g = $('ink-go');
+        if (g) g.innerHTML = running ? ICO.pause + '<span>Pausar</span>' : ICO.play + '<span>Ler sozinho</span>';
+        const mg = $('ink-mini-go');
+        if (mg) mg.innerHTML = running ? ICO.pause : ICO.play;
+        const sp = $('ink-spd'); if (sp) sp.textContent = String(+(cfg.speed).toFixed(2)) + '×';
+        const ma = $('ink-manga'); if (ma) ma.classList.toggle('on', cfg.manga);
+        const au = $('ink-auto'); if (au) au.classList.toggle('on', cfg.auto);
+        const vo = $('ink-voice'); if (vo) vo.classList.toggle('on', cfg.voice);
+        const pe = $('ink-perf'); if (pe) pe.classList.toggle('on', isPerf());
+        const ey = $('ink-eye'); if (ey) ey.classList.toggle('on', cfg.eye);
+        const mv = $('ink-meta-val'); if (mv) mv.textContent = cfg.metaGoal;
+    }
+
+    /* ================================================================== *
+     * 14. INIT
+     * ================================================================== */
+    function init() {
+        injectCSS();
+        buildPanel();
+        applyPos();
+        OrderBar.build();
+        let tries = 0;
+        const w = setInterval(() => {
+            if ($('ink-order')) { clearInterval(w); return; }
+            if (++tries > 30) { clearInterval(w); return; }
+            OrderBar.build();
+        }, 500);
+    }
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
+    else init();
+
+    console.info(`[Ink] v${VERSION} carregado`);
 })();
