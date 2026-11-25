@@ -1,7 +1,19 @@
+// ==UserScript==
+// @name         Ink Leitor (leitura automática)
+// @namespace    ink-leitor
+// @version      3.1
+// @description  Leitura automática, ordem das bolhas e modo menina (skins Gatinha/Lobo) para ink.app.br
+// @match        https://www.ink.app.br/*
+// @match        https://ink.app.br/*
+// @run-at       document-idle
+// @grant        none
+// @updateURL    https://raw.githubusercontent.com/SEU_USUARIO/SEU_REPO/main/ink-leitor.user.js
+// @downloadURL  https://raw.githubusercontent.com/SEU_USUARIO/SEU_REPO/main/ink-leitor.user.js
+// ==/UserScript==
 (() => {
     if (window.__inkLeitorV3) return;
     window.__inkLeitorV3 = true;
-    const INK_VERSION = 'v3';
+    const INK_VERSION = 'v3.1';
     try { console.info('[Ink] leitor ' + INK_VERSION + ' carregado'); } catch (e) { }
 
     /* =====================================================================
@@ -1288,9 +1300,11 @@ background:rgba(90,170,255,.1);border:1px solid rgba(90,170,255,.22);color:#a9d2
 }
 `;
     function injectCSS() {
-        if (document.getElementById('ink-ui-css')) return;
+        const old = document.getElementById('ink-ui-css');
+        if (old && old.dataset.v === '3.1') return;
+        if (old) old.remove();   // CSS de versão antiga: troca pelo novo (senão a skin nova não aparece)
         const s = document.createElement('style');
-        s.id = 'ink-ui-css'; s.textContent = INK_CSS;
+        s.id = 'ink-ui-css'; s.dataset.v = '3.1'; s.textContent = INK_CSS;
         (document.head || document.documentElement).appendChild(s);
     }
 
@@ -1473,12 +1487,12 @@ background:rgba(90,170,255,.1);border:1px solid rgba(90,170,255,.22);color:#a9d2
 
     function mount() {
         const stale = document.getElementById('ink-auto-ui');
-        if (stale && stale.dataset.v !== '3') stale.remove();
+        if (stale && stale.dataset.v !== '3.1') stale.remove();
         if (document.getElementById('ink-auto-ui') || !document.body) return;
         injectCSS();
         const d = document.createElement('div');
         d.id = 'ink-auto-ui';
-        d.dataset.v = '3';
+        d.dataset.v = '3.1';
         if (MOBILE) d.classList.add('mob');
         d.style.left = (MOBILE ? 8 : 24) + 'px';
         d.style.bottom = `calc(${MOBILE ? 96 : 120}px + env(safe-area-inset-bottom,0px))`;
