@@ -6,9 +6,6 @@ window.__inkLeitorV2 = true;
    PATCH ANDROID (DESTRUIR POPUPS E FORÇAR TOQUE)
    ===================================================================== */
 (function androidFixes() {
-    // Caça e remove o pop-up do "Serei sempre legal".
-    // Antes: varria todo elemento da página a cada 500 ms e a cada mudança do DOM (lia textContent de cada um).
-    // Agora: uma única leitura barata do texto da página, só quando algo mudou, e só procura o nó se o texto existir.
     const KEY = 'serei sempre legal';
     let _t = 0;
     const matarPopup = () => {
@@ -31,9 +28,6 @@ window.__inkLeitorV2 = true;
     if (document.body) startObs(); else document.addEventListener('DOMContentLoaded', startObs, {once: true});
     agendar();
 
-    // Forçar eventos de toque a não serem passivos
-    // So toca nos listeners dentro do leitor (/ler/); no resto do site nao mexe em nada,
-    // e nunca altera o objeto 'options' original da pagina (pode ser null/congelado/reutilizado).
     const originalAddEventListener = EventTarget.prototype.addEventListener;
     const TOUCH_TYPES = { touchstart: 1, touchmove: 1, pointerdown: 1, pointermove: 1 };
     EventTarget.prototype.addEventListener = function(type, listener, options) {
@@ -46,7 +40,6 @@ window.__inkLeitorV2 = true;
         } catch (_) {}
         return originalAddEventListener.call(this, type, listener, options);
     };
-
     console.log('[Ink-Fix] Patches Android aplicados.');
 })();
 /* ===================================================================== */
@@ -60,17 +53,28 @@ const gauss = () => { let u = 0, v = 0; while(!u) u = Math.random(); while(!v) v
 const MOBILE = (() => { try{ return matchMedia('(pointer:coarse)').matches || innerWidth < 700; }catch(e){ return innerWidth < 700; } })();
 
 /* =====================================================================
-   PARTE A — LEITURA AUTOMÁTICA (só em /ler/...)
+   CONFIG
    ===================================================================== */
 const LS = 'ink_autoread_cfg';
-let cfg = {speed: 1.5, method: '', methodM: '', manga: false, min: null, eye: false, eyeLvl: 0.25, pos: null, auto: true, voice: false, vrate: 1, vname: '', dbg: false, perf: null, bin: false, bin1: false, smooth: true, metaGoal: 10};
+let cfg = {
+  speed: 1.5, method: '', methodM: '', manga: false, min: null, eye: false, eyeLvl: 0.25,
+  pos: null, auto: true, voice: false, vrate: 1, vname: '', dbg: false, perf: null,
+  bin: false, bin1: false, smooth: true, metaGoal: 10,
+  // ---- MODO ANSIEDADE (CALMO) ----
+  anxiety: false, anxPauseMin: 2.5, anxPauseMax: 4.5, anxBreathEvery: 3, anxBreathDur: 6,
+  anxSessionMax: 15, anxGentleFail: true, anxHideMeta: true,
+  // ---- MODO CRÔNICA ----
+  cron: false, cronStartIdx: 0, cronPauseMin: 3, cronPauseMax: 6,
+  cronBreathEvery: 4, cronBreathDur: 8, cronSessionMax: 20,
+  cronFontBoost: 1.15, cronLineHeight: 1.85, cronAutoScroll: true,
+};
 try{ Object.assign(cfg, JSON.parse(localStorage.getItem(LS) || '{}')); }catch(e){}
 cfg.smooth = true;
 const isPerf = () => cfg.perf == null ? MOBILE : !!cfg.perf;
 let saveT = 0;
 const save = () => { clearTimeout(saveT); saveT = setTimeout(() => { try{ localStorage.setItem(LS, JSON.stringify(cfg)); }catch(e){} }, 150); };
 
-let running = false, runId = 0, lastUser = 0;
+let running = false, runId = 0, lastUser = 0, balloonCount = 0;
 const alive = id => running && id === runId;
 const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 3, 4, 5, 6];
 
@@ -112,27 +116,19 @@ function camSig(){
   for(const e of list){
     if(e === document.documentElement || e === document.body || e.closest('#ink-auto-ui,#ink-eye')) continue;
     const r = e.getBoundingClientRect();
-    if(isPerf()){
-      out.push((r.left|0) + ',' + (r.top|0) + ',' + (r.width|0) + ',' + (r.height|0));
-    } else {
-      const cs = getComputedStyle(e);
-      out.push((r.left|0) + ',' + (r.top|0) + ',' + (r.width|0) + ',' + (r.height|0) + ',' + cs.transform + ',' + cs.backgroundPosition + ',' + cs.objectPosition);
-    }
+    if(isPerf()) out.push((r.left|0)+','+(r.top|0)+','+(r.width|0)+','+(r.height|0));
+    else { const cs = getComputedStyle(e); out.push((r.left|0)+','+(r.top|0)+','+(r.width|0)+','+(r.height|0)+','+cs.transform+','+cs.backgroundPosition+','+cs.objectPosition); }
     if(out.length >= maxN) break;
   }
   return out.join(';') + '|' + (scrollX|0) + ',' + (scrollY|0);
 }
-
 function readState(){
   const now = performance.now();
   const reScanMs = isPerf() ? 2800 : 1500;
   const bad = (cache.ctr && stale(cache.ctr, RX_CTR)) || (cache.pg && stale(cache.pg, RX_PG)) || (cache.pct && stale(cache.pct, RX_PCT));
   const none = !cache.ctr && !cache.pg && !cache.pct;
-  if((bad && now - cache.t > reScanMs) || (none && now - cache.t > reScanMs * 3) || now - cache.t > 8000){
-    scan(); cache.t = now;
-  }
-  const o = {};
-  let m;
+  if((bad && now - cache.t > reScanMs) || (none && now - cache.t > reScanMs * 3) || now - cache.t > 8000){ scan(); cache.t = now; }
+  const o = {}; let m;
   if(cache.ctr && (m = RX_CTR.exec(cache.ctr.textContent)) && sane.ctr(m)){ o.b = +m[1]; o.bt = +m[2]; o.p = +m[3]; o.pt = +m[4]; }
   if(cache.pg  && (m = RX_PG.exec(cache.pg.textContent))   && sane.pg(m)){ o.pg = +m[1]; o.pgt = +m[2]; }
   if(cache.pct && (m = RX_PCT.exec(cache.pct.textContent)) && sane.pct(m)){ o.pct = +m[1]; }
@@ -259,7 +255,12 @@ async function settle(id){
   }
 }
 
+/* ---- MODO ANSIEDADE: ritmo previsível ---- */
 function dwellFor(st){
+  if(cfg.anxiety){
+    const base = ((cfg.anxPauseMin + cfg.anxPauseMax) / 2) * 1000;
+    return base + rnd(-200, 200);
+  }
   const sp = cfg.speed || 1;
   let ms = 2000 * Math.exp(gauss() * 0.22);
   if(st.b === 1) ms += rnd(500, 1200);
@@ -267,6 +268,16 @@ function dwellFor(st){
   if(Math.random() < 0.04) ms += rnd(1500, 3500);
   return Math.min(9000, Math.max(300, ms / sp));
 }
+async function maybeBreathPause(id){
+  if(!cfg.anxiety || !cfg.anxBreathEvery || !cfg.anxBreathDur) return;
+  balloonCount++;
+  if(balloonCount % cfg.anxBreathEvery !== 0) return;
+  setSt('🌬️ Pausa para respirar…');
+  await sleep(cfg.anxBreathDur * 1000);
+  if(!alive(id)) return;
+  setSt('📖 Continuando…');
+}
+
 const userIdle = () => Date.now() - lastUser > 1800;
 const paused = () => document.hidden || !!document.querySelector('.bz-order') || !userIdle();
 
@@ -297,8 +308,7 @@ function findEndBtn(){
   return null;
 }
 function findNextEl(){
-  const eb = findEndBtn();
-  if(eb) return eb;
+  const eb = findEndBtn(); if(eb) return eb;
   const mine = document.getElementById('ink-auto-ui');
   const ok = el => el && !(mine && mine.contains(el)) && el.getBoundingClientRect().width > 0;
   const usable = a => { const pth = pathOf(a.getAttribute('href') || ''); return pth !== location.pathname && !visited.has(pth); };
@@ -323,8 +333,7 @@ function findNextEl(){
   return null;
 }
 async function nextChapter(id, pre){
-  const from = location.pathname;
-  visited.add(from);
+  const from = location.pathname; visited.add(from);
   await sleep(700);
   const el = pre || findNextEl();
   if(!el){ console.info('[Ink] não achei o próximo capítulo'); return false; }
@@ -387,6 +396,7 @@ async function smoothRun(id){
   let el = scrollerEl(), mode = el ? 'scroll' : 'wheel';
   let pos = el ? el.scrollTop : 0, last = performance.now(), ramp = 0, lastUi = 0, bottomSince = 0, lastH = el ? el.scrollHeight : 0;
   let wacc = 0, t0 = performance.now(), sig0 = moveSig(), lastMove = performance.now(), triedWheel = !el;
+  let lastAnxPause = 0;
   while(alive(id)){
     await new Promise(r => requestAnimationFrame(r));
     const now = performance.now(), dt = Math.min(100, now - last); last = now;
@@ -397,7 +407,12 @@ async function smoothRun(id){
     }
     if(cfg.auto && findEndBtn()) return 'cont';
     ramp = Math.min(1, ramp + dt / 700);
-    const pxs = innerHeight * 0.15 * (cfg.speed || 1) * (0.25 + 0.75 * ramp);
+    let pxs = innerHeight * 0.15 * (cfg.speed || 1) * (0.25 + 0.75 * ramp);
+    // ---- MODO ANSIEDADE: rolagem mais lenta e micro-pausas ----
+    if(cfg.anxiety){
+      pxs *= 0.5;
+      if(now - lastAnxPause > 8000){ lastAnxPause = now; await sleep(1000); continue; }
+    }
     const step = pxs * dt / 1000;
     if(mode === 'scroll'){
       if(!el.isConnected){ el = scrollerEl(); if(!el){ mode = 'wheel'; continue; } pos = el.scrollTop; }
@@ -417,10 +432,7 @@ async function smoothRun(id){
         if(now - bottomSince > 1500) return 'end';
         continue;
       }
-      if(mode === 'scroll' && !triedWheel){
-        triedWheel = true; mode = 'wheel'; lastMove = now; wacc = 0;
-        continue;
-      }
+      if(mode === 'scroll' && !triedWheel){ triedWheel = true; mode = 'wheel'; lastMove = now; wacc = 0; continue; }
       smoothOff = true; return 'none';
     } else bottomSince = 0;
     if(mode === 'scroll'){
@@ -436,24 +448,46 @@ async function smoothRun(id){
   return 'cont';
 }
 
+/* =====================================================================
+   LOOP HQ (com modo ansiedade)
+   ===================================================================== */
 async function loop(){
   const id = ++runId;
   running = true; refreshBtn(); keepAwake(true);
-  let stuck = 0, endFails = 0;
+  balloonCount = 0;
+  const sessionStart = Date.now();
+  let stuck = 0, endFails = 0, anxRetries = 0;
+  const MAX_ANX_RETRIES = 6;
+  const resetCounters = () => { stuck = 0; endFails = 0; anxRetries = 0; };
   visited.clear();
   try{
     while(alive(id)){
+      // ---- MODO ANSIEDADE: limite de sessão ----
+      if(cfg.anxiety && cfg.anxSessionMax > 0 && Date.now() - sessionStart > cfg.anxSessionMax * 60 * 1000){
+        finish(`✓ Sessão de ${cfg.anxSessionMax} min concluída. Descanse.`);
+        return;
+      }
       if(cfg.auto){
         const eb = findEndBtn();
         if(eb){
           setSt('✓ Fim do capítulo. Indo para o próximo…');
-          if(await nextChapter(id, eb)){ stuck = 0; endFails = 0; continue; }
+          if(await nextChapter(id, eb)){ resetCounters(); continue; }
           if(!alive(id)) break;
-          if(++endFails >= 3){ finish('✓ Fim do capítulo, mas o botão "Próxima" não respondeu.'); return; }
+          if(++endFails >= 3){
+            if(cfg.anxiety && anxRetries < MAX_ANX_RETRIES){
+              anxRetries++;
+              setSt(`⏸ Não consegui avançar. Respire. Tentativa ${anxRetries}/${MAX_ANX_RETRIES} em 5 s…`);
+              await sleep(5000);
+              if(!alive(id)) break;
+              endFails = 0; continue;
+            }
+            finish('✓ Fim do capítulo, mas o botão "Próxima" não respondeu.'); return;
+          }
           await sleep(1000); continue;
         }
       }
-      if(!cfg.voice && cfg.smooth !== false && !smoothOff){
+      // Modo ansiedade desativa a rolagem contínua — vai um passo de cada vez
+      if(!cfg.voice && cfg.smooth !== false && !smoothOff && !cfg.anxiety){
         const r = await smoothRun(id);
         if(!alive(id)) break;
         if(r === 'cont') continue;
@@ -463,8 +497,15 @@ async function loop(){
           if(cfg.auto && findEndBtn()) continue;
           if(cfg.auto){
             setSt('✓ Fim do capítulo. Indo para o próximo…');
-            if(await nextChapter(id)){ stuck = 0; continue; }
+            if(await nextChapter(id)){ resetCounters(); continue; }
             if(!alive(id)) break;
+            if(cfg.anxiety && anxRetries < MAX_ANX_RETRIES){
+              anxRetries++;
+              setSt(`⏸ Não achei o próximo. Respire. Tentativa ${anxRetries}/${MAX_ANX_RETRIES} em 5 s…`);
+              await sleep(5000);
+              if(!alive(id)) break;
+              continue;
+            }
             finish('✓ Fim do capítulo, mas não achei o próximo.'); return;
           }
           finish('✓ Chegou ao fim do capítulo.'); return;
@@ -475,6 +516,9 @@ async function loop(){
       else await humanWait(dwellFor(st), st, id);
       if(!alive(id)) break;
       if(cfg.auto && findEndBtn()) continue;
+      // ---- MODO ANSIEDADE: pausa de respiração ----
+      await maybeBreathPause(id);
+      if(!alive(id)) break;
       await settle(id);
       if(!alive(id)) break;
       await sleep(rnd(30, 140));
@@ -482,27 +526,48 @@ async function loop(){
       const end = nearEnd(before);
       const ok = await advance(before, end, id);
       if(!alive(id)) break;
-      if(ok){ stuck = 0; continue; }
+      if(ok){ resetCounters(); continue; }
       if(end){
         await sleep(900);
-        if(alive(id) && await advance(readState(), true, id)){ stuck = 0; continue; }
+        if(alive(id) && await advance(readState(), true, id)){ resetCounters(); continue; }
         if(!alive(id)) break;
         if(cfg.auto){
           setSt('✓ Fim do capítulo. Indo para o próximo…');
-          if(await nextChapter(id)){ stuck = 0; continue; }
+          if(await nextChapter(id)){ resetCounters(); continue; }
           if(!alive(id)) break;
+          if(cfg.anxiety && anxRetries < MAX_ANX_RETRIES){
+            anxRetries++;
+            setSt(`⏸ Não achei o próximo. Respire. Tentativa ${anxRetries}/${MAX_ANX_RETRIES} em 5 s…`);
+            await sleep(5000);
+            if(!alive(id)) break;
+            continue;
+          }
           finish('✓ Fim do capítulo, mas não achei o próximo.'); return;
         }
         finish('✓ Chegou ao fim do capítulo.'); return;
       }
-      if(++stuck >= 3){ finish('Não consegui avançar. Como você vira para o próximo balão (toque, tecla)?'); return; }
+      if(++stuck >= 3){
+        if(cfg.anxiety && anxRetries < MAX_ANX_RETRIES){
+          anxRetries++;
+          setSt(`⏸ Não consegui avançar. Respire. Tentativa ${anxRetries}/${MAX_ANX_RETRIES} em 5 s…`);
+          await sleep(5000);
+          if(!alive(id)) break;
+          stuck = 0; continue;
+        }
+        finish('Não consegui avançar. Como você vira para o próximo balão (toque, tecla)?'); return;
+      }
     }
   } finally {
     if(id === runId){ running = false; refreshBtn(); keepAwake(false); }
   }
 }
 function finish(msg){ running = false; runId++; cancelSpeech(); setSt(msg); refreshBtn(); keepAwake(false); }
-function stop(msg){ if(!running) return; running = false; runId++; cancelSpeech(); setSt(msg || 'Parado.'); refreshBtn(); keepAwake(false); }
+function stop(msg){
+  if(CRON.running){ cronFinish(msg || 'Parado.'); return; }
+  if(!running) return;
+  running = false; runId++; cancelSpeech();
+  setSt(msg || 'Parado.'); refreshBtn(); keepAwake(false);
+}
 
 let wl = null;
 async function keepAwake(on){
@@ -515,8 +580,11 @@ async function keepAwake(on){
     } else if(wl){ const w = wl; wl = null; await w.release(); }
   }catch(e){ wl = null; }
 }
-document.addEventListener('visibilitychange', () => { if(running && !document.hidden) keepAwake(true); });
+document.addEventListener('visibilitychange', () => { if((running || CRON.running) && !document.hidden) keepAwake(true); });
 
+/* =====================================================================
+   TTS / VOZ
+   ===================================================================== */
 const TTS = window.speechSynthesis || null;
 let ttsVoices = [];
 function loadVoices(){ try{ ttsVoices = TTS ? TTS.getVoices() : []; }catch(e){ ttsVoices = []; } }
@@ -529,24 +597,19 @@ function ptVoices(){
   const br = pt.filter(v => /^pt[-_]BR$/i.test(v.lang));
   return (br.length ? br : pt).slice().sort((a, b) => isNatural(b) - isNatural(a));
 }
-function currentVoice(){
-  const l = ptVoices();
-  return l.find(v => v.name === cfg.vname) || l[0] || null;
-}
+function currentVoice(){ const l = ptVoices(); return l.find(v => v.name === cfg.vname) || l[0] || null; }
 const shortVoice = n => n.replace(/^Microsoft\s+|^Google\s+/i, '').replace(/\s*[-–(].*$/, '').trim() || n;
 function cycleVoice(){
   const l = ptVoices();
   if(!l.length){ setSt('Nenhuma voz em português neste navegador.'); return; }
-  const cur = currentVoice();
-  const i = l.findIndex(v => cur && v.name === cur.name);
+  const cur = currentVoice(); const i = l.findIndex(v => cur && v.name === cur.name);
   cfg.vname = l[(i + 1) % l.length].name; save(); refreshBtn();
   try{ TTS.cancel(); TTS.speak(mkUtt('Olá! Esta é a voz do audiolivro.')); }catch(e){}
 }
 function setVRate(dir){
   let i = 0, best = 1e9;
   VRATES.forEach((v, k) => { const d = Math.abs(v - (cfg.vrate || 1)); if(d < best){ best = d; i = k; } });
-  cfg.vrate = VRATES[Math.min(VRATES.length - 1, Math.max(0, i + dir))];
-  save(); refreshBtn();
+  cfg.vrate = VRATES[Math.min(VRATES.length - 1, Math.max(0, i + dir))]; save(); refreshBtn();
 }
 function mkUtt(text){
   const u = new SpeechSynthesisUtterance(text);
@@ -567,7 +630,7 @@ function chunk(t){
 async function speak(text, id){
   if(!TTS) return;
   for(const p of chunk(text)){
-    if(!alive(id)) break;
+    if(!alive(id) && !CRON.running) break;
     await new Promise(res => {
       let done = false, wd = 0;
       const fin = () => { if(done) return; done = true; clearTimeout(wd); res(); };
@@ -581,15 +644,12 @@ async function speak(text, id){
 const cancelSpeech = () => { try{ if(TTS) TTS.cancel(); }catch(e){} };
 
 /* =====================================================================
-   PATCH 2: OCR COM FALLBACK
+   OCR
    ===================================================================== */
 const OCR = {w: null, p: null};
 function ocrBase(){
   let b = window.__inkOcrBase || (document.documentElement.dataset && document.documentElement.dataset.inkOcr) || '';
   if(!b){ try{ if(chrome && chrome.runtime && chrome.runtime.getURL) b = chrome.runtime.getURL('ocr'); }catch(e){} }
-  if(!b || b === 'file:///android_asset/ocr') { 
-      console.log("[Ink-OCR] Usando caminho local ou fallback CDN"); 
-  }
   return b.replace(/\/$/, '');
 }
 function ocrWorker(){
@@ -599,24 +659,15 @@ function ocrWorker(){
     if(typeof Tesseract === 'undefined') throw new Error('Tesseract não carregou.');
     const base = ocrBase();
     setSt('⏳ Carregando o OCR…');
-    
     const options = { logger: () => {}, errorHandler: e => console.warn('[Ink-OCR]', e) };
-    if(base) {
-        options.workerPath = base + '/worker.min.js';
-        options.corePath = base;
-        options.langPath = base;
-        options.gzip = true;
-    }
-    
+    if(base) { options.workerPath = base + '/worker.min.js'; options.corePath = base; options.langPath = base; options.gzip = true; }
     const w = await Tesseract.createWorker('por', 1, options);
     await w.setParameters({tessedit_pageseg_mode: '11', preserve_interword_spaces: '1', user_defined_dpi: '300'});
-    OCR.w = w;
-    return w;
+    OCR.w = w; return w;
   })();
   OCR.p.catch(() => { OCR.p = null; });
   return OCR.p;
 }
-/* ===================================================================== */
 
 let capSeq = 0;
 const capWait = new Map();
@@ -636,13 +687,8 @@ function capture(){
 }
 async function captureRetry(){
   try{ return await capture(); }
-  catch(e){
-    if(/MAX_CAPTURE|quota|per second/i.test(e.message || '')){ await sleep(700); return capture(); }
-    throw e;
-  }
+  catch(e){ if(/MAX_CAPTURE|quota|per second/i.test(e.message || '')){ await sleep(700); return capture(); } throw e; }
 }
-
-const descEl = e => e.tagName + (typeof e.className === 'string' && e.className.trim() ? '.' + e.className.trim().split(/\s+/)[0] : '');
 function pageImgEl(x, y){
   let list = [];
   try{ list = document.elementsFromPoint(x, y); }catch(e){}
@@ -669,11 +715,7 @@ async function grabView(){
   const panel = document.getElementById('ink-auto-ui');
   const eye = document.getElementById('ink-eye');
   const hideList = [];
-  [panel, eye].forEach(el => {
-    if(!el) return;
-    hideList.push({el, vis: el.style.visibility, disp: el.style.display});
-    el.style.visibility = 'hidden';
-  });
+  [panel, eye].forEach(el => { if(!el) return; hideList.push({el, vis: el.style.visibility, disp: el.style.display}); el.style.visibility = 'hidden'; });
   let shot;
   try{
     if(hideList.length) await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
@@ -681,9 +723,7 @@ async function grabView(){
   } finally {
     hideList.forEach(({el, vis, disp}) => { el.style.visibility = vis; el.style.display = disp; });
   }
-  const img = new Image();
-  img.src = shot;
-  await img.decode();
+  const img = new Image(); img.src = shot; await img.decode();
   const kx = img.naturalWidth / innerWidth, ky = img.naturalHeight / innerHeight;
   const sx = x0 * kx, sy = y0 * ky, sw = (x1 - x0) * kx, sh = (y1 - y0) * ky;
   let sc = Math.min(4, Math.max(2, 2000 / sw));
@@ -707,10 +747,7 @@ async function grabView(){
 function linesOf(d){
   if(!d) return [];
   let L = d.lines;
-  if(!L || !L.length){
-    L = [];
-    (d.blocks || []).forEach(b => (b.paragraphs || []).forEach(p => (p.lines || []).forEach(l => L.push(l))));
-  }
+  if(!L || !L.length){ L = []; (d.blocks || []).forEach(b => (b.paragraphs || []).forEach(p => (p.lines || []).forEach(l => L.push(l)))); }
   return L;
 }
 function refineLine(l){
@@ -742,7 +779,6 @@ function refineLine(l){
   };
 }
 const RX_UI = /leitura\s*autom[aá]tica|audiolivro|pr[oó]ximo\s*cap|conforto|desempenho|mang[aá]\s*:|pausar|ler\s*sozinho|francisca|em\s*pausa\s*\(|aba\s*oculta|voc[eê]\s*mexendo|online\s*$|sem\s*voz\s*pt/i;
-
 function cleanLine(l, relaxed){
   l = refineLine(l);
   if(!l || !l.bbox) return null;
@@ -755,8 +791,7 @@ function cleanLine(l, relaxed){
   if(!ws.some(w => w.length >= 2)) return null;
   const good = relaxed
     ? letters >= 2 && letters >= t.length * 0.45 && conf >= 38 && ws.some(w => w.length >= 2)
-    : letters >= 3 && letters >= t.length * 0.55 && conf >= 55 &&
-      ws.some(w => w.length >= 3) && !ws.some(w => /\p{Ll}\p{Lu}/u.test(w));
+    : letters >= 3 && letters >= t.length * 0.55 && conf >= 55 && ws.some(w => w.length >= 3) && !ws.some(w => /\p{Ll}\p{Lu}/u.test(w));
   return {bbox: l.bbox, text: t, good};
 }
 function pickBubble(lines, tx, ty, W, H){
@@ -774,19 +809,9 @@ function pickBubble(lines, tx, ty, W, H){
   const big = pool2.length >= 2 && maxH >= lowH * 2 && maxH >= 24 ? pool2.filter(l => hOf(l) >= maxH * 0.75) : [];
   let seed;
   if(big.length >= 1){
-    seed = big.reduce((a, l) => {
-      const da = dist(a), dl = dist(l);
-      if(dl < da - 4) return l;
-      if(Math.abs(dl - da) <= 4 && letters(l) > letters(a)) return l;
-      return a;
-    });
+    seed = big.reduce((a, l) => { const da = dist(a), dl = dist(l); if(dl < da - 4) return l; if(Math.abs(dl - da) <= 4 && letters(l) > letters(a)) return l; return a; });
   } else {
-    seed = pool2.reduce((a, l) => {
-      const da = dist(a), dl = dist(l);
-      if(dl < da - 4) return l;
-      if(Math.abs(dl - da) <= 4 && letters(l) > letters(a)) return l;
-      return a;
-    });
+    seed = pool2.reduce((a, l) => { const da = dist(a), dl = dist(l); if(dl < da - 4) return l; if(Math.abs(dl - da) <= 4 && letters(l) > letters(a)) return l; return a; });
     if(dist(seed) > 0.55 * Math.min(W, H)) return [];
   }
   const sel = new Set([seed]);
@@ -829,8 +854,7 @@ function toSpeech(t){
   t = t.replace(/\s+/g, ' ').trim();
   if(RX_UI.test(t)) return '';
   const up = (t.match(/\p{Lu}/gu) || []).length, lo = (t.match(/\p{Ll}/gu) || []).length;
-  if(up >= 3 && up > 3 * lo)
-    t = t.toLowerCase().replace(/(^|[.!?…]\s+)(\p{L})/gu, (m, a, b) => a + b.toUpperCase());
+  if(up >= 3 && up > 3 * lo) t = t.toLowerCase().replace(/(^|[.!?…]\s+)(\p{L})/gu, (m, a, b) => a + b.toUpperCase());
   return t.replace(/\.{3,}/g, '…').replace(/([!?])[!?]+/g, '$1');
 }
 
@@ -859,10 +883,7 @@ function preprocessBalloon(canvas, C = 10){
   const gray = new Uint8ClampedArray(w * h);
   for(let i = 0, j = 0; i < d.length; i += 4, j++) gray[j] = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
   const W = w + 1, S = new Float64Array(W * (h + 1));
-  for(let y = 0; y < h; y++){
-    let row = 0;
-    for(let x = 0; x < w; x++){ row += gray[y * w + x]; S[(y + 1) * W + x + 1] = S[y * W + x + 1] + row; }
-  }
+  for(let y = 0; y < h; y++){ let row = 0; for(let x = 0; x < w; x++){ row += gray[y * w + x]; S[(y + 1) * W + x + 1] = S[y * W + x + 1] + row; } }
   const r = Math.max(8, Math.round(Math.min(w, h) / 24));
   const bin = new Uint8ClampedArray(w * h);
   for(let y = 0; y < h; y++){
@@ -951,11 +972,8 @@ async function ocrViewOnce(){
     }catch(e){}
     await w.setParameters({tessedit_pageseg_mode: '6'});
     let r2;
-    try{
-      r2 = await w.recognize(c2, {}, {blocks: true, text: true});
-    } finally {
-      await w.setParameters({tessedit_pageseg_mode: '11'});
-    }
+    try{ r2 = await w.recognize(c2, {}, {blocks: true, text: true}); }
+    finally { await w.setParameters({tessedit_pageseg_mode: '11'}); }
     const raw2 = linesOf(r2.data);
     const cx = ((bx0 + bx1) / 2 - bx0) * f + pad, cy = ((by0 + by1) / 2 - by0) * f + pad;
     let pick2 = [];
@@ -963,10 +981,7 @@ async function ocrViewOnce(){
       pick2 = pickBubble(raw2.map(l => cleanLine(l, rl)).filter(Boolean), cx, cy, c2.width, c2.height);
       if(pick2.length) break;
     }
-    if(!pick2.length){
-      const all = raw2.map(l => cleanLine(l, true)).filter(Boolean);
-      if(all.length) pick2 = all;
-    }
+    if(!pick2.length){ const all = raw2.map(l => cleanLine(l, true)).filter(Boolean); if(all.length) pick2 = all; }
     const letters = t => (t.match(/\p{L}/gu) || []).length;
     const text2 = pick2.length ? toSpeech(joinLines(pick2)) : '';
     if(cfg.dbg){ drawDbg(g, pick2.length ? pick2 : pick); }
@@ -975,7 +990,6 @@ async function ocrViewOnce(){
   }catch(e){ try{ await w.setParameters({tessedit_pageseg_mode: '11'}); }catch(_){} }
   return first;
 }
-
 async function narrate(st, id){
   while(alive(id) && paused()){ setSt('⏸ Em pausa…'); await sleep(200); }
   if(!alive(id) || (cfg.auto && findEndBtn())) return;
@@ -984,10 +998,7 @@ async function narrate(st, id){
   setSt(`🔎 ${label(st)} · lendo o balão…`);
   let text = '';
   try{ text = await ocrView(); }
-  catch(e){
-    if(alive(id)) finish('🎧 Não consegui ler: ' + (e.message || e));
-    return;
-  }
+  catch(e){ if(alive(id)) finish('🎧 Não consegui ler: ' + (e.message || e)); return; }
   if(!alive(id)) return;
   if(!text){ setSt(`🎧 ${label(st)} · sem texto aqui`); await humanWait(Math.max(400, 800 / (cfg.vrate || 1)), st, id); return; }
   setSt(`🎧 ${label(st)} · ${text.length > 70 ? text.slice(0, 67) + '…' : text}`);
@@ -998,13 +1009,198 @@ function toggleVoice(){
   cfg.voice = !cfg.voice; save(); refreshBtn();
   if(!cfg.voice){ cancelSpeech(); return; }
   if(!TTS || !ptVoices().length) setSt('⚠ Nenhuma voz em português encontrada.');
-  else ocrWorker().then(() => { if(!running) setSt('Audiolivro pronto. Toque em Ler sozinho.'); }).catch(e => setSt('⚠ OCR: ' + (e.message || e)));
+  else ocrWorker().then(() => { if(!running && !CRON.running) setSt('Audiolivro pronto.'); }).catch(e => setSt('⚠ OCR: ' + (e.message || e)));
 }
 
 function setSt(t){
   const s = document.getElementById('ink-auto-st');
   if(s && s.textContent !== t) s.textContent = t;
 }
+
+/* =====================================================================
+   MODO CRÔNICA
+   ===================================================================== */
+const CRON = {
+  running: false, runId: 0, paras: [], idx: 0,
+  container: null, activeEl: null, startTime: 0, breathCount: 0
+};
+
+function findChronicleContent(){
+  const sels = ['article', 'main', '[class*="chapter-content"]', '[class*="reading-content"]', '[class*="text-content"]', '[class*="cronica"]', '[class*="chronicle"]', '[class*="story-body"]'];
+  let best = null, bestLen = 0;
+  for(const sel of sels){
+    for(const el of document.querySelectorAll(sel)){
+      if(el.closest('#ink-auto-ui')) continue;
+      const ps = [...el.querySelectorAll('p')].filter(p => (p.innerText || '').trim().length >= 30);
+      if(ps.length < 3) continue;
+      const total = ps.reduce((n, p) => n + p.innerText.trim().length, 0);
+      if(total > bestLen){ bestLen = total; best = el; }
+    }
+  }
+  if(!best){
+    const groups = new Map();
+    for(const p of document.querySelectorAll('p')){
+      if(p.closest('#ink-auto-ui')) continue;
+      if((p.innerText || '').trim().length < 30) continue;
+      const par = p.parentElement;
+      if(!par) continue;
+      if(!groups.has(par)) groups.set(par, []);
+      groups.get(par).push(p);
+    }
+    let bestN = 0;
+    for(const [, ps] of groups){
+      if(ps.length > bestN && ps.length >= 4){ bestN = ps.length; best = ps[0].parentElement; }
+    }
+  }
+  return best;
+}
+function isChroniclePage(){
+  if(location.pathname.startsWith('/ler/')) return false;
+  return !!findChronicleContent();
+}
+function applyCronTypography(on){
+  const c = CRON.container;
+  if(!c) return;
+  if(on){
+    if(!c.dataset.inkCronOrig){
+      c.dataset.inkCronOrig = '1';
+      c.dataset.inkCronFs = c.style.fontSize || '';
+      c.dataset.inkCronLh = c.style.lineHeight || '';
+    }
+    const base = parseFloat(getComputedStyle(c).fontSize) || 16;
+    c.style.fontSize = (base * (cfg.cronFontBoost || 1.15)) + 'px';
+    c.style.lineHeight = String(cfg.cronLineHeight || 1.85);
+  } else if(c.dataset.inkCronOrig){
+    c.style.fontSize = c.dataset.inkCronFs || '';
+    c.style.lineHeight = c.dataset.inkCronLh || '';
+    delete c.dataset.inkCronOrig;
+  }
+}
+function highlightPara(p){
+  clearHighlight();
+  if(!p) return;
+  CRON.activeEl = p;
+  p.dataset.inkCronHl = '1';
+  if(!document.getElementById('ink-cron-hl-style')){
+    const s = document.createElement('style');
+    s.id = 'ink-cron-hl-style';
+    s.textContent = '[data-ink-cron-hl="1"]{background:linear-gradient(135deg,rgba(232,87,63,.12),rgba(255,138,76,.12))!important;border-left:3px solid #e8573f!important;padding-left:12px!important;border-radius:6px!important;transition:background .3s,border-color .3s;scroll-margin:40vh 0}';
+    (document.head || document.documentElement).appendChild(s);
+  }
+}
+function clearHighlight(){
+  if(CRON.activeEl){ delete CRON.activeEl.dataset.inkCronHl; CRON.activeEl = null; }
+}
+function scrollParaIntoView(p){
+  if(!cfg.cronAutoScroll || !p) return;
+  const r = p.getBoundingClientRect();
+  if(r.top >= 60 && r.bottom <= innerHeight - 60) return;
+  try{ p.scrollIntoView({behavior: 'smooth', block: 'center'}); }catch(e){}
+}
+function cronFinish(msg){
+  CRON.running = false; CRON.runId++;
+  cancelSpeech();
+  setSt(msg);
+  applyCronTypography(false);
+  clearHighlight();
+  refreshBtn();
+  keepAwake(false);
+}
+async function cronLoop(){
+  if(CRON.running) return;
+  const container = findChronicleContent();
+  if(!container){ setSt('📖 Não achei texto de crônica nesta página.'); return; }
+  const paras = [...container.querySelectorAll('p')].filter(p => (p.innerText || '').trim().length >= 20);
+  if(!paras.length){ setSt('📖 Nenhum parágrafo encontrado.'); return; }
+  CRON.container = container;
+  CRON.paras = paras;
+  CRON.idx = Math.max(0, Math.min(paras.length - 1, cfg.cronStartIdx || 0));
+  CRON.running = true;
+  CRON.runId++;
+  CRON.startTime = Date.now();
+  CRON.breathCount = 0;
+  const id = CRON.runId;
+  const sessionLimitMs = cfg.cronSessionMax > 0 ? cfg.cronSessionMax * 60 * 1000 : Infinity;
+  applyCronTypography(true);
+  refreshBtn();
+  keepAwake(true);
+  try {
+    while(CRON.running && CRON.runId === id){
+      if(cfg.anxiety && Date.now() - CRON.startTime > sessionLimitMs){
+        cronFinish(`✓ Sessão de ${cfg.cronSessionMax} min concluída. Você leu ${CRON.idx} de ${CRON.paras.length} parágrafos. Descanse.`);
+        return;
+      }
+      while(CRON.running && CRON.runId === id && paused()){ setSt('⏸ Em pausa…'); await sleep(300); }
+      if(!CRON.running || CRON.runId !== id) break;
+      if(CRON.idx >= CRON.paras.length){
+        cronFinish(`✓ Fim da crônica! ${CRON.paras.length} parágrafos lidos.`);
+        return;
+      }
+      const para = CRON.paras[CRON.idx];
+      highlightPara(para);
+      scrollParaIntoView(para);
+      const txt = (para.innerText || '').trim();
+      const pct = Math.round((CRON.idx / CRON.paras.length) * 100);
+      const preview = txt.length > 60 ? txt.slice(0, 57) + '…' : txt;
+      setSt(`📖 ${pct}% · par. ${CRON.idx + 1}/${CRON.paras.length} · ${preview}`);
+      if(cfg.voice && TTS){ await speak(txt, id); }
+      const pauseBase = cfg.anxiety
+        ? ((cfg.anxPauseMin + cfg.anxPauseMax) / 2) * 1000 + rnd(-200, 200)
+        : rnd(cfg.cronPauseMin * 1000, cfg.cronPauseMax * 1000);
+      const pause = cfg.voice ? Math.max(pauseBase * 0.3, 500) : pauseBase;
+      const waitEnd = Date.now() + pause;
+      while(CRON.running && CRON.runId === id && Date.now() < waitEnd){
+        if(paused()){ await sleep(200); continue; }
+        await sleep(100);
+      }
+      if(!CRON.running || CRON.runId !== id) break;
+      CRON.breathCount++;
+      const breathEvery = cfg.anxiety ? cfg.anxBreathEvery : cfg.cronBreathEvery;
+      const breathDur = cfg.anxiety ? cfg.anxBreathDur : cfg.cronBreathDur;
+      if(breathEvery > 0 && CRON.breathCount % breathEvery === 0){
+        setSt('🌬️ Pausa para respirar…');
+        const bEnd = Date.now() + breathDur * 1000;
+        while(CRON.running && CRON.runId === id && Date.now() < bEnd){
+          if(paused()){ await sleep(200); continue; }
+          await sleep(100);
+        }
+        if(!CRON.running || CRON.runId !== id) break;
+        setSt('📖 Continuando…');
+      }
+      CRON.idx++;
+    }
+  } finally {
+    if(CRON.runId === id){
+      CRON.running = false;
+      applyCronTypography(false);
+      clearHighlight();
+      refreshBtn();
+      keepAwake(false);
+    }
+  }
+}
+function toggleCron(){
+  if(!cfg.cron){
+    const c = findChronicleContent();
+    if(!c){ setSt('📖 Não achei texto de crônica nesta página.'); return; }
+  }
+  cfg.cron = !cfg.cron;
+  save(); refreshBtn();
+  setSt(cfg.cron
+    ? '📖 Modo crônica ativado. Toque em "Ler crônica" para começar.'
+    : 'Modo crônica desativado. Volta a ler HQs.');
+}
+function toggleAnxiety(){
+  cfg.anxiety = !cfg.anxiety;
+  save(); refreshBtn();
+  setSt(cfg.anxiety
+    ? `🧘 Modo Calmo ativado: pausas previsíveis, respiração a cada ${cfg.anxBreathEvery} ${cfg.cron ? 'parágrafos' : 'balões'}, sessão de ${cfg.anxSessionMax || '∞'} min.`
+    : 'Modo Calmo desativado.');
+}
+
+/* =====================================================================
+   SVG ICONS E CSS
+   ===================================================================== */
 const svg = (p, fill) => `<svg viewBox="0 0 24 24" width="16" height="16" ${fill ? 'fill="currentColor"' : 'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"'} aria-hidden="true">${p}</svg>`;
 const ICO = {
   play:  svg('<path d="M8 5.5v13a1 1 0 0 0 1.5.86l10.5-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5z"/>', true),
@@ -1012,7 +1208,9 @@ const ICO = {
   book:  svg('<path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v16H6.5A2.5 2.5 0 0 0 4 21.5z"/><path d="M4 5.5v16"/>'),
   down:  svg('<path d="M6 9l6 6 6-6"/>'),
   up:    svg('<path d="M6 15l6-6 6 6"/>'),
-  voice: svg('<path d="M11 5L6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/>')
+  voice: svg('<path d="M11 5L6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/>'),
+  heart: svg('<path d="M12 21s-7-4.5-7-10a5 5 0 0 1 9-3 5 5 0 0 1 9 3c0 5.5-7 10-7 10z"/>'),
+  doc:   svg('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h8M8 9h2"/>')
 };
 const ICO_O = {
   'ink-ord-btn':   svg('<path d="M7 4v16M7 4L3.5 7.5M7 4l3.5 3.5M17 20V4M17 20l-3.5-3.5M17 20l3.5-3.5"/>'),
@@ -1056,7 +1254,7 @@ const INK_CSS = `
 #ink-auto-ui .ia-step button:active{background:var(--ia-card2)}
 #ink-auto-ui.mob .ia-step button{width:32px;height:44px}
 #ink-auto-ui .ia-val{min-width:34px;text-align:center;font-weight:600;font-size:12px;font-variant-numeric:tabular-nums}
-#ink-auto-ui .ia-chips{display:grid;grid-template-columns:repeat(5,1fr);gap:4px;margin-top:6px}
+#ink-auto-ui .ia-chips{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin-top:6px}
 #ink-auto-ui .ia-chip{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;min-height:42px;padding:5px 1px 4px;border-radius:11px;
   background:var(--ia-card);border:1px solid transparent;color:var(--ia-dim);font-size:9.5px;font-weight:600;letter-spacing:.1px;transition:background .12s,color .12s,border-color .12s}
 #ink-auto-ui.mob .ia-chip{min-height:50px}
@@ -1076,6 +1274,11 @@ const INK_CSS = `
 #ink-auto-ui .ia-ico{display:grid;place-items:center;color:var(--ia-dim);flex:none}
 #ink-auto-ui .ia-sub.dim{display:none}
 #ink-auto-ui:has(#ink-eye-btn:not(.on)) #ink-eye-sub{display:none}
+/* modo crônica: esconde controles de HQ que não fazem sentido */
+#ink-auto-ui.cron-mode #ink-auto-manga,
+#ink-auto-ui.cron-mode #ink-auto-next,
+#ink-auto-ui.cron-mode #ink-meta-sec { display: none !important; }
+#ink-auto-ui.cron-mode #ink-auto-go { background: linear-gradient(135deg, #6a4bd1, #a35ff4); box-shadow: 0 4px 12px rgba(120,80,220,.35); }
 @media (hover:hover){
   #ink-auto-ui .ia-row:hover,#ink-auto-ui .ia-chip:hover{background:var(--ia-card2)}
   #ink-auto-ui .ia-ib:hover,#ink-auto-ui .ia-step button:hover{background:var(--ia-card2)}
@@ -1113,22 +1316,28 @@ function injectCSS(){
   (document.head || document.documentElement).appendChild(s);
 }
 
-const sw = (id, on) => {
-  const e = document.getElementById(id);
-  if(e){ e.classList.toggle('on', !!on); e.setAttribute('aria-pressed', on ? 'true' : 'false'); }
-};
+/* =====================================================================
+   UI / REFRESH / AÇÕES
+   ===================================================================== */
+const sw = (id, on) => { const e = document.getElementById(id); if(e){ e.classList.toggle('on', !!on); e.setAttribute('aria-pressed', on ? 'true' : 'false'); } };
 const speedTxt = () => String(+(cfg.speed || 1).toFixed(2)) + '×';
 function refreshBtn(){
   const u = document.getElementById('ink-auto-ui');
-  if(u) u.classList.toggle('run', running);
+  const anyRun = running || CRON.running;
+  if(u){
+    u.classList.toggle('run', anyRun);
+    u.classList.toggle('cron-mode', !!cfg.cron);
+  }
   const b = document.getElementById('ink-auto-go');
-  if(b) b.innerHTML = running ? ICO.pause + '<span>Pausar</span>' : ICO.play + '<span>Ler sozinho</span>';
+  if(b) b.innerHTML = anyRun ? ICO.pause + '<span>Pausar</span>' : ICO.play + '<span>' + (cfg.cron ? 'Ler crônica' : 'Ler sozinho') + '</span>';
   const mg = document.getElementById('ink-auto-mini-go');
-  if(mg){ mg.innerHTML = running ? ICO.pause : ICO.play; mg.title = running ? 'Pausar' : 'Ler sozinho'; }
+  if(mg){ mg.innerHTML = anyRun ? ICO.pause : ICO.play; mg.title = anyRun ? 'Pausar' : (cfg.cron ? 'Ler crônica' : 'Ler sozinho'); }
   sw('ink-auto-manga', cfg.manga);
   sw('ink-auto-next', cfg.auto);
   sw('ink-voice-btn', cfg.voice);
   sw('ink-perf-btn', isPerf());
+  sw('ink-anxiety-btn', cfg.anxiety);
+  sw('ink-cron-btn', cfg.cron);
   const sp = document.getElementById('ink-auto-sp');
   if(sp) sp.textContent = speedTxt();
   const vp = document.getElementById('ink-voice-name');
@@ -1137,10 +1346,6 @@ function refreshBtn(){
   if(vs) vs.textContent = String(+(cfg.vrate || 1).toFixed(2)) + '×';
   const vc = document.getElementById('ink-voice-combo');
   if(vc) vc.classList.toggle('dim', !cfg.voice);
-  const pb = document.getElementById('ink-perf-btn');
-  if(pb) pb.title = isPerf()
-    ? 'Modo leve ativo (menos CPU/GPU). Toque para alternar.'
-    : 'Modo leve desligado. Toque para alternar (recomendado no celular).';
 }
 function applyMin(){
   const u = document.getElementById('ink-auto-ui'); if(!u) return;
@@ -1159,7 +1364,8 @@ function applyPos(){
   u.style.left = x + 'px'; u.style.top = y + 'px'; u.style.bottom = 'auto';
 }
 function toggle(){
-  if(running) stop('Parado.');
+  if(running || CRON.running){ stop('Parado.'); return; }
+  if(cfg.cron) cronLoop();
   else loop();
 }
 function setSpeed(dir){
@@ -1170,7 +1376,7 @@ function setSpeed(dir){
 }
 function applyEye(){
   let o = document.getElementById('ink-eye');
-  if(!cfg.eye || !location.pathname.startsWith('/ler/')){ if(o) o.remove(); }
+  if(!cfg.eye || (!location.pathname.startsWith('/ler/') && !isChroniclePage())){ if(o) o.remove(); }
   else {
     if(!o){
       o = document.createElement('div');
@@ -1194,9 +1400,9 @@ function setEyeLvl(d){
   if(!cfg.eye) cfg.eye = true;
   save(); applyEye();
 }
+
 /* =====================================================================
-   META DE PÁGINAS — para missões do tipo "Ler N páginas"
-   Lê sozinho, conta cada página nova (contador "pág x/y" do leitor) e para ao bater a meta.
+   META DE PÁGINAS
    ===================================================================== */
 const MS_KEY = 'ink_missions';
 function scanMissions(){
@@ -1219,19 +1425,14 @@ function scanMissions(){
 }
 setInterval(scanMissions, 2500);
 const pendingMissions = () => { try{ return (JSON.parse(localStorage.getItem(MS_KEY) || '{}').list || []).filter(x => !x.done && x.n > x.c); }catch(e){ return []; } };
-let metaSel = -1;   // -1 = nenhuma, 0..L-1 = uma missão, L = "todas"
-// As páginas lidas contam para várias missões ao mesmo tempo; "todas" lê até a maior meta e vai marcando cada missão que completa.
+let metaSel = -1;
 const allTargets = L => { const nf = L.filter(x => !x.fac); return (nf.length ? nf : L).slice().sort((a, b) => (a.n - a.c) - (b.n - b.c)); };
 function metaPick(){
   const L = pendingMissions();
-  if(!L.length){ setSt('Sem missões de leitura pendentes. Abra o painel do evento uma vez e volte.'); return; }
+  if(!L.length){ setSt('Sem missões de leitura pendentes.'); return; }
   metaSel = (metaSel + 1) % (L.length + 1);
-  if(metaSel === L.length){
-    cfg.metaGoal = Math.max(1, ...allTargets(L).map(x => x.n - x.c));
-  } else {
-    cfg.metaGoal = Math.max(1, L[metaSel].n - L[metaSel].c);
-    if(L[metaSel].fac) setSt('Missão de facção: leia uma HQ do herói da sua facção.');
-  }
+  if(metaSel === L.length) cfg.metaGoal = Math.max(1, ...allTargets(L).map(x => x.n - x.c));
+  else { cfg.metaGoal = Math.max(1, L[metaSel].n - L[metaSel].c); if(L[metaSel].fac) setSt('Missão de facção: leia uma HQ do herói da sua facção.'); }
   save(); metaPaint();
 }
 const meta = {on: false, done: 0, seen: new Set(), targets: []};
@@ -1253,9 +1454,9 @@ function metaToggle(){
   if(meta.on){ meta.on = false; metaPaint(); setSt('Meta desligada.'); return; }
   meta.on = true; meta.done = 0; meta.seen.clear();
   { const L = pendingMissions(); meta.targets = (metaSel >= 0 && metaSel === L.length) ? allTargets(L).map(x => ({t: x.t, r: x.n - x.c})) : []; }
-  const k = metaKey(readState()); if(k) meta.seen.add(k);   // a página atual não conta
+  const k = metaKey(readState()); if(k) meta.seen.add(k);
   metaPaint();
-  if(!running) loop();
+  if(!running && !CRON.running) loop();
 }
 function metaGoalStep(d){ cfg.metaGoal = Math.max(1, Math.min(300, (cfg.metaGoal || 10) + d)); save(); metaPaint(); }
 function metaTick(){
@@ -1263,17 +1464,17 @@ function metaTick(){
   const k = metaKey(readState());
   if(!k || meta.seen.has(k)) return;
   meta.seen.add(k); meta.done++;
-  const hit = meta.targets.filter(x => x.r === meta.done).map(x => x.t);
-  if(hit.length) console.info('[Ink] missão completa:', hit.join(' | '));
   if(meta.done >= cfg.metaGoal){
     meta.on = false;
-    const fac = pendingMissions().some(x => x.fac) ? ' Missões de facção: leia HQs do herói da sua facção.' : '';
-    finish(`✓ Meta cumprida: ${meta.done} páginas lidas.${fac} Abra o painel do evento para atualizar.`);
+    finish(`✓ Meta cumprida: ${meta.done} páginas lidas. Abra o painel do evento para atualizar.`);
   }
   metaPaint();
 }
 setInterval(metaTick, 500);
 
+/* =====================================================================
+   MOUNT (painel)
+   ===================================================================== */
 function mount(){
   if(document.getElementById('ink-auto-ui') || !document.body) return;
   injectCSS();
@@ -1284,13 +1485,14 @@ function mount(){
   d.style.bottom = `calc(${MOBILE ? 96 : 120}px + env(safe-area-inset-bottom,0px))`;
   const moon = svg('<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>');
   const bolt = svg('<path d="M13 2L4 14h7l-1 8 9-12h-7z"/>');
-  const swp  = '<span class="ia-sw"></span>';
   const IC = {
     manga: svg('<path d="M19 12H5M11 6l-6 6 6 6"/>'),
     next:  svg('<path d="M5 5l9 7-9 7zM18 5v14"/>'),
     voice: ICO.voice,
     eye:   moon,
-    perf:  bolt
+    perf:  bolt,
+    anxiety: ICO.heart,
+    cron: ICO.doc
   };
   const chip = (id, ico, txt, tip) => '<button id="' + id + '" class="ia-chip" type="button" title="' + tip + '">' + ico + '<span>' + txt + '</span></button>';
   d.innerHTML =
@@ -1309,9 +1511,11 @@ function mount(){
       '<div class="ia-chips">' +
         chip('ink-auto-manga', IC.manga, 'Mangá', 'Modo mangá: leitura da direita para a esquerda') +
         chip('ink-auto-next', IC.next, 'Auto', 'Ao terminar o capítulo, abre o próximo e continua') +
-        chip('ink-voice-btn', IC.voice, 'Voz', 'Lê os balões em voz alta (OCR + voz do navegador)') +
+        chip('ink-voice-btn', IC.voice, 'Voz', 'Lê em voz alta (OCR nos balões / texto na crônica)') +
         chip('ink-eye-btn', IC.eye, 'Olhos', 'Filtro quente que reduz a luz azul (Alt+C)') +
         chip('ink-perf-btn', IC.perf, 'Leve', 'Modo desempenho (menos CPU/GPU)') +
+        chip('ink-anxiety-btn', IC.anxiety, 'Calmo', 'Modo Calmo (ansiedade): ritmo previsível, pausas de respiração e sessão limitada') +
+        chip('ink-cron-btn', IC.cron, 'Crônica', 'Ler crônica parágrafo por parágrafo (texto, sem OCR)') +
       '</div>' +
       '<div id="ink-voice-combo" class="ia-sub">' +
         '<button id="ink-voice-pick" class="ia-row" type="button" title="Trocar a voz"><span class="ia-lbl" id="ink-voice-name"></span></button>' +
@@ -1321,11 +1525,13 @@ function mount(){
         '<span class="ia-row" style="cursor:default"><span class="ia-lbl">Intensidade do filtro</span></span>' +
         '<div class="ia-step"><button id="ink-eye-less" type="button" title="menos intenso">−</button><span id="ink-eye-lvl" class="ia-val"></span><button id="ink-eye-more" type="button" title="mais intenso">+</button></div>' +
       '</div>' +
-      '<div class="ia-sec">Missão</div>' +
-      '<button id="ink-meta-pick" class="ia-row" type="button"><span class="ia-lbl" id="ink-meta-pick-lbl"></span></button>' +
-      '<div class="ia-sub">' +
-        '<button id="ink-meta-btn" class="ia-row" type="button" title="Lê sozinho até completar a meta de páginas e para"><span class="ia-lbl" id="ink-meta-lbl"></span></button>' +
-        '<div class="ia-step"><button id="ink-meta-less" type="button" title="−1 página">−</button><span id="ink-meta-val" class="ia-val"></span><button id="ink-meta-more" type="button" title="+1 página">+</button></div>' +
+      '<div id="ink-meta-sec">' +
+        '<div class="ia-sec">Missão</div>' +
+        '<button id="ink-meta-pick" class="ia-row" type="button"><span class="ia-lbl" id="ink-meta-pick-lbl"></span></button>' +
+        '<div class="ia-sub">' +
+          '<button id="ink-meta-btn" class="ia-row" type="button" title="Lê sozinho até completar a meta de páginas e para"><span class="ia-lbl" id="ink-meta-lbl"></span></button>' +
+          '<div class="ia-step"><button id="ink-meta-less" type="button" title="−1 página">−</button><span id="ink-meta-val" class="ia-val"></span><button id="ink-meta-more" type="button" title="+1 página">+</button></div>' +
+        '</div>' +
       '</div>' +
     '</div>';
   document.body.appendChild(d);
@@ -1365,6 +1571,8 @@ function mount(){
     save(); refreshBtn();
     setSt(isPerf() ? '⚡ Modo desempenho ligado.' : '⚡ Modo desempenho desligado.');
   };
+  d.querySelector('#ink-anxiety-btn').onclick = toggleAnxiety;
+  d.querySelector('#ink-cron-btn').onclick = toggleCron;
 
   const head = d.querySelector('#ink-auto-head');
   let drag = null;
@@ -1378,10 +1586,7 @@ function mount(){
   });
   head.addEventListener('pointermove', e => {
     if(!drag || e.pointerId !== drag.id) return;
-    if(!drag.moved){
-      if(Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) < 8) return;
-      drag.moved = true;
-    }
+    if(!drag.moved){ if(Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) < 8) return; drag.moved = true; }
     cfg.pos = {x: e.clientX - drag.dx, y: e.clientY - drag.dy};
     applyPos();
   });
@@ -1397,19 +1602,30 @@ window.addEventListener('resize', () => { if(cfg.pos) applyPos(); }, {passive: t
   window.addEventListener(ev, e => { if(e.isTrusted && !(e.target && e.target.closest && e.target.closest('#ink-auto-ui'))) lastUser = Date.now(); }, {capture: true, passive: true}));
 window.addEventListener('keydown', e => {
   if(!e.isTrusted || !e.altKey) return;
-  if(e.key === 'l' || e.key === 'L'){ e.preventDefault(); if(location.pathname.startsWith('/ler/')) toggle(); }
-  else if(e.key === 'c' || e.key === 'C'){ e.preventDefault(); if(location.pathname.startsWith('/ler/')) toggleEye(); }
+  if(e.key === 'l' || e.key === 'L'){ e.preventDefault(); if(location.pathname.startsWith('/ler/') || isChroniclePage()) toggle(); }
+  else if(e.key === 'c' || e.key === 'C'){ e.preventDefault(); if(location.pathname.startsWith('/ler/') || isChroniclePage()) toggleEye(); }
 });
 
-let lastPath = location.pathname;
+/* =====================================================================
+   ROUTE
+   ===================================================================== */
+let lastPath = location.pathname, lastCronAutoActivate = '';
 function route(){
-  const on = location.pathname.startsWith('/ler/');
+  const onLer = location.pathname.startsWith('/ler/');
+  const cronPage = !onLer && isChroniclePage();
   if(location.pathname !== lastPath){ lastPath = location.pathname; cache.ctr = cache.pg = cache.pct = null; cache.t = 0; }
   applyEye();
-  if(on) mount();
+  if(onLer || cronPage) mount();
   else {
     const u = document.getElementById('ink-auto-ui'); if(u) u.remove();
     stop('Parado.');
+  }
+  if(cronPage && !onLer){
+    const key = location.pathname + location.search;
+    if(lastCronAutoActivate !== key){
+      lastCronAutoActivate = key;
+      if(!cfg.cron){ cfg.cron = true; save(); refreshBtn(); }
+    }
   }
 }
 ['pushState', 'replaceState'].forEach(k => {
@@ -1419,15 +1635,41 @@ function route(){
 window.addEventListener('popstate', route);
 setInterval(route, 2500);
 route();
-window.lerAuto = {meta: n => { if(n) cfg.metaGoal = n; if(!meta.on) metaToggle(); return cfg.metaGoal; }, metaStatus: () => ({...meta, seen: meta.seen.size, goal: cfg.metaGoal}),
-  start: () => { if(!running) loop(); }, stop: () => stop('Parado.'), next: () => { const e = findNextEl(); console.log(e); return e; },
+
+window.lerAuto = {
+  meta: n => { if(n) cfg.metaGoal = n; if(!meta.on) metaToggle(); return cfg.metaGoal; },
+  metaStatus: () => ({...meta, seen: meta.seen.size, goal: cfg.metaGoal}),
+  start: () => { if(!running && !CRON.running){ cfg.cron ? cronLoop() : loop(); } },
+  stop: () => stop('Parado.'),
+  next: () => { const e = findNextEl(); console.log(e); return e; },
   voices: () => ptVoices().map(v => v.name + ' (' + v.lang + ')'),
   bin1: v => { cfg.bin1 = v !== false; save(); return cfg.bin1; },
   bin: v => { cfg.bin = v !== false; save(); return cfg.bin; },
   debug: v => { cfg.dbg = v !== false; save(); return cfg.dbg; },
-  counters: () => { scan(); cache.t = performance.now(); const s = readState(); return s; },
-  ocrTest: async () => { const t = await ocrView(); console.log('[Ink-Audio] texto:', t); return t; }};
+  anxiety: v => { cfg.anxiety = v !== false; save(); refreshBtn(); return cfg.anxiety; },
+  anxOpts: o => {
+    if(o && typeof o === 'object'){ Object.keys(o).forEach(k => { if(k in cfg && k.startsWith('anx')) cfg[k] = o[k]; }); save(); refreshBtn(); }
+    return {anxPauseMin: cfg.anxPauseMin, anxPauseMax: cfg.anxPauseMax, anxBreathEvery: cfg.anxBreathEvery, anxBreathDur: cfg.anxBreathDur, anxSessionMax: cfg.anxSessionMax};
+  },
+  cron: v => { cfg.cron = v !== false; save(); refreshBtn(); return cfg.cron; },
+  cronOpts: o => {
+    if(o && typeof o === 'object'){ Object.keys(o).forEach(k => { if(k in cfg && k.startsWith('cron')) cfg[k] = o[k]; }); save(); refreshBtn(); }
+    return {cronPauseMin: cfg.cronPauseMin, cronPauseMax: cfg.cronPauseMax, cronBreathEvery: cfg.cronBreathEvery, cronBreathDur: cfg.cronBreathDur, cronSessionMax: cfg.cronSessionMax, cronFontBoost: cfg.cronFontBoost, cronLineHeight: cfg.cronLineHeight};
+  },
+  cronAt: n => { cfg.cronStartIdx = Math.max(0, +n || 0); save(); return cfg.cronStartIdx; },
+  cronDetect: () => {
+    const c = findChronicleContent();
+    if(!c) return {found: false, paragraphs: 0};
+    const ps = [...c.querySelectorAll('p')].filter(p => (p.innerText || '').trim().length >= 20);
+    return {found: true, paragraphs: ps.length, sample: ps[0] ? ps[0].innerText.slice(0, 80) : ''};
+  },
+  counters: () => { scan(); cache.t = performance.now(); return readState(); },
+  ocrTest: async () => { const t = await ocrView(); console.log('[Ink-Audio] texto:', t); return t; }
+};
 
+/* =====================================================================
+   PARTE B — ORDENADOR DE BALÕES (mantido)
+   ===================================================================== */
 const AUTO = true;
 const HOLD = MOBILE ? 320 : 240;
 const SCORE_THRESHOLD = 0.30;
@@ -1454,7 +1696,6 @@ function spotBoxes(){
     return {x0:l, y0:t, x1:l+w, y1:t+h, cx:l+w/2, cy:t+h/2};
   }).filter(Boolean);
 }
-
 function tiles(){
   const d = document.querySelector('.bz-order');
   if(!d) return [];
@@ -1469,72 +1710,40 @@ function tiles(){
     const cx = (-bp[0] + w/2) / bs[0];
     const cy = (-bp[1] + h/2) / bs[1];
     if(![cx,cy].every(isFinite)) return null;
-
     let box = null, bd = 0.03;
-    sp.forEach(p=>{
-      const dd = Math.hypot(p.cx-cx, p.cy-cy);
-      if(dd < bd){ bd = dd; box = p; }
-    });
-    if(!box){
-      const hw = w/bs[0]*0.4, hh = h/bs[1]*0.4;
-      box = {x0:cx-hw, x1:cx+hw, y0:cy-hh, y1:cy+hh};
-    }
-
+    sp.forEach(p=>{ const dd = Math.hypot(p.cx-cx, p.cy-cy); if(dd < bd){ bd = dd; box = p; } });
+    if(!box){ const hw = w/bs[0]*0.4, hh = h/bs[1]*0.4; box = {x0:cx-hw, x1:cx+hw, y0:cy-hh, y1:cy+hh}; }
     const m = /translateX\((-?[\d.]+)px\)/.exec(el.style.transform || '');
-    return {
-      el, cx, cy,
-      x0: box.x0, x1: box.x1, y0: box.y0, y1: box.y1,
-      x: m ? +m[1] : el.getBoundingClientRect().left,
-      key: cx.toFixed(4) + ',' + cy.toFixed(4),
-      n: (el.querySelector('.bz-order__num') || {}).textContent || '?'
-    };
+    return {el, cx, cy, x0: box.x0, x1: box.x1, y0: box.y0, y1: box.y1, x: m ? +m[1] : el.getBoundingClientRect().left, key: cx.toFixed(4) + ',' + cy.toFixed(4), n: (el.querySelector('.bz-order__num') || {}).textContent || '?'};
   }).filter(Boolean);
 }
-
 const sig = () => tiles().map(t => t.key).sort().join('|');
 
 async function getPage(){
   const pe = document.querySelector('.bz-order__page');
   if(!pe) return null;
-
   const m = /url\(['"]?([^'")]+)['"]?\)/.exec(pe.style.backgroundImage || '');
   if(!m) return null;
-
   if(pgCache.url === m[1] && pgCache.pg) return pgCache.pg;
-
   try{
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-    img.src = m[1];
-    await img.decode();
-
+    const img = new Image(); img.crossOrigin = 'anonymous'; img.src = m[1]; await img.decode();
     const s = Math.min(1, 520 / img.naturalWidth);
     const w = Math.max(8, Math.round(img.naturalWidth * s));
     const h = Math.max(8, Math.round(img.naturalHeight * s));
-
-    const c = document.createElement('canvas');
-    c.width = w; c.height = h;
+    const c = document.createElement('canvas'); c.width = w; c.height = h;
     const ctx = c.getContext('2d', {willReadFrequently:true});
     ctx.drawImage(img, 0, 0, w, h);
-
     const d = ctx.getImageData(0, 0, w, h).data;
     const L = new Uint8Array(w * h);
-    for(let i=0; i<w*h; i++){
-      const g = (d[i*4]*299 + d[i*4+1]*587 + d[i*4+2]*114) / 1000;
-      L[i] = (g > 235 || g < 80) ? 1 : 0;
-    }
-
+    for(let i=0; i<w*h; i++){ const g = (d[i*4]*299 + d[i*4+1]*587 + d[i*4+2]*114) / 1000; L[i] = (g > 235 || g < 80) ? 1 : 0; }
     pgCache = {url: m[1], pg: {img, w, h, L}};
     return pgCache.pg;
   }catch(e){ return null; }
 }
-
 function roundMarks(d, tw, th){
   const N = tw * th;
   const m = new Uint8Array(N);
-  for(let i=0; i<N; i++){
-    m[i] = (d[i*4]*0.299 + d[i*4+1]*0.587 + d[i*4+2]*0.114) < 140 ? 1 : 0;
-  }
+  for(let i=0; i<N; i++) m[i] = (d[i*4]*0.299 + d[i*4+1]*0.587 + d[i*4+2]*0.114) < 140 ? 1 : 0;
   const dl = new Uint8Array(N), cl = new Uint8Array(N);
   for(let y=0; y<th; y++) for(let x=0; x<tw; x++){
     let v = 0;
@@ -1574,10 +1783,8 @@ function roundMarks(d, tw, th){
   }
   return {n, rnd: n ? nr/n : 0};
 }
-
 function balloonScore(pg, b){
   if(scoreCache.has(b.key)) return scoreCache.get(b.key);
-
   try{
     const pad = 0.018;
     const x0 = Math.max(0, b.x0-pad), y0 = Math.max(0, b.y0-pad);
@@ -1586,17 +1793,13 @@ function balloonScore(pg, b){
     const sw = Math.max(4, (x1-x0)*nw), sh = Math.max(4, (y1-y0)*nh);
     const tw = Math.min(110, Math.round(sw));
     const th = Math.max(4, Math.round(tw * sh / sw));
-
-    const c = document.createElement('canvas');
-    c.width = tw; c.height = th;
+    const c = document.createElement('canvas'); c.width = tw; c.height = th;
     const ctx = c.getContext('2d', {willReadFrequently:true});
     ctx.drawImage(pg.img, x0*nw, y0*nh, sw, sh, 0, 0, tw, th);
     const d = ctx.getImageData(0,0,tw,th).data;
     const n = tw * th;
-
     let ink = 0, white = 0, edge = 0;
     const bins = new Uint32Array(512);
-
     for(let i=0; i<n; i++){
       const r = d[i*4], g = d[i*4+1], bl = d[i*4+2];
       const L = r*0.299 + g*0.587 + bl*0.114;
@@ -1604,58 +1807,28 @@ function balloonScore(pg, b){
       if(L < 90) ink++;
       if(L > 210) white++;
     }
-
     for(let y=1; y<th-1; y++) for(let x=1; x<tw-1; x++){
       const i = (y*tw + x)*4;
       const L  = d[i]*0.299 + d[i+1]*0.587 + d[i+2]*0.114;
       const L2 = d[((y-1)*tw + x)*4]*0.299 + d[((y-1)*tw + x)*4+1]*0.587 + d[((y-1)*tw + x)*4+2]*0.114;
       if(Math.abs(L - L2) > 40) edge++;
     }
-
     let m1=0, m2=0;
-    for(let k=0; k<512; k++){
-      const v = bins[k];
-      if(v > m1){ m2=m1; m1=v; } else if(v > m2) m2=v;
-    }
-
-    const fi = ink / n;
-    const fw = white / n;
-    const top2 = (m1 + m2) / n;
-    const edgeRatio = edge / n;
-
+    for(let k=0; k<512; k++){ const v = bins[k]; if(v > m1){ m2=m1; m1=v; } else if(v > m2) m2=v; }
+    const fi = ink / n, fw = white / n, top2 = (m1 + m2) / n, edgeRatio = edge / n;
     let score = 0.50;
-
-    if(fi > 0.04) score += 0.18;
-    else if(fi > 0.02) score += 0.08;
-    else score -= 0.25;
-
-    if(fw > 0.25) score += 0.16;
-    else if(fw > 0.12) score += 0.06;
-    else score -= 0.12;
-
-    if(top2 > 0.38) score += 0.14;
-    else if(top2 > 0.25) score += 0.05;
-    else score -= 0.15;
-
+    if(fi > 0.04) score += 0.18; else if(fi > 0.02) score += 0.08; else score -= 0.25;
+    if(fw > 0.25) score += 0.16; else if(fw > 0.12) score += 0.06; else score -= 0.12;
+    if(top2 > 0.38) score += 0.14; else if(top2 > 0.25) score += 0.05; else score -= 0.15;
     if(edgeRatio > 0.04 && edgeRatio < 0.22) score += 0.10;
-
-    if(fi < 0.11 && fw > 0.40){
-      const rm = roundMarks(d, tw, th);
-      if(rm.n >= 6 && rm.rnd >= 0.60) score -= 0.45;
-    }
-
+    if(fi < 0.11 && fw > 0.40){ const rm = roundMarks(d, tw, th); if(rm.n >= 6 && rm.rnd >= 0.60) score -= 0.45; }
     const area = (b.x1 - b.x0) * (b.y1 - b.y0);
     if(area < 0.008) score -= 0.15;
-
     score = Math.max(0, Math.min(1, score));
     scoreCache.set(b.key, score);
     return score;
-  }catch(e){
-    scoreCache.set(b.key, 0.6);
-    return 0.6;
-  }
+  }catch(e){ scoreCache.set(b.key, 0.6); return 0.6; }
 }
-
 function lineMask(pg, list){
   const {w,h} = pg;
   const M = new Uint8Array(w*h);
@@ -1668,7 +1841,6 @@ function lineMask(pg, list){
   });
   return M;
 }
-
 function sup(pg, M, ax, p, lo, hi){
   const {w,h,L} = pg;
   const lim = ax==='y' ? h : w;
@@ -1681,7 +1853,6 @@ function sup(pg, M, ax, p, lo, hi){
   }
   return n >= 0.4*(hi-lo) && n > 0 ? k/n : 0;
 }
-
 function bestSup(pg, M, ax, g0, g1, lo, hi){
   const dim = ax==='y' ? pg.h : pg.w;
   const d = Math.max(2, Math.round(0.02*dim));
@@ -1694,38 +1865,26 @@ function bestSup(pg, M, ax, g0, g1, lo, hi){
   }
   return best;
 }
-
 function leaf(bs){
   const rows = [];
   [...bs].sort((a,b)=>a.cy-b.cy).forEach(b=>{
     const r = rows[rows.length-1];
-    if(r && Math.abs(b.cy - r.y) < 0.032){
-      r.it.push(b);
-      r.y = (r.y*(r.it.length-1) + b.cy) / r.it.length;
-    } else {
-      rows.push({y: b.cy, it: [b]});
-    }
+    if(r && Math.abs(b.cy - r.y) < 0.032){ r.it.push(b); r.y = (r.y*(r.it.length-1) + b.cy) / r.it.length; }
+    else rows.push({y: b.cy, it: [b]});
   });
   return rows.flatMap(r => r.it.sort((a,b)=> cfg.manga ? b.cx-a.cx : a.cx-b.cx));
 }
-
 function order(list, pg){
   if(!pg) return leaf(list);
   const M = lineMask(pg, list);
-
   const gaps = (bs, ax)=>{
-    const k0 = ax==='y' ? 'y0' : 'x0';
-    const k1 = ax==='y' ? 'y1' : 'x1';
+    const k0 = ax==='y' ? 'y0' : 'x0', k1 = ax==='y' ? 'y1' : 'x1';
     const s = [...bs].sort((a,b)=>a[k0]-b[k0]);
     let mx = s[0][k1];
     const gs = [];
-    for(let i=1; i<s.length; i++){
-      if(s[i][k0] - mx > 0.002) gs.push({i, a:mx, b:s[i][k0]});
-      mx = Math.max(mx, s[i][k1]);
-    }
+    for(let i=1; i<s.length; i++){ if(s[i][k0] - mx > 0.002) gs.push({i, a:mx, b:s[i][k0]}); mx = Math.max(mx, s[i][k1]); }
     return {s, gs};
   };
-
   const rec = bs=>{
     if(bs.length < 2) return bs;
     for(const ax of ['y','x']){
@@ -1733,15 +1892,11 @@ function order(list, pg){
       if(!gs.length) continue;
       const dimA = ax==='y' ? pg.h : pg.w;
       const dimB = ax==='y' ? pg.w : pg.h;
-      const k0 = ax==='y' ? 'x0' : 'y0';
-      const k1 = ax==='y' ? 'x1' : 'y1';
+      const k0 = ax==='y' ? 'x0' : 'y0', k1 = ax==='y' ? 'x1' : 'y1';
       const lo = Math.max(0, Math.floor(Math.min(...bs.map(b=>b[k0])) * dimB));
       const hi = Math.min(dimB, Math.ceil(Math.max(...bs.map(b=>b[k1])) * dimB));
       let best = null;
-      gs.forEach(g=>{
-        const sc = bestSup(pg, M, ax, g.a*dimA, g.b*dimA, lo, hi);
-        if(sc >= 0.25 && (!best || sc > best.sc)) best = {sc, i:g.i};
-      });
+      gs.forEach(g=>{ const sc = bestSup(pg, M, ax, g.a*dimA, g.b*dimA, lo, hi); if(sc >= 0.25 && (!best || sc > best.sc)) best = {sc, i:g.i}; });
       if(best){
         const parts = [rec(s.slice(0,best.i)), rec(s.slice(best.i))];
         if(ax==='x' && cfg.manga) parts.reverse();
@@ -1752,18 +1907,14 @@ function order(list, pg){
   };
   return rec(list);
 }
-
 function fire(el, type, x, y, pt = 'mouse'){
   const up = type.endsWith('up') || type.endsWith('cancel');
   const o = {bubbles:true, cancelable:true, composed:true, clientX:x, clientY:y, screenX:x, screenY:y, view:window, button:0, buttons: up ? 0 : 1};
   const isT = pt === 'touch';
-  el.dispatchEvent(
-    type.startsWith('pointer')
-      ? new PointerEvent(type, {...o, pointerId: isT ? 7 : 1, pointerType: pt, isPrimary:true, width: isT ? 24 : 1, height: isT ? 24 : 1, pressure: up ? 0 : 0.5})
-      : new MouseEvent(type, o)
-  );
+  el.dispatchEvent(type.startsWith('pointer')
+    ? new PointerEvent(type, {...o, pointerId: isT ? 7 : 1, pointerType: pt, isPrimary:true, width: isT ? 24 : 1, height: isT ? 24 : 1, pressure: up ? 0 : 0.5})
+    : new MouseEvent(type, o));
 }
-
 function touch(el, type, x, y){
   try{
     const t = new Touch({identifier:7, target:el, clientX:x, clientY:y, screenX:x, screenY:y, pageX:x, pageY:y, radiusX:12, radiusY:12, force:0.5});
@@ -1771,73 +1922,46 @@ function touch(el, type, x, y){
     el.dispatchEvent(new TouchEvent(type, { bubbles:true, cancelable:true, composed:true, touches: end ? [] : [t], targetTouches: end ? [] : [t], changedTouches: [t] }));
   }catch(e){}
 }
-
 function gesture(tg, phase, x, y){
-  if(mode === 'mouse'){
-    fire(tg, 'pointer' + phase, x, y);
-    fire(tg, 'mouse' + phase, x, y);
-  } else if(mode === 'ptouch'){
-    fire(tg, 'pointer' + phase, x, y, 'touch');
-    touch(tg, 'touch' + (phase === 'down' ? 'start' : phase === 'move' ? 'move' : 'end'), x, y);
-  } else {
-    touch(tg, 'touch' + (phase === 'down' ? 'start' : phase === 'move' ? 'move' : 'end'), x, y);
-  }
+  if(mode === 'mouse'){ fire(tg, 'pointer' + phase, x, y); fire(tg, 'mouse' + phase, x, y); }
+  else if(mode === 'ptouch'){ fire(tg, 'pointer' + phase, x, y, 'touch'); touch(tg, 'touch' + (phase === 'down' ? 'start' : phase === 'move' ? 'move' : 'end'), x, y); }
+  else { touch(tg, 'touch' + (phase === 'down' ? 'start' : phase === 'move' ? 'move' : 'end'), x, y); }
 }
-
 async function drag(el, dx){
   el.scrollIntoView({inline:'center', block:'nearest'});
   await sleep(MOBILE ? 120 : 60);
   const r = el.getBoundingClientRect();
-  const x0 = r.left + r.width/2;
-  const y0 = r.top + r.height/2;
+  const x0 = r.left + r.width/2, y0 = r.top + r.height/2;
   dx = Math.max(6, Math.min(innerWidth - 6, x0 + dx)) - x0;
   const tg = document.elementFromPoint(x0, y0) || el;
-
   SYN = true;
   try{
     gesture(tg, 'down', x0, y0);
     await sleep(HOLD);
-
     const steps = MOBILE ? 14 : 18;
-    for(let k=1; k<=steps; k++){
-      gesture(tg, 'move', x0 + dx * k / steps, y0);
-      await sleep(MOBILE ? 16 : 13);
-    }
+    for(let k=1; k<=steps; k++){ gesture(tg, 'move', x0 + dx * k / steps, y0); await sleep(MOBILE ? 16 : 13); }
     await sleep(MOBILE ? 120 : 80);
     gesture(tg, 'up', x0 + dx, y0);
-  } finally {
-    SYN = false;
-  }
+  } finally { SYN = false; }
   await sleep(MOBILE ? 280 : 200);
 }
-
-function say(t){
-  const s = document.getElementById('ink-ord-st');
-  if(s && s.textContent !== t) s.textContent = t;
-}
-
+function say(t){ const s = document.getElementById('ink-ord-st'); if(s && s.textContent !== t) s.textContent = t; }
 function paintMode(){
   const w = document.getElementById('ink-ord-west'), m = document.getElementById('ink-ord-manga');
   if(w) w.classList.toggle('on', !cfg.manga);
   if(m) m.classList.toggle('on', !!cfg.manga);
   refreshBtn();
 }
-function setManga(v){
-  if(!!cfg.manga === v || busy) return;
-  cfg.manga = v; save(); paintMode();
-  lastSig = ''; run(false);
-}
+function setManga(v){ if(!!cfg.manga === v || busy) return; cfg.manga = v; save(); paintMode(); lastSig = ''; run(false); }
 
 function ui(d){
   const p = d.querySelector('.bz-order__hint');
   if(!p) return;
   injectCSS();
-
   let bar = document.getElementById('ink-ord-bar');
   if(!bar){
     bar = document.createElement('div');
     bar.id = 'ink-ord-bar';
-
     const btn = (id, txt, title, fn) => {
       const b = document.createElement('button');
       b.id = id; b.type = 'button'; b.title = title; b.className = 'io-pill';
@@ -1849,82 +1973,54 @@ function ui(d){
     btn('ink-ord-btn',   'Ordenar', 'Ordena as bolhas automaticamente',            ()=>{ lastSig=''; run(false); });
     btn('ink-ord-clean', 'Limpar',  'Remove itens que não parecem balões de fala', ()=>{ lastSig=''; run(true); });
     btn('ink-ord-zero',  'Do zero', 'Reescaneia a página e ordena de novo',        fromScratch);
-
     const seg = document.createElement('div');
     seg.className = 'io-seg';
-    const mk = (id, txt, title, v) => {
-      const b = document.createElement('button');
-      b.id = id; b.type = 'button'; b.textContent = txt; b.title = title;
-      b.onclick = () => setManga(v);
-      seg.appendChild(b);
-    };
+    const mk = (id, txt, title, v) => { const b = document.createElement('button'); b.id = id; b.type = 'button'; b.textContent = txt; b.title = title; b.onclick = () => setManga(v); seg.appendChild(b); };
     mk('ink-ord-west',  '→ Ocidental', 'Leitura da esquerda para a direita', false);
     mk('ink-ord-manga', '← Mangá',     'Leitura da direita para a esquerda', true);
     bar.appendChild(seg);
-
     p.after(bar);
     paintMode();
   }
-
   if(!document.getElementById('ink-ord-st')){
-    const s = document.createElement('div');
-    s.id = 'ink-ord-st';
-    bar.after(s);
+    const s = document.createElement('div'); s.id = 'ink-ord-st'; bar.after(s);
   }
 }
-
 async function fromScratch(){
   if(busy) return;
   const rs = document.querySelector('.bz-order__rescan:not(#ink-ord-btn):not(#ink-ord-zero):not(#ink-ord-clean):not(#ink-ord-manga)');
   if(!rs){ run(false); return; }
-  say('Reescaneando do zero…');
-  lastSig = 'x';
+  say('Reescaneando do zero…'); lastSig = 'x';
   rs.click();
   let last = '', same = 0;
-  for(let i=0; i<50 && same<5; i++){
-    await sleep(260);
-    const s = sig();
-    if(s && s === last) same++; else { same=0; last=s; }
-  }
-  lastSig = '';
-  run(false);
+  for(let i=0; i<50 && same<5; i++){ await sleep(260); const s = sig(); if(s && s === last) same++; else { same=0; last=s; } }
+  lastSig = ''; run(false);
 }
-
 function manualMoves(T, want){
-  const cur = T.map(t=>t.key);
-  const out = [];
+  const cur = T.map(t=>t.key); const out = [];
   for(let k=0; k<want.length && out.length<5; k++){
     const j = cur.indexOf(want[k].key);
-    if(j !== k){
-      out.push(`#${T.find(t=>t.key===want[k].key).n} → pos ${k+1}`);
-      cur.splice(k, 0, cur.splice(j,1)[0]);
-    }
+    if(j !== k){ out.push(`#${T.find(t=>t.key===want[k].key).n} → pos ${k+1}`); cur.splice(k, 0, cur.splice(j,1)[0]); }
   }
   return out.join(' · ');
 }
-
 async function run(doClean = false){
   if(busy) return;
   busy = true;
   let removed = [];
   scoreCache.clear();
-
   try{
     let T = tiles();
     if(T.length < 2){ say('Poucos itens encontrados'); return; }
-
     const pg = await getPage();
-
     if(doClean && pg){
       say('Analisando possíveis não-balões…');
       const scored = T.map(t => ({t, score: balloonScore(pg, t)}));
       const bad = scored.filter(x => x.score < SCORE_THRESHOLD).sort((a,b) => a.score - b.score);
       const maxRemove = Math.max(1, Math.floor(T.length * MAX_REMOVE_RATIO));
       const toRemove = bad.slice(0, maxRemove);
-
-      if(toRemove.length === 0){
-        say('Nenhum item com score baixo');
-      } else {
+      if(toRemove.length === 0) say('Nenhum item com score baixo');
+      else {
         say(`Removendo ${toRemove.length} item(ns)…`);
         const keys = new Set(toRemove.map(x => x.t.key));
         for(let g=0; g<30; g++){
@@ -1932,71 +2028,44 @@ async function run(doClean = false){
           if(!t) break;
           const rb = t.el.querySelector('.bz-order__remove');
           if(!rb) break;
-          removed.push(t.n);
-          keys.delete(t.key);
-          rb.click();
+          removed.push(t.n); keys.delete(t.key); rb.click();
           await sleep(360);
         }
       }
     }
-
     T = tiles();
     if(T.length < 2){ say(removed.length ? `Pronto. Removidos: ${removed.join(', ')}` : 'Nada para ordenar'); return; }
-
     say('Calculando ordem…');
     let fails = 0;
     const tag = removed.length ? ` · removidos: ${removed.join(', ')}` : '';
-
     for(let g=0; g<900; g++){
       T = tiles().sort((a,b)=>a.x-b.x);
       const want = order(T, pg);
-
       const i = T.findIndex((t,k) => t.key !== want[k].key);
-      if(i < 0){
-        say(`Ordem certa ✓ (${T.length} bolhas · ${cfg.manga ? 'mangá ←' : 'ocidental →'})${tag} — toque em Salvar`);
-        return;
-      }
-
+      if(i < 0){ say(`Ordem certa ✓ (${T.length} bolhas · ${cfg.manga ? 'mangá ←' : 'ocidental →'})${tag} — toque em Salvar`); return; }
       const tg = want[i];
       const j = T.findIndex(t => t.key === tg.key);
       const xs = T.map(t=>t.x);
       const ds = xs.slice(1).map((x,k)=>x-xs[k]).filter(d=>d>6);
       const W = ds.length ? Math.min(...ds) : 100;
       const steps = Math.min(j - i, 7);
-
       say(`Ordenando ${i+1}/${T.length}  [${mode}]`);
       const beforeX = tg.el.getBoundingClientRect().left;
       await drag(tg.el, -(steps * W) - 4);
-
       const after = tiles().find(t => t.key === tg.key);
       const afterX = after ? after.el.getBoundingClientRect().left : beforeX;
       const moved = Math.abs(afterX - beforeX) > 10;
-
       if(!moved){
         fails++;
         if(fails >= 2){
           const ci = MODES.indexOf(mode);
-          if(ci < MODES.length - 1){
-            mode = MODES[ci + 1];
-            fails = 0;
-            say('Trocando para modo ' + mode + '…');
-          } else {
-            mode = MODES[0];
-            say('Não consegui arrastar. Faça à mão: ' + manualMoves(T, want));
-            return;
-          }
+          if(ci < MODES.length - 1){ mode = MODES[ci + 1]; fails = 0; say('Trocando para modo ' + mode + '…'); }
+          else { mode = MODES[0]; say('Não consegui arrastar. Faça à mão: ' + manualMoves(T, want)); return; }
         }
-      } else {
-        fails = 0;
-        if(cfg.dmode !== mode){ cfg.dmode = mode; save(); }
-      }
+      } else { fails = 0; if(cfg.dmode !== mode){ cfg.dmode = mode; save(); } }
     }
-  } catch(err){
-    say('Erro: ' + (err.message || err));
-  } finally {
-    busy = false;
-    lastSig = sig();
-  }
+  } catch(err){ say('Erro: ' + (err.message || err)); }
+  finally { busy = false; lastSig = sig(); }
 }
 
 const MINE_SEL = '#ink-auto-ui, #ink-eye, #ink-ord-bar, #ink-ord-st';
@@ -2004,7 +2073,6 @@ const fromOurUI = muts => muts.every(m => {
   const n = m.target && m.target.nodeType === 1 ? m.target : (m.target && m.target.parentElement);
   return n && n.closest && n.closest(MINE_SEL);
 });
-
 let obsQueued = false;
 function onDomChange(){
   obsQueued = false;
