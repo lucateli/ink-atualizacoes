@@ -57,9 +57,10 @@ const MOBILE = (() => { try{ return matchMedia('(pointer:coarse)').matches || in
    PARTE A — LEITURA AUTOMÁTICA (só em /ler/...)
    ===================================================================== */
 const LS = 'ink_autoread_cfg';
-let cfg = {speed: 1.5, method: '', methodM: '', manga: false, min: null, eye: false, eyeLvl: 0.25, pos: null, auto: true, voice: false, vrate: 1, vname: '', dbg: false, perf: null, bin: false, bin1: false, smooth: true, metaGoal: 10};
+let cfg = {speed: 1.5, method: '', methodM: '', manga: false, min: null, eye: false, eyeLvl: 0.25, pos: null, auto: true, voice: false, vrate: 1, vname: '', dbg: false, perf: null, bin: false, bin1: false, smooth: true, metaGoal: 10, girl: true, anx: 0};
 try{ Object.assign(cfg, JSON.parse(localStorage.getItem(LS) || '{}')); }catch(e){}
 cfg.smooth = true;
+cfg.anx = cfg.anx === true ? 1 : (+cfg.anx === 1 || +cfg.anx === 2 ? +cfg.anx : 0); // 0 = desligado, 1 = normal, 2 = crônica
 const isPerf = () => cfg.perf == null ? MOBILE : !!cfg.perf;
 let saveT = 0;
 const save = () => { clearTimeout(saveT); saveT = setTimeout(() => { try{ localStorage.setItem(LS, JSON.stringify(cfg)); }catch(e){} }, 150); };
@@ -376,6 +377,51 @@ function wheelAt(dy){
   const t = document.elementFromPoint(x, y) || document.body;
   t.dispatchEvent(new WheelEvent('wheel', {deltaY: dy, deltaMode: 0, bubbles: true, cancelable: true, composed: true, clientX: x, clientY: y, view: window}));
 }
+/* ---- MODOS DE ANSIEDADE ----
+   1 = NORMAL: resposta situacional a um estresse (prazo, prova). Vem em episódios curtos de tensão
+       (pressa, travadinhas, algumas voltas pra reler) e passa; entre eles a leitura volta ao normal.
+   2 = CRÔNICA (tipo TAG): preocupação persistente, "na maioria dos dias", sem gatilho claro e sem pausa de verdade:
+       inquietação constante, dificuldade de concentração (a mente "dá branco"), reler várias vezes e cansaço
+       que vai aumentando com o tempo de leitura. */
+const anxS = {until: 0, mul: 1, phase: 'calm', phaseUntil: 0, t0: 0, lvl: 0};
+function anxMul(now){
+  const lvl = cfg.anx | 0;
+  if(!lvl){ anxS.until = 0; anxS.t0 = 0; anxS.lvl = 0; return 1; }
+  if(anxS.lvl !== lvl || !anxS.t0){ anxS.lvl = lvl; anxS.t0 = now; anxS.until = 0; anxS.phase = 'calm'; anxS.phaseUntil = now + rnd(8000, 18000); }
+  if(lvl === 1){
+    if(now > anxS.phaseUntil){
+      if(anxS.phase === 'calm'){ anxS.phase = 'tense'; anxS.phaseUntil = now + rnd(6000, 14000); }
+      else { anxS.phase = 'calm'; anxS.phaseUntil = now + rnd(20000, 45000); }
+      anxS.until = 0;
+    }
+    if(now > anxS.until){
+      if(anxS.phase === 'calm'){ anxS.mul = rnd(0.92, 1.08); anxS.until = now + rnd(1500, 3000); }
+      else {
+        const r = Math.random();
+        if(r < 0.5){ anxS.mul = rnd(1.4, 1.9); anxS.until = now + rnd(800, 2000); }        // pressa
+        else if(r < 0.8){ anxS.mul = rnd(0.3, 0.6); anxS.until = now + rnd(400, 900); }    // hesita
+        else { anxS.mul = -rnd(0.6, 1.0); anxS.until = now + rnd(250, 450); }              // volta um pouco
+      }
+    }
+    return anxS.mul;
+  }
+  // crônica: sem fase calma
+  if(now > anxS.until){
+    const r = Math.random();
+    if(r < 0.30){ anxS.mul = rnd(1.5, 2.3); anxS.until = now + rnd(700, 2200); }          // inquietação: corre
+    else if(r < 0.58){ anxS.mul = rnd(0, 0.12); anxS.until = now + rnd(600, 1800); }       // branco / não consegue focar
+    else if(r < 0.78){ anxS.mul = -rnd(0.8, 1.6); anxS.until = now + rnd(300, 700); }      // relê
+    else { anxS.mul = rnd(0.55, 1.25); anxS.until = now + rnd(300, 800); }                 // agitação miúda
+  }
+  const fadiga = 1 - Math.min(0.3, (now - anxS.t0) / 600000);                              // cansa fácil: até -30% em 10 min
+  return anxS.mul * (anxS.mul > 0 ? fadiga : 1);
+}
+const ANX_LBL = ['Ansiedade', 'Ans. normal', 'Ans. crônica'];
+const ANX_MSG = [
+  'Modo ansiedade desligado.',
+  '😬 Ansiedade normal: tensão em episódios curtos, depois passa.',
+  '😰 Ansiedade crônica: inquieta o tempo todo, perde o foco, relê e cansa.'
+];
 async function smoothRun(id){
   if(readState().b != null) return 'none';
   let el = scrollerEl(), mode = el ? 'scroll' : 'wheel';
@@ -392,15 +438,15 @@ async function smoothRun(id){
     if(cfg.auto && findEndBtn()) return 'cont';
     ramp = Math.min(1, ramp + dt / 700);
     const pxs = innerHeight * 0.15 * (cfg.speed || 1) * (0.25 + 0.75 * ramp);
-    const step = pxs * dt / 1000;
+    const step = pxs * anxMul(now) * dt / 1000;
     if(mode === 'scroll'){
       if(!el.isConnected){ el = scrollerEl(); if(!el){ mode = 'wheel'; continue; } pos = el.scrollTop; }
       if(Math.abs(el.scrollTop - pos) > 3) pos = el.scrollTop;
-      pos += step; el.scrollTop = pos;
+      pos = Math.max(0, pos + step); el.scrollTop = pos;
       if(el.scrollTop < pos - 2) pos = el.scrollTop;
     } else {
       wacc += step;
-      if(wacc >= 3){ wheelAt(wacc); wacc = 0; }
+      if(Math.abs(wacc) >= 3){ wheelAt(wacc); wacc = 0; }
     }
     const sg = moveSig();
     if(sg !== sig0){ sig0 = sg; lastMove = now; }
@@ -425,7 +471,7 @@ async function smoothRun(id){
       } else bottomSince = 0;
       lastH = el.scrollHeight;
     }
-    if(now - lastUi > 500){ lastUi = now; setSt(`📖 ${label(readState())} · rolando ${Math.round(pxs)} px/s (${mode})`); }
+    if(now - lastUi > 500){ lastUi = now; setSt(`${cfg.anx === 2 ? '😰' : cfg.anx === 1 ? '😬' : '📖'} ${label(readState())} · rolando ${Math.round(pxs)} px/s (${mode})`); }
   }
   return 'cont';
 }
@@ -992,7 +1038,7 @@ function toggleVoice(){
   cfg.voice = !cfg.voice; save(); refreshBtn();
   if(!cfg.voice){ cancelSpeech(); return; }
   if(!TTS || !ptVoices().length) setSt('⚠ Nenhuma voz em português encontrada.');
-  else ocrWorker().then(() => { if(!running) setSt('Audiolivro pronto. Toque em Ler sozinho. 🐾'); }).catch(e => setSt('⚠ OCR: ' + (e.message || e)));
+  else ocrWorker().then(() => { if(!running) setSt('Audiolivro pronto. Toque em Ler sozinho.' + (cfg.girl ? ' 🐾' : '')); }).catch(e => setSt('⚠ OCR: ' + (e.message || e)));
 }
 
 function setSt(t){
@@ -1057,7 +1103,7 @@ const INK_CSS = `
 #ink-auto-ui .ia-step button:active{background:var(--ia-card2)}
 #ink-auto-ui.mob .ia-step button{width:32px;height:44px}
 #ink-auto-ui .ia-val{min-width:34px;text-align:center;font-weight:600;font-size:12px;font-variant-numeric:tabular-nums}
-#ink-auto-ui .ia-chips{display:grid;grid-template-columns:repeat(5,1fr);gap:4px;margin-top:6px}
+#ink-auto-ui .ia-chips{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;margin-top:6px}
 #ink-auto-ui .ia-chip{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;min-height:42px;padding:5px 1px 4px;border-radius:11px;
   background:var(--ia-card);border:1px solid var(--ia-line);color:var(--ia-txt);font-size:9.5px;font-weight:600;letter-spacing:.1px;transition:background .12s,color .12s,border-color .12s}
 #ink-auto-ui.mob .ia-chip{min-height:50px}
@@ -1084,6 +1130,21 @@ const INK_CSS = `
   #ink-auto-ui #ink-auto-go:hover{filter:brightness(1.08)}
 }
 
+/* tema menino (escuro) */
+#ink-auto-ui.boy{--ia-bg:rgba(16,16,20,.84);--ia-card:rgba(255,255,255,.06);--ia-card2:rgba(255,255,255,.12);--ia-line:rgba(255,255,255,.08);--ia-txt:#f4f2ef;--ia-dim:#a19eac;--ia-ac:#e8573f;--ia-ac2:#ff8a4c;
+  border:1px solid var(--ia-line);border-radius:18px;padding-top:8px;box-shadow:0 10px 30px rgba(0,0,0,.5),inset 0 1px 0 rgba(255,255,255,.05)}
+#ink-auto-ui.boy::before,#ink-auto-ui.boy::after{display:none}
+#ink-auto-ui.boy.mob{background:rgba(16,16,20,.96)}
+#ink-auto-ui.boy .ia-title{color:var(--ia-txt);font-weight:650;font-size:12.5px;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+#ink-auto-ui.boy .ia-st{color:#d9d6df;border-color:transparent}
+#ink-auto-ui.boy.run .ia-st{border-color:rgba(232,87,63,.45)}
+#ink-auto-ui.boy #ink-auto-go{font-weight:650;box-shadow:0 4px 12px rgba(232,87,63,.3)}
+#ink-auto-ui.boy.run #ink-auto-go{box-shadow:none;color:var(--ia-txt)}
+#ink-auto-ui.boy .ia-chip{border-color:transparent;color:var(--ia-dim)}
+#ink-auto-ui.boy .ia-chip.on{color:#fff;background:rgba(232,87,63,.2);border-color:rgba(232,87,63,.55)}
+#ink-auto-ui.boy .ia-chip svg{color:currentColor}
+#ink-auto-ui.boy .ia-row{border-color:transparent}
+#ink-auto-ui.boy .ia-row.on{border-color:rgba(232,87,63,.55);background:rgba(232,87,63,.16)}
 #ink-ord-bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:10px 0 4px}
 #ink-ord-bar .io-pill{display:inline-flex;align-items:center;gap:6px;font:600 12.5px/1 system-ui,-apple-system,"Segoe UI",sans-serif;color:#f1efec;
   background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.1);border-radius:12px;padding:9px 12px;cursor:pointer;white-space:nowrap;
@@ -1131,6 +1192,10 @@ function refreshBtn(){
   sw('ink-auto-next', cfg.auto);
   sw('ink-voice-btn', cfg.voice);
   sw('ink-perf-btn', isPerf());
+  sw('ink-anx-btn', cfg.anx > 0);
+  const ab = document.getElementById('ink-anx-btn');
+  if(ab){ const sp = ab.querySelector('span'); if(sp) sp.textContent = ANX_LBL[cfg.anx | 0];
+    ab.title = 'Toque para alternar: desligado → ansiedade normal → ansiedade crônica'; }
   const sp = document.getElementById('ink-auto-sp');
   if(sp) sp.textContent = speedTxt();
   const vp = document.getElementById('ink-voice-name');
@@ -1143,6 +1208,14 @@ function refreshBtn(){
   if(pb) pb.title = isPerf()
     ? 'Modo leve ativo (menos CPU/GPU). Toque para alternar.'
     : 'Modo leve desligado. Toque para alternar (recomendado no celular).';
+}
+function applyTheme(){
+  const u = document.getElementById('ink-auto-ui'); if(!u) return;
+  u.classList.toggle('boy', !cfg.girl);
+  const t = document.getElementById('ink-auto-title');
+  if(t) t.textContent = cfg.girl ? 'Modo Meninas 🐾' : 'Leitura automática';
+  const l = document.getElementById('ink-gender-lbl');
+  if(l) l.textContent = cfg.girl ? '👧 Menina · toque p/ menino' : '👦 Menino · toque p/ menina';
 }
 function applyMin(){
   const u = document.getElementById('ink-auto-ui'); if(!u) return;
@@ -1291,18 +1364,19 @@ function mount(){
     next:  svg('<path d="M5 5l9 7-9 7zM18 5v14"/>'),
     voice: ICO.voice,
     eye:   moon,
-    perf:  bolt
+    perf:  bolt,
+    anx:   svg('<path d="M3 12h4l2-6 4 12 2-6h6"/>')
   };
   const chip = (id, ico, txt, tip) => '<button id="' + id + '" class="ia-chip" type="button" title="' + tip + '">' + ico + '<span>' + txt + '</span></button>';
   d.innerHTML =
     '<div id="ink-auto-head" class="ia-head">' +
       '<span class="ia-logo">' + ICO.book + '</span>' +
-      '<span class="ia-title">Modo Meninas 🐾</span>' +
+      '<span class="ia-title" id="ink-auto-title"></span>' +
       '<button id="ink-auto-mini-go" class="ia-ib" type="button"></button>' +
       '<button id="ink-auto-min" class="ia-ib" type="button"></button>' +
     '</div>' +
     '<div id="ink-auto-body">' +
-      '<div id="ink-auto-st" class="ia-st">' + (MOBILE ? 'Parado. Toque em Ler sozinho. 🐾' : 'Parado. Alt+L liga/desliga. 🐾') + '</div>' +
+      '<div id="ink-auto-st" class="ia-st">' + (MOBILE ? 'Parado. Toque em Ler sozinho.' : 'Parado. Alt+L liga/desliga.') + (cfg.girl ? ' 🐾' : '') + '</div>' +
       '<div class="ia-main">' +
         '<button id="ink-auto-go" type="button"></button>' +
         '<div class="ia-step"><button id="ink-auto-slow" type="button" title="mais devagar">−</button><span id="ink-auto-sp" class="ia-val"></span><button id="ink-auto-fast" type="button" title="mais rápido">+</button></div>' +
@@ -1313,6 +1387,7 @@ function mount(){
         chip('ink-voice-btn', IC.voice, 'Voz', 'Lê os balões em voz alta (OCR + voz do navegador)') +
         chip('ink-eye-btn', IC.eye, 'Olhos', 'Filtro quente que reduz a luz azul (Alt+C)') +
         chip('ink-perf-btn', IC.perf, 'Leve', 'Modo desempenho (menos CPU/GPU)') +
+        chip('ink-anx-btn', IC.anx, 'Ansiedade', 'Modo ansiedade: lê nervoso, em rajadas, com travadinhas e voltinhas') +
       '</div>' +
       '<div id="ink-voice-combo" class="ia-sub">' +
         '<button id="ink-voice-pick" class="ia-row" type="button" title="Trocar a voz"><span class="ia-lbl" id="ink-voice-name"></span></button>' +
@@ -1322,6 +1397,7 @@ function mount(){
         '<span class="ia-row" style="cursor:default"><span class="ia-lbl">Intensidade do filtro</span></span>' +
         '<div class="ia-step"><button id="ink-eye-less" type="button" title="menos intenso">−</button><span id="ink-eye-lvl" class="ia-val"></span><button id="ink-eye-more" type="button" title="mais intenso">+</button></div>' +
       '</div>' +
+      '<button id="ink-gender-btn" class="ia-row" type="button" title="Trocar entre menina e menino"><span class="ia-lbl" id="ink-gender-lbl"></span></button>' +
       '<div class="ia-sec">Missão</div>' +
       '<button id="ink-meta-pick" class="ia-row" type="button"><span class="ia-lbl" id="ink-meta-pick-lbl"></span></button>' +
       '<div class="ia-sub">' +
@@ -1367,6 +1443,15 @@ function mount(){
     setSt(isPerf() ? '⚡ Modo desempenho ligado.' : '⚡ Modo desempenho desligado.');
   };
 
+  d.querySelector('#ink-anx-btn').onclick = () => {
+    cfg.anx = ((cfg.anx | 0) + 1) % 3; save(); refreshBtn();
+    setSt(ANX_MSG[cfg.anx]);
+  };
+  d.querySelector('#ink-gender-btn').onclick = () => {
+    cfg.girl = !cfg.girl; save(); applyTheme();
+    setSt(cfg.girl ? 'Tema menina 🐾' : 'Tema menino.');
+  };
+
   const head = d.querySelector('#ink-auto-head');
   let drag = null;
   head.addEventListener('pointerdown', e => {
@@ -1390,7 +1475,7 @@ function mount(){
   head.addEventListener('pointerup', end);
   head.addEventListener('pointercancel', end);
 
-  refreshBtn(); applyMin(); applyEye();
+  applyTheme(); refreshBtn(); applyMin(); applyEye();
 }
 window.addEventListener('resize', () => { if(cfg.pos) applyPos(); }, {passive: true});
 
