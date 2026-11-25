@@ -1,19 +1,19 @@
 // ==UserScript==
 // @name         Ink Leitor (leitura automática)
 // @namespace    ink-leitor
-// @version      3.2
+// @version      3.2.1
 // @description  Leitura automática, ordem das bolhas e modo menina (skins Gatinha/Lobo) para ink.app.br
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
 // @run-at       document-idle
 // @grant        none
-// @updateURL    https://raw.githubusercontent.com/lucateli/ink-atualizacoes/main/leitor.js
-// @downloadURL  https://raw.githubusercontent.com/lucateli/ink-atualizacoes/main/leitor.js
+// @updateURL    https://raw.githubusercontent.com/lucateli/ink-atualizacoes/main/content.js
+// @downloadURL  https://raw.githubusercontent.com/lucateli/ink-atualizacoes/main/content.js
 // ==/UserScript==
 (() => {
     if (window.__inkLeitorV3) return;
     window.__inkLeitorV3 = true;
-    const INK_VERSION = 'v3.2';
+    const INK_VERSION = 'v3.2.1';
     try { console.info('[Ink] leitor ' + INK_VERSION + ' carregado'); } catch (e) { }
 
     /* =====================================================================
@@ -346,7 +346,7 @@
         const list = has ? (onlyLearned ? [learned] : [learned, ...names.filter(n => n !== learned)]) : names;
         for (const name of list) {
             if (!alive(id)) return false;
-            try { if (!METHODS[name]) continue; } catch (e) { continue; }
+            try { if (!METHODS[name]()) continue; } catch (e) { continue; }
             const ok = await waitChange(before, id, has && name === learned ? 1100 : 650);
             if (ok) {
                 const k = cfg.manga ? 'methodM' : 'method';
