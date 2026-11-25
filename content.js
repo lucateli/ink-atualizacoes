@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ink Leitor (leitura automática)
 // @namespace    ink-leitor
-// @version      3.2.1
+// @version      3.3.1
 // @description  Leitura automática, ordem das bolhas e modo menina (skins Gatinha/Lobo) para ink.app.br
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
@@ -19,7 +19,7 @@
 (() => {
     if (window.__inkLeitorV3) return;
     window.__inkLeitorV3 = true;
-    const INK_VERSION = 'v3.2.1';
+    const INK_VERSION = 'v3.3.1';
     try { console.info('[Ink] leitor ' + INK_VERSION + ' carregado'); } catch (e) { }
 
     /* =====================================================================
@@ -166,7 +166,7 @@
        PARTE A — LEITURA AUTOMÁTICA (só em /ler/...)
        ===================================================================== */
     const LS = 'ink_autoread_cfg_v3';
-    let cfg = { speed: 1.5, method: '', methodM: '', manga: false, min: null, eye: false, eyeLvl: 0.25, pos: null, auto: true, voice: false, vrate: 1, vname: '', dbg: false, perf: null, bin: false, bin1: false, smooth: true, metaGoal: 10, girl: true, anx: 0, skin: 'gato' };
+    let cfg = { speed: 1.5, method: '', methodM: '', manga: false, min: null, eye: false, eyeLvl: 0.25, pos: null, auto: true, voice: false, vrate: 1, vname: '', dbg: false, perf: null, bin: false, bin1: false, smooth: true, metaGoal: 10, girl: true, anx: 0, skin: 'gato', musicUrl: '', musicKey: '', musicVol: 0.6 };
     try { Object.assign(cfg, JSON.parse(localStorage.getItem(LS) || '{}')); } catch (e) { }
     cfg.smooth = true;
     cfg.anx = cfg.anx === true ? 1 : (+cfg.anx === 1 || +cfg.anx === 2 ? +cfg.anx : 0);
@@ -654,8 +654,8 @@
             if (id === runId) { running = false; refreshBtn(); keepAwake(false); }
         }
     }
-    function finish(msg) { running = false; runId++; cancelSpeech(); setSt(msg); refreshBtn(); keepAwake(false); }
-    function stop(msg) { if (!running) return; running = false; runId++; cancelSpeech(); setSt(msg || 'Parado.'); refreshBtn(); keepAwake(false); }
+    function finish(msg) { running = false; runId++; cancelSpeech(); if (typeof musDuck === 'function') musDuck(false); setSt(msg); refreshBtn(); keepAwake(false); }
+    function stop(msg) { if (!running) return; running = false; runId++; cancelSpeech(); if (typeof musDuck === 'function') musDuck(false); setSt(msg || 'Parado.'); refreshBtn(); keepAwake(false); }
 
     let wl = null;
     async function keepAwake(on) {
@@ -1133,6 +1133,11 @@
     }
 
     async function narrate(st, id) {
+        try { await narrate0(st, id); }
+        finally { if (typeof musDuck === 'function') musDuck(false); }   // solta a música assim que o balão termina
+    }
+    async function narrate0(st, id) {
+        if (typeof musDuck === 'function') musDuck(true);
         while (alive(id) && paused()) { setSt('⏸ Em pausa…'); await sleep(200); }
         if (!alive(id) || (cfg.auto && findEndBtn())) return;
         await settle(id);
@@ -1152,7 +1157,7 @@
     }
     function toggleVoice() {
         cfg.voice = !cfg.voice; save(); refreshBtn();
-        if (!cfg.voice) { cancelSpeech(); return; }
+        if (!cfg.voice) { cancelSpeech(); if (typeof musDuck === 'function') musDuck(false); return; }
         if (!TTS || !ptVoices().length) setSt('⚠ Nenhuma voz em português encontrada.');
         else ocrWorker().then(() => { if (!running) setSt('Audiolivro pronto. Toque em Ler sozinho.' + (cfg.girl ? ' ' + mascot() : '')); }).catch(e => setSt('⚠ OCR: ' + (e.message || e)));
     }
@@ -1491,6 +1496,351 @@ background:rgba(90,170,255,.1);border:1px solid rgba(90,170,255,.22);color:#a9d2
     }
     setInterval(metaTick, 500);
 
+    /* =====================================================================
+       ABA MÚSICA — banco de dados no Google Drive (via Apps Script "Code.gs")
+       ===================================================================== */
+    const MUS = { list: [], cur: -1, a: null, blob: null, shuffle: false, tab: 'read', synced: false };
+    const MUS_LS = 'ink_music_list';
+    try { MUS.list = JSON.parse(localStorage.getItem(MUS_LS) || '[]'); } catch (e) { }
+    const musVolNow = () => cfg.musicVol == null ? 0.6 : cfg.musicVol;
+    const musSt = t => { const s = document.getElementById('ink-mus-st'); if (s && s.textContent !== t) s.textContent = t; };
+    const musDirect = u => {
+        u = (u || '').trim();
+        const m = /drive\.google\.com\/(?:file\/d\/|open\?id=|uc\?(?:export=\w+&)?id=)([\w-]{10,})/.exec(u);
+        return m ? 'https://drive.google.com/uc?export=download&id=' + m[1] : u;
+    };
+
+    async function musApi(action, data) {
+        if (!cfg.musicUrl) throw new Error('Toque em "Drive" e cole a URL do app da web.');
+        const r = await fetch(cfg.musicUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'text/plain;charset=utf-8' },   // "simple request" → sem preflight CORS
+            body: JSON.stringify({ action, key: cfg.musicKey || '', ...data })
+        });
+        const j = await r.json();
+        if (!j.ok) throw new Error(j.err || 'erro no Drive');
+        return j;
+    }
+    function musSetList(l) {
+        MUS.list = l || [];
+        try { localStorage.setItem(MUS_LS, JSON.stringify(MUS.list)); } catch (e) { }
+        musPaintList();
+    }
+    async function musSync(full) {
+        try {
+            musSt('☁ Sincronizando…');
+            const j = await musApi(full ? 'sync' : 'list');
+            musSetList(j.list);
+            musSt('☁ ' + j.list.length + ' faixa(s)' + (j.added ? ' · +' + j.added + ' nova(s)' : ''));
+        } catch (e) { musSt('⚠ ' + (e.message || e)); }
+    }
+
+    function musAudio() {
+        if (!MUS.a) {
+            const a = new Audio();
+            a.preload = 'auto'; a.volume = musVolNow();
+            a.addEventListener('ended', () => musNext(1));
+            a.addEventListener('play', musPaintBtn);
+            a.addEventListener('pause', musPaintBtn);
+            MUS.a = a;
+        }
+        return MUS.a;
+    }
+
+    // Ducka (abaixa) a música enquanto o audiolivro fala. Idempotente.
+    function musDuck(on) {
+        const a = MUS.a;
+        if (!a || !a.src || a.paused) return;
+        if (on) {
+            if (a._ducked) return;
+            a._ducked = true;
+            a._preVol = a.volume;
+            a.volume = Math.min(a.volume, 0.12);
+        } else if (a._ducked) {
+            a._ducked = false;
+            a.volume = a._preVol != null ? a._preVol : musVolNow();
+            a._preVol = null;
+        }
+    }
+
+    // Cache das faixas do Drive no IndexedDB (evita baixar de novo até 20 MB a cada play)
+    const MUS_DB = 'ink_music_cache', MUS_MAX = 8;
+    function musIdb() {
+        return new Promise((res, rej) => {
+            try {
+                const r = indexedDB.open(MUS_DB, 1);
+                r.onupgradeneeded = () => r.result.createObjectStore('t', { keyPath: 'fid' });
+                r.onsuccess = () => res(r.result);
+                r.onerror = () => rej(r.error);
+            } catch (e) { rej(e); }
+        });
+    }
+    async function musCacheGet(fid) {
+        try {
+            const db = await musIdb();
+            return await new Promise(res => {
+                const q = db.transaction('t').objectStore('t').get(fid);
+                q.onsuccess = () => res(q.result || null);
+                q.onerror = () => res(null);
+            });
+        } catch (e) { return null; }
+    }
+    async function musCachePut(fid, blob) {
+        try {
+            const db = await musIdb();
+            const all = await new Promise(res => {
+                const q = db.transaction('t').objectStore('t').getAll();
+                q.onsuccess = () => res(q.result || []);
+                q.onerror = () => res([]);
+            });
+            const tx = db.transaction('t', 'readwrite'), st = tx.objectStore('t');
+            all.filter(x => x.fid !== fid).sort((a, b) => a.at - b.at)
+                .slice(0, Math.max(0, all.length - (MUS_MAX - 1))).forEach(x => st.delete(x.fid));
+            st.put({ fid, blob, at: Date.now() });
+        } catch (e) { }
+    }
+    function musKeep(fid) {   // marca como usada agora (LRU simples)
+        musCacheGet(fid).then(r => { if (r) musCachePut(fid, r.blob); });
+    }
+
+    async function musPlay(i) {
+        const t = MUS.list[i];
+        if (!t) return;
+        const a = musAudio();
+        MUS.cur = i; musPaintList();
+        try {
+            let src = t.url;
+            if (t.fid) {
+                let blob = null;
+                const hit = await musCacheGet(t.fid);
+                if (hit && hit.blob) { blob = hit.blob; musKeep(t.fid); }
+                else {
+                    musSt('⏳ Baixando do Drive…');
+                    const j = await musApi('file', { fid: t.fid });
+                    if (MUS.cur !== i) return;                      // trocou de faixa enquanto baixava
+                    const bin = atob(j.b64), u8 = new Uint8Array(bin.length);
+                    for (let k = 0; k < bin.length; k++) u8[k] = bin.charCodeAt(k);
+                    blob = new Blob([u8], { type: j.mime || 'audio/mpeg' });
+                    musCachePut(t.fid, blob);
+                }
+                if (MUS.cur !== i) return;
+                if (MUS.blob) URL.revokeObjectURL(MUS.blob);
+                MUS.blob = URL.createObjectURL(blob);
+                src = MUS.blob;
+            }
+            a.src = src;
+            await a.play();
+            MUS.fail = 0;
+            musSt('🎵 ' + t.title);
+        } catch (e) {
+            if (MUS.cur !== i) return;
+            if (e && (e.name === 'NotAllowedError' || e.name === 'AbortError')) {   // bloqueio de autoplay/interrupção: não é erro da faixa
+                MUS.fail = 0; musSt('⚠ Toque em ▶ para tocar (o navegador bloqueou o início automático).'); return;
+            }
+            // faixa com erro: pula para a próxima (no máximo uma volta na lista)
+            MUS.fail = (MUS.fail || 0) + 1;
+            if (MUS.list.length > 1 && MUS.fail < MUS.list.length) {
+                musSt('⚠ ' + (e.message || e) + ' — pulando…');
+                setTimeout(() => { if (MUS.cur === i) musNext(1); }, 1200);
+            } else { MUS.fail = 0; musSt('⚠ ' + (e.message || e)); }
+        }
+    }
+    function musNext(d) {
+        const n = MUS.list.length;
+        if (!n) return;
+        if (MUS.shuffle && n > 1) {
+            let j;
+            do { j = Math.floor(Math.random() * n); } while (j === MUS.cur);
+            musPlay(j);
+            return;
+        }
+        // se nada está tocando: d>0 começa do 0, d<0 começa do último
+        const base = MUS.cur < 0 ? (d > 0 ? -1 : 0) : MUS.cur;
+        musPlay(((base + d) % n + n) % n);
+    }
+    function musToggle() {
+        const a = musAudio();
+        if (!a.src) {
+            if (MUS.list.length) musPlay(Math.max(0, MUS.cur));
+            else musSt('Lista vazia. Coloque áudios na pasta do Drive e toque em Sincronizar.');
+            return;
+        }
+        if (a.paused) a.play().catch(() => { }); else a.pause();
+    }
+    function musVol(d) {
+        cfg.musicVol = Math.min(1, Math.max(0, Math.round((musVolNow() + d) * 10) / 10));
+        save();
+        if (MUS.a) {
+            if (MUS.a._ducked) MUS.a._preVol = cfg.musicVol;   // abaixada: guarda o novo volume para restaurar depois
+            else MUS.a.volume = cfg.musicVol;
+        }
+        musPaintBtn();
+    }
+
+    function musPaintBtn() {
+        const playing = !!(MUS.a && !MUS.a.paused && MUS.a.src);
+        const p = document.getElementById('ink-mus-play');
+        if (p) {
+            p.classList.toggle('on', playing);
+            p.innerHTML = '<span style="font-size:15px">' + (playing ? '⏸' : '▶') + '</span><span>' + (playing ? 'Pausar' : 'Tocar') + '</span>';
+        }
+        const s = document.getElementById('ink-mus-shuf');
+        if (s) s.classList.toggle('on', MUS.shuffle);
+        const v = document.getElementById('ink-mus-vol');
+        if (v) v.textContent = Math.round(musVolNow() * 100) + '%';
+    }
+    function musPaintList() {
+        const box = document.getElementById('ink-mus-list');
+        if (!box) return;
+        box.textContent = '';
+        if (!MUS.list.length) { box.textContent = 'Nenhuma faixa ainda.'; return; }
+        MUS.list.forEach((t, i) => {
+            const row = document.createElement('div');
+            row.className = 'ia-trk' + (i === MUS.cur ? ' on' : '');
+            const b = document.createElement('button');
+            b.type = 'button'; b.className = 'ia-trk-t'; b.textContent = t.title; b.title = t.title;
+            b.onclick = () => musPlay(i);
+            const x = document.createElement('button');
+            x.type = 'button'; x.className = 'ia-trk-x'; x.textContent = '×'; x.title = 'Remover da lista (não apaga do Drive)';
+            x.onclick = async () => {
+                try {
+                    const j = await musApi('del', { id: t.id });
+                    if (MUS.cur === i) {
+                        MUS.cur = -1;
+                        if (MUS.a) { MUS.a.pause(); MUS.a.removeAttribute('src'); MUS.a.load(); musPaintBtn(); }
+                    } else if (MUS.cur > i) {
+                        MUS.cur--;
+                    }
+                    musSetList(j.list);
+                } catch (e) { musSt('⚠ ' + (e.message || e)); }
+            };
+            row.append(b, x);
+            box.appendChild(row);
+        });
+    }
+
+    function musCss() {
+        if (document.getElementById('ink-mus-css')) return;
+        const s = document.createElement('style');
+        s.id = 'ink-mus-css';
+        s.textContent = `
+#ink-auto-ui .ia-tabs{display:flex;gap:4px;margin:2px 0 6px}
+#ink-auto-ui .ia-tab{flex:1;display:flex;align-items:center;justify-content:center;gap:4px;min-height:32px;padding:5px 4px;border-radius:11px;font-size:11.5px;font-weight:700;background:var(--ia-card);border:1px solid var(--ia-line);color:var(--ia-txt)}
+#ink-auto-ui.mob .ia-tab{min-height:40px}
+#ink-auto-ui .ia-tab.on{color:#fff;background:var(--ia-ac);border-color:var(--ia-ac2)}
+#ink-auto-ui .ia-trks{margin-top:6px;max-height:150px;overflow:auto;border-radius:11px;background:var(--ia-card);border:1px solid var(--ia-line);font-size:11.5px;color:var(--ia-dim);padding:2px}
+#ink-auto-ui .ia-trk{display:flex;align-items:center;gap:2px;border-radius:8px}
+#ink-auto-ui .ia-trk.on{background:var(--ia-ac);color:#fff}
+#ink-auto-ui .ia-trk-t{flex:1;min-width:0;padding:7px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--ia-txt)}
+#ink-auto-ui .ia-trk.on .ia-trk-t{color:#fff}
+#ink-auto-ui .ia-trk-x{width:28px;text-align:center;padding:7px 0;color:inherit;opacity:.7}
+#ink-auto-ui .ia-in{display:block;width:100%;margin-top:4px;padding:7px 9px;border-radius:10px;border:1px solid var(--ia-line);background:var(--ia-card);color:var(--ia-txt);font:inherit;outline:none}
+#ink-auto-ui .ia-in:focus{border-color:var(--ia-ac)}
+`;
+        (document.head || document.documentElement).appendChild(s);
+    }
+
+    function musTab(t) {
+        MUS.tab = t;
+        const r = document.getElementById('ink-tab-read'), m = document.getElementById('ink-tab-music');
+        if (r) r.style.display = t === 'read' ? '' : 'none';
+        if (m) m.style.display = t === 'music' ? '' : 'none';
+        document.querySelectorAll('#ink-auto-ui [data-tab]').forEach(b => b.classList.toggle('on', b.dataset.tab === t));
+        if (t === 'music') {
+            musPaintList(); musPaintBtn();
+            if (!MUS.synced) {
+                MUS.synced = true;
+                if (cfg.musicUrl) musSync(false);
+                else { const c = document.getElementById('ink-mus-cfg'); if (c) c.style.display = ''; musSt('Configure o Drive para começar.'); }
+            }
+        }
+        if (typeof applyPos === 'function') applyPos();
+    }
+
+    function musMount(d) {
+        const body = d.querySelector('#ink-auto-body');
+        if (!body || body.querySelector('#ink-tabs')) return;
+        musCss();
+
+        // 1) move TODO o conteúdo atual (inclusive #ink-auto-st) para a aba Leitura
+        const read = document.createElement('div');
+        read.id = 'ink-tab-read';
+        [...body.children].forEach(c => read.appendChild(c));
+
+        // 2) barra de abas
+        const tabs = document.createElement('div');
+        tabs.id = 'ink-tabs'; tabs.className = 'ia-tabs';
+        tabs.innerHTML = '<button type="button" class="ia-tab" data-tab="read">📖 Leitura</button><button type="button" class="ia-tab" data-tab="music">🎵 Música</button>';
+
+        // 3) aba Música
+        const pane = document.createElement('div');
+        pane.id = 'ink-tab-music'; pane.style.display = 'none';
+        const chip = (id, ico, txt) => '<button id="' + id + '" class="ia-chip" type="button"><span style="font-size:15px">' + ico + '</span><span>' + txt + '</span></button>';
+        pane.innerHTML =
+            '<div id="ink-mus-st" class="ia-st">Música no Drive.</div>' +
+            '<div class="ia-chips">' +
+            chip('ink-mus-prev', '⏮', 'Anterior') +
+            '<button id="ink-mus-play" class="ia-chip" type="button"></button>' +
+            chip('ink-mus-next', '⏭', 'Próxima') +
+            chip('ink-mus-shuf', '🔀', 'Aleatória') +
+            chip('ink-mus-sync', '☁', 'Sincronizar') +
+            chip('ink-mus-cfgb', '🔗', 'Drive') +
+            '</div>' +
+            '<div class="ia-sub"><span class="ia-row" style="cursor:default"><span class="ia-lbl">Volume</span></span>' +
+            '<div class="ia-step"><button id="ink-mus-vless" type="button">−</button><span id="ink-mus-vol" class="ia-val"></span><button id="ink-mus-vmore" type="button">+</button></div></div>' +
+            '<div id="ink-mus-list" class="ia-trks"></div>' +
+            '<button id="ink-mus-addb" class="ia-row" type="button" style="margin-top:6px"><span class="ia-lbl">+ Adicionar por link</span></button>' +
+            '<div id="ink-mus-add" style="display:none">' +
+            '<input id="ink-mus-addt" class="ia-in" placeholder="Nome da faixa" autocomplete="off">' +
+            '<input id="ink-mus-addu" class="ia-in" placeholder="Link do áudio (Drive ou direto)" autocomplete="off" inputmode="url">' +
+            '<button id="ink-mus-adds" class="ia-row" type="button" style="margin-top:4px"><span class="ia-lbl">Salvar faixa</span></button></div>' +
+            '<div id="ink-mus-cfg" style="display:none">' +
+            '<input id="ink-mus-cu" class="ia-in" placeholder="URL do app da web (script.google.com/…/exec)" autocomplete="off" inputmode="url">' +
+            '<input id="ink-mus-ck" class="ia-in" placeholder="Senha (se definiu no Code.gs)" autocomplete="off">' +
+            '<button id="ink-mus-cs" class="ia-row" type="button" style="margin-top:4px"><span class="ia-lbl">Salvar e sincronizar</span></button></div>';
+
+        body.append(tabs, read, pane);
+
+        // teclas digitadas nos campos não viram atalhos do site
+        pane.addEventListener('keydown', e => e.stopPropagation());
+        pane.addEventListener('keyup', e => e.stopPropagation());
+
+        const $ = id => pane.querySelector(id);
+        tabs.querySelectorAll('[data-tab]').forEach(b => { b.onclick = () => musTab(b.dataset.tab); });
+        $('#ink-mus-play').onclick = musToggle;
+        $('#ink-mus-prev').onclick = () => musNext(-1);
+        $('#ink-mus-next').onclick = () => musNext(1);
+        $('#ink-mus-shuf').onclick = () => { MUS.shuffle = !MUS.shuffle; musPaintBtn(); };
+        $('#ink-mus-sync').onclick = () => musSync(true);
+        $('#ink-mus-vless').onclick = () => musVol(-0.1);
+        $('#ink-mus-vmore').onclick = () => musVol(0.1);
+        $('#ink-mus-cfgb').onclick = () => {
+            const c = $('#ink-mus-cfg');
+            $('#ink-mus-cu').value = cfg.musicUrl || ''; $('#ink-mus-ck').value = cfg.musicKey || '';
+            c.style.display = c.style.display === 'none' ? '' : 'none';
+        };
+        $('#ink-mus-cs').onclick = () => {
+            const u = $('#ink-mus-cu').value.trim();
+            if (u && !/^https:\/\/script\.google(usercontent)?\.com\//.test(u)) { musSt('⚠ A URL deve começar com https://script.google.com/'); return; }
+            cfg.musicUrl = u; cfg.musicKey = $('#ink-mus-ck').value.trim(); save();
+            $('#ink-mus-cfg').style.display = 'none';
+            if (u) { MUS.synced = true; musSync(true); }
+        };
+        $('#ink-mus-addb').onclick = () => { const a = $('#ink-mus-add'); a.style.display = a.style.display === 'none' ? '' : 'none'; };
+        $('#ink-mus-adds').onclick = async () => {
+            const url = musDirect($('#ink-mus-addu').value);
+            if (!url) { musSt('⚠ Cole o link do áudio.'); return; }
+            try {
+                const j = await musApi('add', { title: $('#ink-mus-addt').value.trim() || 'Sem título', url });
+                musSetList(j.list);
+                $('#ink-mus-addt').value = ''; $('#ink-mus-addu').value = ''; $('#ink-mus-add').style.display = 'none';
+                musSt('✓ Faixa adicionada.');
+            } catch (e) { musSt('⚠ ' + (e.message || e)); }
+        };
+
+        musTab(MUS.tab);
+    }
+
     function mount() {
         const stale = document.getElementById('ink-auto-ui');
         if (stale && stale.dataset.v !== '3.1') stale.remove();
@@ -1574,7 +1924,6 @@ background:rgba(90,170,255,.1);border:1px solid rgba(90,170,255,.22);color:#a9d2
         d.querySelector('#ink-auto-min').onclick = () => { cfg.min = !(cfg.min == null ? false : cfg.min); save(); applyMin(); };
         d.querySelector('#ink-auto-manga').onclick = () => {
             cfg.manga = !cfg.manga; save(); refreshBtn();
-            if (document.getElementById('ink-ord-west')) paintMode();
             setSt(cfg.manga ? 'Modo mangá: avança para a esquerda.' : 'Modo ocidental: avança para a direita.');
         };
         d.querySelector('#ink-voice-btn').onclick = toggleVoice;
@@ -1632,6 +1981,7 @@ background:rgba(90,170,255,.1);border:1px solid rgba(90,170,255,.22);color:#a9d2
         head.addEventListener('pointercancel', end);
 
         applyTheme(); refreshBtn(); applyMin(); applyEye();
+        if (typeof musMount === 'function') musMount(d);
     }
     window.addEventListener('resize', () => { if (cfg.pos) applyPos(); }, { passive: true });
 
@@ -1662,8 +2012,11 @@ background:rgba(90,170,255,.1);border:1px solid rgba(90,170,255,.22);color:#a9d2
     setInterval(route, 2500);
     route();
     window.lerAuto = {
-        meta: n => { if (n) cfg.metaGoal = n; if (!meta.on) metaToggle(); return cfg.metaGoal; }, metaStatus: () => ({ ...meta, seen: meta.seen.size, goal: cfg.metaGoal }),
-        start: () => { if (!running) loop(); }, stop: () => stop('Parado.'), next: () => { const e = findNextEl(); console.log(e); return e; },
+        meta: n => { if (n) cfg.metaGoal = n; if (!meta.on) metaToggle(); return cfg.metaGoal; },
+        metaStatus: () => ({ ...meta, seen: meta.seen.size, goal: cfg.metaGoal }),
+        start: () => { if (!running) loop(); },
+        stop: () => stop('Parado.'),
+        next: () => { const e = findNextEl(); console.log(e); return e; },
         voices: () => ptVoices().map(v => v.name + ' (' + v.lang + ')'),
         bin1: v => { cfg.bin1 = v !== false; save(); return cfg.bin1; },
         bin: v => { cfg.bin = v !== false; save(); return cfg.bin; },
@@ -1671,612 +2024,4 @@ background:rgba(90,170,255,.1);border:1px solid rgba(90,170,255,.22);color:#a9d2
         counters: () => { scan(); cache.t = performance.now(); const s = readState(); return s; },
         ocrTest: async () => { const t = await ocrView(); console.log('[Ink-Audio] texto:', t); return t; }
     };
-
-    const AUTO = true;
-    const HOLD = MOBILE ? 320 : 240;
-    const SCORE_THRESHOLD = 0.30;
-    const MAX_REMOVE_RATIO = 0.22;
-
-    const MODES = MOBILE ? ['ptouch', 'touch', 'mouse'] : ['mouse', 'ptouch', 'touch'];
-    let busy = false, lastSig = '', tmr = 0, mode = MODES.includes(cfg.dmode) ? cfg.dmode : MODES[0], SYN = false;
-    let pgCache = { url: '', pg: null };
-    const scoreCache = new Map();
-
-    ['setPointerCapture', 'releasePointerCapture'].forEach(k => {
-        const o = Element.prototype[k];
-        Element.prototype[k] = function (...a) { try { return o.apply(this, a); } catch (e) { } };
-    });
-    const hpc = Element.prototype.hasPointerCapture;
-    Element.prototype.hasPointerCapture = function (...a) { return SYN ? true : hpc.apply(this, a); };
-
-    function spotBoxes() {
-        return [...document.querySelectorAll('.bz-order__spot')].map(e => {
-            const s = e.style;
-            const l = parseFloat(s.left) / 100, t = parseFloat(s.top) / 100;
-            const w = parseFloat(s.width) / 100, h = parseFloat(s.height) / 100;
-            if (![l, t, w, h].every(isFinite)) return null;
-            return { x0: l, y0: t, x1: l + w, y1: t + h, cx: l + w / 2, cy: t + h / 2 };
-        }).filter(Boolean);
-    }
-
-    function tiles() {
-        const d = document.querySelector('.bz-order');
-        if (!d) return [];
-        const sp = spotBoxes();
-        return [...d.querySelectorAll('.bz-order__tile:not(.bz-order__add)')].map(el => {
-            const th = el.querySelector('.bz-order__thumb');
-            if (!th) return null;
-            const s = th.style;
-            const bs = s.backgroundSize.split(' ').map(parseFloat);
-            const bp = s.backgroundPosition.split(' ').map(parseFloat);
-            const w = parseFloat(s.width), h = parseFloat(s.height);
-            const cx = (-bp[0] + w / 2) / bs[0];
-            const cy = (-bp[1] + h / 2) / bs[1];
-            if (![cx, cy].every(isFinite)) return null;
-
-            let box = null, bd = 0.03;
-            sp.forEach(p => {
-                const dd = Math.hypot(p.cx - cx, p.cy - cy);
-                if (dd < bd) { bd = dd; box = p; }
-            });
-            if (!box) {
-                const hw = w / bs[0] * 0.4, hh = h / bs[1] * 0.4;
-                box = { x0: cx - hw, x1: cx + hw, y0: cy - hh, y1: cy + hh };
-            }
-
-            const m = /translateX\((-?[\d.]+)px\)/.exec(el.style.transform || '');
-            return {
-                el, cx, cy,
-                x0: box.x0, x1: box.x1, y0: box.y0, y1: box.y1,
-                x: m ? +m[1] : el.getBoundingClientRect().left,
-                key: cx.toFixed(4) + ',' + cy.toFixed(4),
-                n: (el.querySelector('.bz-order__num') || {}).textContent || '?'
-            };
-        }).filter(Boolean);
-    }
-
-    const sig = () => tiles().map(t => t.key).sort().join('|');
-
-    async function getPage() {
-        const pe = document.querySelector('.bz-order__page');
-        if (!pe) return null;
-
-        const m = /url\(['"]?([^'")]+)['"]?\)/.exec(pe.style.backgroundImage || '');
-        if (!m) return null;
-
-        if (pgCache.url === m[1] && pgCache.pg) return pgCache.pg;
-
-        try {
-            const img = new Image();
-            img.crossOrigin = 'anonymous';
-            img.src = m[1];
-            await img.decode();
-
-            const s = Math.min(1, 520 / img.naturalWidth);
-            const w = Math.max(8, Math.round(img.naturalWidth * s));
-            const h = Math.max(8, Math.round(img.naturalHeight * s));
-
-            const c = document.createElement('canvas');
-            c.width = w; c.height = h;
-            const ctx = c.getContext('2d', { willReadFrequently: true });
-            ctx.drawImage(img, 0, 0, w, h);
-
-            const d = ctx.getImageData(0, 0, w, h).data;
-            const L = new Uint8Array(w * h);
-            for (let i = 0; i < w * h; i++) {
-                const g = (d[i * 4] * 299 + d[i * 4 + 1] * 587 + d[i * 4 + 2] * 114) / 1000;
-                L[i] = (g > 235 || g < 80) ? 1 : 0;
-            }
-
-            pgCache = { url: m[1], pg: { img, w, h, L } };
-            return pgCache.pg;
-        } catch (e) { return null; }
-    }
-
-    function roundMarks(d, tw, th) {
-        const N = tw * th;
-        const m = new Uint8Array(N);
-        for (let i = 0; i < N; i++) {
-            m[i] = (d[i * 4] * 0.299 + d[i * 4 + 1] * 0.587 + d[i * 4 + 2] * 0.114) < 140 ? 1 : 0;
-        }
-        const dl = new Uint8Array(N), cl = new Uint8Array(N);
-        for (let y = 0; y < th; y++) for (let x = 0; x < tw; x++) {
-            let v = 0;
-            for (let dy = -1; dy <= 1 && !v; dy++) for (let dx = -1; dx <= 1; dx++) {
-                const xx = x + dx, yy = y + dy;
-                if (xx >= 0 && xx < tw && yy >= 0 && yy < th && m[yy * tw + xx]) { v = 1; break; }
-            }
-            dl[y * tw + x] = v;
-        }
-        for (let y = 0; y < th; y++) for (let x = 0; x < tw; x++) {
-            let v = 1;
-            for (let dy = -1; dy <= 1 && v; dy++) for (let dx = -1; dx <= 1; dx++) {
-                const xx = x + dx, yy = y + dy;
-                if (xx >= 0 && xx < tw && yy >= 0 && yy < th && !dl[yy * tw + xx]) { v = 0; break; }
-            }
-            cl[y * tw + x] = v;
-        }
-        const seen = new Uint8Array(N);
-        let n = 0, nr = 0;
-        for (let s = 0; s < N; s++) {
-            if (!cl[s] || seen[s]) continue;
-            const st = [s]; seen[s] = 1;
-            let x0 = tw, x1 = 0, y0 = th, y1 = 0;
-            while (st.length) {
-                const p = st.pop(), px = p % tw, py = (p / tw) | 0;
-                if (px < x0) x0 = px; if (px > x1) x1 = px; if (py < y0) y0 = py; if (py > y1) y1 = py;
-                for (const q of [px > 0 ? p - 1 : -1, px < tw - 1 ? p + 1 : -1, py > 0 ? p - tw : -1, py < th - 1 ? p + tw : -1]) {
-                    if (q < 0 || seen[q] || !cl[q]) continue;
-                    seen[q] = 1; st.push(q);
-                }
-            }
-            const ww = x1 - x0 + 1, hh = y1 - y0 + 1;
-            if (x0 === 0 || y0 === 0 || x1 === tw - 1 || y1 === th - 1 || hh < 0.12 * th || ww * hh < 12) continue;
-            n++;
-            const a = ww / hh;
-            if (a > 0.75 && a < 1.5) nr++;
-        }
-        return { n, rnd: n ? nr / n : 0 };
-    }
-
-    function balloonScore(pg, b) {
-        if (scoreCache.has(b.key)) return scoreCache.get(b.key);
-
-        try {
-            const pad = 0.018;
-            const x0 = Math.max(0, b.x0 - pad), y0 = Math.max(0, b.y0 - pad);
-            const x1 = Math.min(1, b.x1 + pad), y1 = Math.min(1, b.y1 + pad);
-            const nw = pg.img.naturalWidth, nh = pg.img.naturalHeight;
-            const sw = Math.max(4, (x1 - x0) * nw), sh = Math.max(4, (y1 - y0) * nh);
-            const tw = Math.min(110, Math.round(sw));
-            const th = Math.max(4, Math.round(tw * sh / sw));
-
-            const c = document.createElement('canvas');
-            c.width = tw; c.height = th;
-            const ctx = c.getContext('2d', { willReadFrequently: true });
-            ctx.drawImage(pg.img, x0 * nw, y0 * nh, sw, sh, 0, 0, tw, th);
-            const d = ctx.getImageData(0, 0, tw, th).data;
-            const n = tw * th;
-
-            let ink = 0, white = 0, edge = 0;
-            const bins = new Uint32Array(512);
-
-            for (let i = 0; i < n; i++) {
-                const r = d[i * 4], g = d[i * 4 + 1], bl = d[i * 4 + 2];
-                const L = r * 0.299 + g * 0.587 + bl * 0.114;
-                bins[(r >> 5) * 64 + (g >> 5) * 8 + (bl >> 5)]++;
-                if (L < 90) ink++;
-                if (L > 210) white++;
-            }
-
-            for (let y = 1; y < th - 1; y++) for (let x = 1; x < tw - 1; x++) {
-                const i = (y * tw + x) * 4;
-                const L = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
-                const L2 = d[((y - 1) * tw + x) * 4] * 0.299 + d[((y - 1) * tw + x) * 4 + 1] * 0.587 + d[((y - 1) * tw + x) * 4 + 2] * 0.114;
-                if (Math.abs(L - L2) > 40) edge++;
-            }
-
-            let m1 = 0, m2 = 0;
-            for (let k = 0; k < 512; k++) {
-                const v = bins[k];
-                if (v > m1) { m2 = m1; m1 = v; } else if (v > m2) m2 = v;
-            }
-
-            const fi = ink / n;
-            const fw = white / n;
-            const top2 = (m1 + m2) / n;
-            const edgeRatio = edge / n;
-
-            let score = 0.50;
-
-            if (fi > 0.04) score += 0.18;
-            else if (fi > 0.02) score += 0.08;
-            else score -= 0.25;
-
-            if (fw > 0.25) score += 0.16;
-            else if (fw > 0.12) score += 0.06;
-            else score -= 0.12;
-
-            if (top2 > 0.38) score += 0.14;
-            else if (top2 > 0.25) score += 0.05;
-            else score -= 0.15;
-
-            if (edgeRatio > 0.04 && edgeRatio < 0.22) score += 0.10;
-
-            if (fi < 0.11 && fw > 0.40) {
-                const rm = roundMarks(d, tw, th);
-                if (rm.n >= 6 && rm.rnd >= 0.60) score -= 0.45;
-            }
-
-            const area = (b.x1 - b.x0) * (b.y1 - b.y0);
-            if (area < 0.008) score -= 0.15;
-
-            score = Math.max(0, Math.min(1, score));
-            scoreCache.set(b.key, score);
-            return score;
-
-        } catch (e) {
-            scoreCache.set(b.key, 0.6);
-            return 0.6;
-        }
-    }
-
-    function lineMask(pg, list) {
-        const { w, h } = pg;
-        const M = new Uint8Array(w * h);
-        list.forEach(b => {
-            const x0 = Math.max(0, Math.floor((b.x0 - 0.01) * w));
-            const x1 = Math.min(w, Math.ceil((b.x1 + 0.01) * w));
-            const y0 = Math.max(0, Math.floor((b.y0 - 0.01) * h));
-            const y1 = Math.min(h, Math.ceil((b.y1 + 0.01) * h));
-            for (let y = y0; y < y1; y++) M.fill(1, y * w + x0, y * w + x1);
-        });
-        return M;
-    }
-
-    function sup(pg, M, ax, p, lo, hi) {
-        const { w, h, L } = pg;
-        const lim = ax === 'y' ? h : w;
-        p = Math.min(lim - 1, Math.max(0, p));
-        let n = 0, k = 0;
-        for (let j = lo; j < hi; j++) {
-            const i = ax === 'y' ? p * w + j : j * w + p;
-            if (M[i]) continue;
-            n++; k += L[i];
-        }
-        return n >= 0.4 * (hi - lo) && n > 0 ? k / n : 0;
-    }
-
-    function bestSup(pg, M, ax, g0, g1, lo, hi) {
-        const dim = ax === 'y' ? pg.h : pg.w;
-        const d = Math.max(2, Math.round(0.02 * dim));
-        let best = 0;
-        for (let p = Math.floor(g0); p <= Math.ceil(g1); p++) {
-            const s = sup(pg, M, ax, p, lo, hi);
-            if (s < 0.55) continue;
-            const c = (sup(pg, M, ax, p - d, lo, hi) + sup(pg, M, ax, p + d, lo, hi)) / 2;
-            if (s - c > best) best = s - c;
-        }
-        return best;
-    }
-
-    function leaf(bs) {
-        const rows = [];
-        [...bs].sort((a, b) => a.cy - b.cy).forEach(b => {
-            const r = rows[rows.length - 1];
-            if (r && Math.abs(b.cy - r.y) < 0.032) {
-                r.it.push(b);
-                r.y = (r.y * (r.it.length - 1) + b.cy) / r.it.length;
-            } else {
-                rows.push({ y: b.cy, it: [b] });
-            }
-        });
-        return rows.flatMap(r => r.it.sort((a, b) => cfg.manga ? b.cx - a.cx : a.cx - b.cx));
-    }
-
-    function order(list, pg) {
-        if (!pg) return leaf(list);
-        const M = lineMask(pg, list);
-
-        const gaps = (bs, ax) => {
-            const k0 = ax === 'y' ? 'y0' : 'x0';
-            const k1 = ax === 'y' ? 'y1' : 'x1';
-            const s = [...bs].sort((a, b) => a[k0] - b[k0]);
-            let mx = s[0][k1];
-            const gs = [];
-            for (let i = 1; i < s.length; i++) {
-                if (s[i][k0] - mx > 0.002) gs.push({ i, a: mx, b: s[i][k0] });
-                mx = Math.max(mx, s[i][k1]);
-            }
-            return { s, gs };
-        };
-
-        const rec = bs => {
-            if (bs.length < 2) return bs;
-            for (const ax of ['y', 'x']) {
-                const { s, gs } = gaps(bs, ax);
-                if (!gs.length) continue;
-                const dimA = ax === 'y' ? pg.h : pg.w;
-                const dimB = ax === 'y' ? pg.w : pg.h;
-                const k0 = ax === 'y' ? 'x0' : 'y0';
-                const k1 = ax === 'y' ? 'x1' : 'y1';
-                const lo = Math.max(0, Math.floor(Math.min(...bs.map(b => b[k0])) * dimB));
-                const hi = Math.min(dimB, Math.ceil(Math.max(...bs.map(b => b[k1])) * dimB));
-                let best = null;
-                gs.forEach(g => {
-                    const sc = bestSup(pg, M, ax, g.a * dimA, g.b * dimA, lo, hi);
-                    if (sc >= 0.25 && (!best || sc > best.sc)) best = { sc, i: g.i };
-                });
-                if (best) {
-                    const parts = [rec(s.slice(0, best.i)), rec(s.slice(best.i))];
-                    if (ax === 'x' && cfg.manga) parts.reverse();
-                    return parts.flat();
-                }
-            }
-            return leaf(bs);
-        };
-        return rec(list);
-    }
-
-    function fire(el, type, x, y, pt = 'mouse') {
-        const up = type.endsWith('up') || type.endsWith('cancel');
-        const o = { bubbles: true, cancelable: true, composed: true, clientX: x, clientY: y, screenX: x, screenY: y, view: window, button: 0, buttons: up ? 0 : 1 };
-        const isT = pt === 'touch';
-        el.dispatchEvent(
-            type.startsWith('pointer')
-                ? new PointerEvent(type, { ...o, pointerId: isT ? 7 : 1, pointerType: pt, isPrimary: true, width: isT ? 24 : 1, height: isT ? 24 : 1, pressure: up ? 0 : 0.5 })
-                : new MouseEvent(type, o)
-        );
-    }
-
-    function touch(el, type, x, y) {
-        try {
-            const t = new Touch({ identifier: 7, target: el, clientX: x, clientY: y, screenX: x, screenY: y, pageX: x, pageY: y, radiusX: 12, radiusY: 12, force: 0.5 });
-            const end = type === 'touchend' || type === 'touchcancel';
-            el.dispatchEvent(new TouchEvent(type, { bubbles: true, cancelable: true, composed: true, touches: end ? [] : [t], targetTouches: end ? [] : [t], changedTouches: [t] }));
-        } catch (e) { }
-    }
-
-    function gesture(tg, phase, x, y) {
-        if (mode === 'mouse') {
-            fire(tg, 'pointer' + phase, x, y);
-            fire(tg, 'mouse' + phase, x, y);
-        } else if (mode === 'ptouch') {
-            fire(tg, 'pointer' + phase, x, y, 'touch');
-            touch(tg, 'touch' + (phase === 'down' ? 'start' : phase === 'move' ? 'move' : 'end'), x, y);
-        } else {
-            touch(tg, 'touch' + (phase === 'down' ? 'start' : phase === 'move' ? 'move' : 'end'), x, y);
-        }
-    }
-
-    async function drag(el, dx) {
-        el.scrollIntoView({ inline: 'center', block: 'nearest' });
-        await sleep(MOBILE ? 120 : 60);
-        const r = el.getBoundingClientRect();
-        const x0 = r.left + r.width / 2;
-        const y0 = r.top + r.height / 2;
-        dx = Math.max(6, Math.min(innerWidth - 6, x0 + dx)) - x0;
-        const tg = document.elementFromPoint(x0, y0) || el;
-
-        SYN = true;
-        try {
-            gesture(tg, 'down', x0, y0);
-            await sleep(HOLD);
-
-            const steps = MOBILE ? 14 : 18;
-            for (let k = 1; k <= steps; k++) {
-                gesture(tg, 'move', x0 + dx * k / steps, y0);
-                await sleep(MOBILE ? 16 : 13);
-            }
-            await sleep(MOBILE ? 120 : 80);
-            gesture(tg, 'up', x0 + dx, y0);
-
-        } finally {
-            SYN = false;
-        }
-        await sleep(MOBILE ? 280 : 200);
-    }
-
-    function say(t) {
-        const s = document.getElementById('ink-ord-st');
-        if (s && s.textContent !== t) s.textContent = t;
-    }
-
-    function paintMode() {
-        const w = document.getElementById('ink-ord-west'), m = document.getElementById('ink-ord-manga');
-        if (w) w.classList.toggle('on', !cfg.manga);
-        if (m) m.classList.toggle('on', !!cfg.manga);
-        refreshBtn();
-    }
-    function setManga(v) {
-        if (!!cfg.manga === v || busy) return;
-        cfg.manga = v; save(); paintMode();
-        lastSig = ''; run(false);
-    }
-
-    function ui(d) {
-        const p = d.querySelector('.bz-order__hint');
-        if (!p) return;
-        injectCSS();
-
-        let bar = document.getElementById('ink-ord-bar');
-        if (!bar) {
-            bar = document.createElement('div');
-            bar.id = 'ink-ord-bar';
-
-            const btn = (id, txt, title, fn) => {
-                const b = document.createElement('button');
-                b.id = id; b.type = 'button'; b.title = title; b.className = 'io-pill';
-                b.innerHTML = (ICO_O[id] || '') + '<span>' + txt + '</span>';
-                b.onclick = fn;
-                bar.appendChild(b);
-                return b;
-            };
-            btn('ink-ord-btn', 'Ordenar', 'Ordena as bolhas automaticamente', () => { lastSig = ''; run(false); });
-            btn('ink-ord-clean', 'Limpar', 'Remove itens que não parecem balões de fala', () => { lastSig = ''; run(true); });
-            btn('ink-ord-zero', 'Do zero', 'Reescaneia a página e ordena de novo', fromScratch);
-
-            const seg = document.createElement('div');
-            seg.className = 'io-seg';
-            const mk = (id, txt, title, v) => {
-                const b = document.createElement('button');
-                b.id = id; b.type = 'button'; b.textContent = txt; b.title = title;
-                b.onclick = () => setManga(v);
-                seg.appendChild(b);
-            };
-            mk('ink-ord-west', '→ Ocidental', 'Leitura da esquerda para a direita', false);
-            mk('ink-ord-manga', '← Mangá', 'Leitura da direita para a esquerda', true);
-            bar.appendChild(seg);
-
-            p.after(bar);
-            paintMode();
-        }
-
-        if (!document.getElementById('ink-ord-st')) {
-            const s = document.createElement('div');
-            s.id = 'ink-ord-st';
-            bar.after(s);
-        }
-    }
-
-    async function fromScratch() {
-        if (busy) return;
-        const rs = document.querySelector('.bz-order__rescan:not(#ink-ord-btn):not(#ink-ord-zero):not(#ink-ord-clean):not(#ink-ord-manga)');
-        if (!rs) { run(false); return; }
-        say('Reescaneando do zero…');
-        lastSig = 'x';
-        rs.click();
-        let last = '', same = 0;
-        for (let i = 0; i < 50 && same < 5; i++) {
-            await sleep(260);
-            const s = sig();
-            if (s && s === last) same++; else { same = 0; last = s; }
-        }
-        lastSig = '';
-        run(false);
-    }
-
-    function manualMoves(T, want) {
-        const cur = T.map(t => t.key);
-        const out = [];
-        for (let k = 0; k < want.length && out.length < 5; k++) {
-            const j = cur.indexOf(want[k].key);
-            if (j !== k) {
-                out.push(`#${T.find(t => t.key === want[k].key).n} → pos ${k + 1}`);
-                cur.splice(k, 0, cur.splice(j, 1)[0]);
-            }
-        }
-        return out.join(' · ');
-    }
-
-    async function run(doClean = false) {
-        if (busy) return;
-        busy = true;
-        let removed = [];
-        scoreCache.clear();
-
-        try {
-            let T = tiles();
-            if (T.length < 2) { say('Poucos itens encontrados'); return; }
-
-            const pg = await getPage();
-
-            if (doClean && pg) {
-                say('Analisando possíveis não-balões…');
-                const scored = T.map(t => ({ t, score: balloonScore(pg, t) }));
-                const bad = scored.filter(x => x.score < SCORE_THRESHOLD).sort((a, b) => a.score - b.score);
-                const maxRemove = Math.max(1, Math.floor(T.length * MAX_REMOVE_RATIO));
-                const toRemove = bad.slice(0, maxRemove);
-
-                if (toRemove.length === 0) {
-                    say('Nenhum item com score baixo');
-                } else {
-                    say(`Removendo ${toRemove.length} item(ns)…`);
-                    const keys = new Set(toRemove.map(x => x.t.key));
-                    for (let g = 0; g < 30; g++) {
-                        const t = tiles().find(x => keys.has(x.key));
-                        if (!t) break;
-                        const rb = t.el.querySelector('.bz-order__remove');
-                        if (!rb) break;
-                        removed.push(t.n);
-                        keys.delete(t.key);
-                        rb.click();
-                        await sleep(360);
-                    }
-                }
-            }
-
-            T = tiles();
-            if (T.length < 2) { say(removed.length ? `Pronto. Removidos: ${removed.join(', ')}` : 'Nada para ordenar'); return; }
-
-            say('Calculando ordem…');
-            let fails = 0;
-            const tag = removed.length ? ` · removidos: ${removed.join(', ')}` : '';
-
-            for (let g = 0; g < 900; g++) {
-                T = tiles().sort((a, b) => a.x - b.x);
-                const want = order(T, pg);
-
-                const i = T.findIndex((t, k) => t.key !== want[k].key);
-                if (i < 0) {
-                    say(`Ordem certa ✓ (${T.length} bolhas · ${cfg.manga ? 'mangá ←' : 'ocidental →'})${tag} — toque em Salvar`);
-                    return;
-                }
-
-                const tg = want[i];
-                const j = T.findIndex(t => t.key === tg.key);
-                const xs = T.map(t => t.x);
-                const ds = xs.slice(1).map((x, k) => x - xs[k]).filter(d => d > 6);
-                const W = ds.length ? Math.min(...ds) : 100;
-                const steps = Math.min(j - i, 7);
-
-                say(`Ordenando ${i + 1}/${T.length}  [${mode}]`);
-                const beforeX = tg.el.getBoundingClientRect().left;
-                await drag(tg.el, -(steps * W) - 4);
-
-                const after = tiles().find(t => t.key === tg.key);
-                const afterX = after ? after.el.getBoundingClientRect().left : beforeX;
-                const moved = Math.abs(afterX - beforeX) > 10;
-
-                if (!moved) {
-                    fails++;
-                    if (fails >= 2) {
-                        const ci = MODES.indexOf(mode);
-                        if (ci < MODES.length - 1) {
-                            mode = MODES[ci + 1];
-                            fails = 0;
-                            say('Trocando para modo ' + mode + '…');
-                        } else {
-                            mode = MODES[0];
-                            say('Não consegui arrastar. Faça à mão: ' + manualMoves(T, want));
-                            return;
-                        }
-                    }
-                } else {
-                    fails = 0;
-                    if (cfg.dmode !== mode) { cfg.dmode = mode; save(); }
-                }
-            }
-
-        } catch (err) {
-            say('Erro: ' + (err.message || err));
-        } finally {
-            busy = false;
-            lastSig = sig();
-        }
-    }
-
-    const MINE_SEL = '#ink-auto-ui, #ink-eye, #ink-ord-bar, #ink-ord-st';
-    const fromOurUI = muts => muts.every(m => {
-        const n = m.target && m.target.nodeType === 1 ? m.target : (m.target && m.target.parentElement);
-        return n && n.closest && n.closest(MINE_SEL);
-    });
-
-    let obsQueued = false;
-    function onDomChange() {
-        obsQueued = false;
-        const d = document.querySelector('.bz-order');
-        const ap = document.getElementById('ink-auto-ui');
-        if (ap && MOBILE) ap.style.display = d ? 'none' : '';
-        if (!d) { lastSig = ''; return; }
-        ui(d);
-        if (!AUTO || busy) return;
-        clearTimeout(tmr);
-        tmr = setTimeout(() => {
-            const s = sig();
-            if (!busy && s && s !== lastSig) run(false);
-        }, isPerf() ? 900 : 600);
-    }
-    const startMainObserver = () => new MutationObserver(muts => {
-        if (obsQueued || fromOurUI(muts)) return;
-        obsQueued = true;
-        requestAnimationFrame(onDomChange);
-    }).observe(document.body, { childList: true, subtree: true });
-    if (document.body) startMainObserver();
-    else document.addEventListener('DOMContentLoaded', startMainObserver);
-
-    setTimeout(() => {
-        const d = document.querySelector('.bz-order');
-        if (d) ui(d);
-    }, 800);
 })();
