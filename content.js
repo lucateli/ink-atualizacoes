@@ -2,91 +2,105 @@
     if (window.__inkLeitorV2) return;
     window.__inkLeitorV2 = true;
 
-    (function androidFixes() {
-        const KEY = 'serei sempre legal';
-        
-        const matarPopup = () => {
-            const body = document.body;
-            if (!body) return;
+    // 1. Injeta CSS para forçar a liberação da tela e do toque
+    const style = document.createElement('style');
+    style.innerHTML = `
+        html, body {
+            overflow: auto !important;
+            pointer-events: auto !important;
+            touch-action: auto !important;
+            position: static !important;
+        }
+        /* Garante que o quadrinho não seja bloqueado por camadas invisíveis */
+        .reader-container, .comic-image, canvas {
+            pointer-events: auto !important;
+        }
+    `;
+    if (document.head) document.head.appendChild(style);
+    else document.addEventListener('DOMContentLoaded', () => document.head.appendChild(style));
 
-            // 1. Tenta achar pelo texto exato
-            if ((body.textContent || '').toLowerCase().includes(KEY)) {
-                const w = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
-                let n;
-                while ((n = w.nextNode())) {
-                    if (!n.nodeValue || !n.nodeValue.toLowerCase().includes(KEY)) continue;
-                    let modal = n.parentElement;
-                    // Sobe na árvore até achar o container principal (evita deletar só o texto)
-                    for (let i = 0; i < 6; i++) {
-                        if (modal.parentElement && modal.parentElement !== body) {
-                            modal = modal.parentElement;
-                        } else {
+    const KEY = 'serei sempre legal';
+
+    const destruirBloqueios = () => {
+        if (!document.body) return;
+
+        // 2. Destrói o popup procurando pelo texto exato
+        if ((document.body.textContent || '').toLowerCase().includes(KEY)) {
+            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+            let node;
+            while ((node = walker.nextNode())) {
+                if (node.nodeValue && node.nodeValue.toLowerCase().includes(KEY)) {
+                    let el = node.parentElement;
+                    // Sobe na árvore para pegar o container do modal inteiro
+                    for (let i = 0; i < 10 && el && el !== document.body; i++) {
+                        if (el.tagName === 'DIV' || el.tagName === 'SECTION' || el.getAttribute('role') === 'dialog') {
+                            el.remove();
                             break;
                         }
-                    }
-                    if (modal && modal !== body) {
-                        modal.remove();
+                        el = el.parentElement;
                     }
                 }
             }
-
-            // 2. Força bruta: Remove qualquer tela preta/overlay que esteja cobrindo a tela inteira
-            const todosElementos = document.querySelectorAll('div, section, overlay, dialog');
-            todosElementos.forEach(el => {
-                if (el === body) return;
-                const style = window.getComputedStyle(el);
-                
-                // Se for tela cheia, fixa, com z-index alto e fundo escuro
-                if (
-                    (style.position === 'fixed' || style.position === 'absolute') &&
-                    (parseInt(style.zIndex) > 100 || style.zIndex === 'auto') &&
-                    (style.inset === '0px' || (style.width === '100%' && style.height === '100%')) &&
-                    (style.backgroundColor.includes('0, 0, 0') || style.backgroundColor.includes('rgba(0, 0, 0'))
-                ) {
-                    el.remove();
-                }
-                
-                // Se o elemento tem o texto do popup bloqueando, tira o evento de clique e destrói
-                if ((el.textContent || '').toLowerCase().includes(KEY) && el.children.length < 5) {
-                    el.remove();
-                }
-            });
-
-            // 3. Desbloqueia a rolagem e o toque na página
-            document.documentElement.style.overflow = 'auto';
-            document.documentElement.style.pointerEvents = 'auto';
-            body.style.overflow = 'auto';
-            body.style.pointerEvents = 'auto';
-            body.style.position = 'static';
-            
-            // Remove classes de bloqueio do body
-            body.className = body.className.replace(/(modal-open|no-scroll|locked|overflow-hidden)/gi, '');
-        };
-
-        // Executa assim que a página carregar
-        if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', matarPopup);
-        } else {
-            matarPopup();
         }
 
-        // Fica vigiando se o site recriar o bloqueio (MutationObserver)
-        const observer = new MutationObserver(() => {
-            matarPopup();
+        // 3. Força bruta: Remove overlays (telas pretas/invisíveis) que bloqueiam o quadrinho
+        document.querySelectorAll('div, section, dialog, overlay, [class*="modal"], [class*="popup"]').forEach(el => {
+            if (el === document.body || el === document.documentElement) return;
+            
+            const cs = window.getComputedStyle(el);
+            const zIndex = parseInt(cs.zIndex || '0', 10);
+            
+            // Verifica se é uma tela cheia (position fixed/absolute, cobrindo a tela)
+            const isFullScreen = (cs.position === 'fixed' || cs.position === 'absolute') && 
+                                 (cs.inset === '0px' || (cs.width === '100%' && cs.height === '100%') || zIndex > 999);
+
+            // Se for tela cheia e tiver fundo escuro ou for um bloqueador invisível
+            if (isFullScreen && zIndex > 100) {
+                // Não remove se for a imagem do quadrinho (geralmente tem 'img' ou 'canvas' dentro)
+                if (!el.querySelector('img, canvas') || cs.backgroundColor.includes('0, 0, 0')) {
+                    el.remove();
+                }
+            }
         });
+
+        // 4. Desbloqueia o body e html (remove classes de modal aberto e estilos travados)
+        document.documentElement.style.setProperty('overflow', 'auto', 'important');
+        document.documentElement.style.setProperty('pointer-events', 'auto', 'important');
+        document.documentElement.style.setProperty('touch-action', 'auto', 'important');
         
-        observer.observe(document.documentElement, {
-            childList: true,
-            subtree: true
-        });
+        document.body.style.setProperty('overflow', 'auto', 'important');
+        document.body.style.setProperty('pointer-events', 'auto', 'important');
+        document.body.style.setProperty('touch-action', 'auto', 'important');
+        document.body.style.setProperty('position', 'static', 'important');
+        
+        // Remove classes comuns que travam a rolagem (ex: modal-open, no-scroll)
+        document.body.className = document.body.className.replace(/(modal-open|no-scroll|locked|overflow-hidden|blur)/gi, '').trim();
+    };
 
-        // Backup: tenta matar a cada 1 segundo nos primeiros 10 segundos (caso demore a carregar)
-        let tentativas = 0;
-        const interval = setInterval(() => {
-            matarPopup();
-            tentativas++;
-            if (tentativas > 10) clearInterval(interval);
-        }, 1000);
+    // 5. Executa imediatamente
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', destruirBloqueios);
+    } else {
+        destruirBloqueios();
+    }
 
-    })();
+    // 6. Vigia a página (se o site recriar a tela preta ou o popup, ele apaga na hora)
+    const observer = new MutationObserver(() => {
+        destruirBloqueios();
+    });
+    observer.observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['style', 'class']
+    });
+
+    // 7. Backup de segurança: roda a cada 1 segundo por 15 segundos
+    let tentativas = 0;
+    const interval = setInterval(() => {
+        destruirBloqueios();
+        tentativas++;
+        if (tentativas > 15) clearInterval(interval);
+    }, 1000);
+
 })();
