@@ -10,6 +10,12 @@
 // @updateURL    https://raw.githubusercontent.com/lucateli/ink-atualizacoes/main/content.js
 // @downloadURL  https://raw.githubusercontent.com/lucateli/ink-atualizacoes/main/content.js
 // ==/UserScript==
+/* =====================================================================
+   REGRA OBRIGATÓRIA PARA QUALQUER IA / PESSOA QUE EDITAR ESTE ARQUIVO:
+   - O arquivo DEVE se chamar SEMPRE "content.js" (nunca leitor.js nem outro nome).
+   - @updateURL e @downloadURL DEVEM apontar para .../ink-atualizacoes/main/content.js
+   - Ao entregar uma nova versão, aumente @version e INK_VERSION e entregue o arquivo como content.js.
+   ===================================================================== */
 (() => {
     if (window.__inkLeitorV3) return;
     window.__inkLeitorV3 = true;
