@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ink Leitor
 // @namespace    ink-leitor
-// @version      4.2.0
+// @version      4.3.0
 // @description  Leitor automático, OCR, TTS, música (YouTube + Drive), ordenador de capítulos e auto-arrumar bolhas mangá/HQ
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
@@ -15,7 +15,7 @@
     if (window.__ink) return;
     window.__ink = true;
 
-    const VERSION = '4.2.0';
+    const VERSION = '4.3.0';
     const IS_MOBILE = (() => {
         try { return matchMedia('(pointer:coarse)').matches || innerWidth < 700; }
         catch (e) { return innerWidth < 700; }
@@ -43,7 +43,7 @@
         perf: null, anx: 0, metaGoal: 10,
         pos: null, min: false, tab: 'read',
         musicUrl: '', musicKey: '', musicVol: 0.6,
-        ytUrl: '', ytShow: true, duck: true,
+        ytUrl: '', ytShow: true, duck: true, updSkip: '',
     };
     const cfg = { ...DEFAULTS };
     try { Object.assign(cfg, JSON.parse(localStorage.getItem(CFG_KEY) || '{}')); } catch (e) { }
@@ -1462,6 +1462,56 @@
     }
 
     /* ================================================================== *
+     * 12b. AVISO DE NOVA VERSÃO (compara com o content.js do GitHub)
+     *  Extensão do Chrome não se atualiza sozinha: o aviso oferece baixar
+     *  o arquivo novo; você troca na pasta da extensão e recarrega.
+     * ================================================================== */
+    const UPD_URL = 'https://raw.githubusercontent.com/lucateli/ink-atualizacoes/main/content.js';
+    const UPD = { text: '', ver: '' };
+    const vnum = v => String(v).split('.').map(n => parseInt(n, 10) || 0);
+    const vGt = (a, b) => {
+        const x = vnum(a), y = vnum(b);
+        for (let i = 0; i < Math.max(x.length, y.length); i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return d > 0; }
+        return false;
+    };
+    const hideUpd = () => { const b = $('ink-upd'); if (b) b.hidden = true; };
+    function showUpd() {
+        const b = $('ink-upd'); if (!b) return;
+        b.textContent = '';
+        const s = document.createElement('span'); s.textContent = `⬆ Nova versão ${UPD.ver}`;
+        const dl = document.createElement('button'); dl.className = 'ia-upd-b'; dl.textContent = 'Baixar';
+        dl.onclick = () => {
+            const url = URL.createObjectURL(new Blob([UPD.text], { type: 'text/javascript' }));
+            const a = document.createElement('a'); a.href = url; a.download = 'content.js';
+            document.body.appendChild(a); a.click(); a.remove();
+            setTimeout(() => URL.revokeObjectURL(url), 5000);
+            setStatus('Baixado. Troque o content.js da extensão e recarregue em chrome://extensions.');
+        };
+        const x = document.createElement('button'); x.className = 'ia-upd-b'; x.textContent = '✕'; x.title = 'Ignorar esta versão';
+        x.onclick = () => { cfg.updSkip = UPD.ver; saveCfg(); hideUpd(); };
+        b.append(s, dl, x);
+        b.hidden = false;
+    }
+    async function checkUpdate(manual) {
+        try {
+            if (manual) setStatus('🔄 Verificando atualização…');
+            const r = await fetch(UPD_URL + '?t=' + Date.now(), { cache: 'no-store' });
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            const t = await r.text();
+            const m = /const VERSION = '([\d.]+)'/.exec(t);
+            if (!m) throw new Error('versão não encontrada no arquivo');
+            UPD.text = t; UPD.ver = m[1];
+            if (vGt(m[1], VERSION)) {
+                if (manual || cfg.updSkip !== m[1]) showUpd();
+                if (manual) setStatus(`⬆ Nova versão ${m[1]} disponível`);
+            } else {
+                hideUpd();
+                if (manual) setStatus(`✓ Já está na versão mais recente (${VERSION})`);
+            }
+        } catch (e) { if (manual) setStatus('⚠ Não consegui verificar: ' + (e.message || e)); }
+    }
+
+    /* ================================================================== *
      * 13. ÍCONES + CSS
      * ================================================================== */
     const svg = (p, fill) => `<svg viewBox="0 0 24 24" width="16" height="16" ${fill ? 'fill="currentColor"' : 'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"'} aria-hidden="true">${p}</svg>`;
@@ -1517,7 +1567,11 @@ box-shadow:0 8px 24px rgba(255,105,180,.28),inset 0 1px 0 rgba(255,255,255,.5);-
 #ink-panel .ia-skin{flex:1;min-height:30px;border-radius:10px;background:var(--ib-card);border:1px solid var(--ib-line);color:var(--ib-txt);font-size:11.5px;font-weight:600}
 #ink-panel .ia-skin.on{background:var(--ib-ac);color:#fff;border-color:var(--ib-ac)}
 #ink-panel.min{width:auto;padding:6px;border-radius:14px;overflow:visible}
-#ink-panel.min .ia-title{display:none}
+#ink-panel.min .ia-title,#ink-panel.min #ink-upd-chk{display:none}
+#ink-panel #ink-upd{display:flex;align-items:center;gap:6px;margin-bottom:6px;padding:5px 8px;border-radius:10px;background:var(--ib-ac);color:#fff;font-size:11.5px;font-weight:700}
+#ink-panel #ink-upd[hidden]{display:none}
+#ink-panel #ink-upd span{flex:1}
+#ink-panel .ia-upd-b{padding:3px 8px;border-radius:7px;background:rgba(255,255,255,.28);color:#fff;font-size:11px;font-weight:700}
 #ink-panel.min #ink-body{position:absolute;left:-9999px;top:0;width:232px}
 #ink-panel #ink-mini-go{display:none;width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,var(--ib-ac),#ffb6c1);color:#fff}
 #ink-panel.min #ink-mini-go{display:inline-flex}
@@ -1567,10 +1621,12 @@ box-shadow:0 8px 24px rgba(255,105,180,.28),inset 0 1px 0 rgba(255,255,255,.5);-
         u.innerHTML = `
 <div class="ia-head" id="ink-head">
   <div class="ia-title" id="ink-title">Ink ${VERSION}</div>
+  <button class="ia-ib" id="ink-upd-chk" title="Verificar atualização">🔄</button>
   <button class="ia-ib" id="ink-mini-go" title="Ler">${ICO.play}</button>
   <button class="ia-ib" id="ink-min" title="minimizar">${ICO.min}</button>
 </div>
 <div id="ink-body">
+  <div id="ink-upd" hidden></div>
   <div class="ia-tabs">
     <button class="ia-tab" data-tab="read">📖 Leitor</button>
     <button class="ia-tab" data-tab="music">🎵 Música</button>
@@ -1659,6 +1715,7 @@ box-shadow:0 8px 24px rgba(255,105,180,.28),inset 0 1px 0 rgba(255,255,255,.5);-
         // ---- Handlers ----
         $('ink-go').onclick = () => { if (running) stop('Parado.'); else mainLoop(); };
         $('ink-mini-go').onclick = $('ink-go').onclick;
+        $('ink-upd-chk').onclick = () => checkUpdate(true);
         $('ink-min').onclick = () => { cfg.min = !cfg.min; saveCfg(); applyMin(); };
         $$('[data-tab]', u).forEach(b => b.onclick = () => { cfg.tab = b.dataset.tab; saveCfg(); applyTab(); });
         $('ink-spd-').onclick = () => setSpeed(-1);
@@ -1854,6 +1911,8 @@ box-shadow:0 8px 24px rgba(255,105,180,.28),inset 0 1px 0 rgba(255,255,255,.5);-
         applyPos();
         BubbleSorter.start();
         OrderBar.build();
+        setTimeout(() => checkUpdate(false), 4000);
+        setInterval(() => checkUpdate(false), 6 * 3600 * 1000);
         // o site é SPA: reavalia a barra de capítulos e o filtro de olho ao navegar
         setInterval(() => { try { OrderBar.build(); applyEye(); } catch (e) { } }, 1500);
     }
