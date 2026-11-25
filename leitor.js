@@ -1,19 +1,19 @@
 // ==UserScript==
 // @name         Ink Leitor (leitura automática)
 // @namespace    ink-leitor
-// @version      3.1
+// @version      3.2
 // @description  Leitura automática, ordem das bolhas e modo menina (skins Gatinha/Lobo) para ink.app.br
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
 // @run-at       document-idle
 // @grant        none
-// @updateURL    https://github.com/lucateli/ink-atualizacoes/blob/main/leitor.js
-// @downloadURL  https://github.com/lucateli/ink-atualizacoes/blob/main/leitor.js
+// @updateURL    https://raw.githubusercontent.com/lucateli/ink-atualizacoes/main/leitor.js
+// @downloadURL  https://raw.githubusercontent.com/lucateli/ink-atualizacoes/main/leitor.js
 // ==/UserScript==
 (() => {
     if (window.__inkLeitorV3) return;
     window.__inkLeitorV3 = true;
-    const INK_VERSION = 'v3.1';
+    const INK_VERSION = 'v3.2';
     try { console.info('[Ink] leitor ' + INK_VERSION + ' carregado'); } catch (e) { }
 
     /* =====================================================================
