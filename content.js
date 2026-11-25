@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ink Leitor
 // @namespace    ink-leitor
-// @version      4.3.0
+// @version      4.4.0
 // @description  Leitor automático, OCR, TTS, música (YouTube + Drive), ordenador de capítulos e auto-arrumar bolhas mangá/HQ
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
@@ -15,7 +15,7 @@
     if (window.__ink) return;
     window.__ink = true;
 
-    const VERSION = '4.3.0';
+    const VERSION = '4.4.0';
     const IS_MOBILE = (() => {
         try { return matchMedia('(pointer:coarse)').matches || innerWidth < 700; }
         catch (e) { return innerWidth < 700; }
@@ -1141,114 +1141,6 @@
         return t.replace(/\.{3,}/g, '…').replace(/([!?])[!?]+/g, '$1');
     }
 
-    /* ---- balão AMPLIADO do Ink: achar a caixa clara grande ANTES de ler a tela inteira ----
-       O OCR da tela toda só lê lixo da arte; o recorte do balão lê bem. O balão ampliado é uma caixa clara
-       (quase sem cor), retangular/oval e bem maior que os balões da página. Se não achar, o fluxo normal segue. */
-    function detectZoomBox(d, gw, gh) {
-        const N = gw * gh, m = new Uint8Array(N);
-        for (let i = 0, j = 0; i < N; i++, j += 4) {
-            const r = d[j], g = d[j + 1], b = d[j + 2], mx = Math.max(r, g, b), mn = Math.min(r, g, b);
-            m[i] = (r * 0.299 + g * 0.587 + b * 0.114 >= 200 && mx - mn <= 55) ? 1 : 0;   // claro e pouco colorido
-        }
-        const seen = new Uint8Array(N), stack = new Int32Array(N), cands = [];
-        for (let s0 = 0; s0 < N; s0++) {
-            if (!m[s0] || seen[s0]) continue;
-            let sp = 0, area = 0, x0 = gw, y0 = gh, x1 = 0, y1 = 0;
-            stack[sp++] = s0; seen[s0] = 1;
-            while (sp) {
-                const p = stack[--sp], x = p % gw, y = (p / gw) | 0;
-                area++; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
-                if (x > 0 && m[p - 1] && !seen[p - 1]) { seen[p - 1] = 1; stack[sp++] = p - 1; }
-                if (x < gw - 1 && m[p + 1] && !seen[p + 1]) { seen[p + 1] = 1; stack[sp++] = p + 1; }
-                if (y > 0 && m[p - gw] && !seen[p - gw]) { seen[p - gw] = 1; stack[sp++] = p - gw; }
-                if (y < gh - 1 && m[p + gw] && !seen[p + gw]) { seen[p + gw] = 1; stack[sp++] = p + gw; }
-            }
-            const bw = x1 - x0 + 1, bh = y1 - y0 + 1, fill = area / (bw * bh);
-            // caixa de verdade: bem preenchida (a letra vira "buraco": ~0.5–0.8), nem minúscula nem faixa de UI
-            if (fill < 0.5 || bw < gw * 0.07 || bh < gh * 0.035 || bw > gw * 0.6 || bh > gh * 0.5) continue;
-            if (bw / bh > 8 || bw / bh < 0.15) continue;
-            cands.push({ x0, y0, x1: x1 + 1, y1: y1 + 1, a: bw * bh });
-        }
-        if (!cands.length) return null;
-        cands.sort((a, b) => b.a - a.a);
-        if (cands.length > 1 && cands[0].a < cands[1].a * 2) return null;     // nenhum balão claramente maior que os outros
-        const c = cands[0];
-        return { x0: c.x0 / gw, y0: c.y0 / gh, x1: c.x1 / gw, y1: c.y1 / gh };  // frações da foto
-    }
-    function findZoomBox(img) {
-        try {
-            const nw = img.naturalWidth, nh = img.naturalHeight;
-            const gw = Math.min(480, nw), gh = Math.max(1, Math.round(nh * gw / nw));
-            const c = document.createElement('canvas'); c.width = gw; c.height = gh;
-            const cg = c.getContext('2d', { willReadFrequently: true });
-            cg.imageSmoothingQuality = 'high';
-            cg.drawImage(img, 0, 0, gw, gh);
-            const b = detectZoomBox(cg.getImageData(0, 0, gw, gh).data, gw, gh);
-            return b ? { x0: b.x0 * nw, y0: b.y0 * nh, x1: b.x1 * nw, y1: b.y1 * nh } : null;   // px da foto
-        } catch (e) { return null; }
-    }
-    const linesOf = d => {
-        if (!d) return [];
-        if (d.lines && d.lines.length) return d.lines;
-        const L = [];
-        (d.blocks || []).forEach(b => (b.paragraphs || []).forEach(p => (p.lines || []).forEach(l => L.push(l))));
-        return L;
-    };
-    // recorta [bx0..bx1]x[by0..by1] (px da foto) na escala f, põe em cinza + contraste (inverte se fundo escuro) e lê com PSM 6
-    async function ocrCrop(w, img, bx0, by0, bx1, by1, f) {
-        const pad = 20, c2 = document.createElement('canvas');
-        c2.width = Math.round((bx1 - bx0) * f) + pad * 2; c2.height = Math.round((by1 - by0) * f) + pad * 2;
-        const g2 = c2.getContext('2d', { willReadFrequently: true });
-        g2.fillStyle = '#fff'; g2.fillRect(0, 0, c2.width, c2.height);
-        g2.imageSmoothingQuality = 'high';
-        g2.drawImage(img, bx0, by0, bx1 - bx0, by1 - by0, pad, pad, (bx1 - bx0) * f, (by1 - by0) * f);
-        try {
-            const id = g2.getImageData(pad, pad, c2.width - pad * 2, c2.height - pad * 2), d = id.data;
-            let sum = 0, n = 0;
-            for (let i = 0; i < d.length; i += 16) { sum += d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114; n++; }
-            const dark = n && (sum / n) < 120;
-            for (let i = 0; i < d.length; i += 4) {
-                let L = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
-                L = Math.max(0, Math.min(255, (L - 128) * 1.55 + 128));
-                if (dark) L = 255 - L;
-                d[i] = d[i + 1] = d[i + 2] = L;
-            }
-            g2.putImageData(id, pad, pad);
-        } catch (e) { }
-        await w.setParameters({ tessedit_pageseg_mode: '6' });
-        let r;
-        try { r = await w.recognize(c2, {}, { blocks: true, text: true }); }
-        finally { await w.setParameters({ tessedit_pageseg_mode: '11' }); }
-        return { pad, raw: linesOf(r.data) };
-    }
-    // lê o balão ampliado já localizado (zb em px da foto); '' se não achar texto
-    async function readZoomBox(w, img, zb) {
-        const nw = img.naturalWidth, nh = img.naturalHeight;
-        const m = Math.max(10, Math.min(zb.x1 - zb.x0, zb.y1 - zb.y0) * 0.08);
-        const bx0 = Math.max(0, zb.x0 - m), by0 = Math.max(0, zb.y0 - m), bx1 = Math.min(nw, zb.x1 + m), by1 = Math.min(nh, zb.y1 + m);
-        const letters = ls => ls.reduce((n, l) => n + (l.text.match(/\p{L}/gu) || []).length, 0);
-        const run = async f => {
-            const { pad, raw } = await ocrCrop(w, img, bx0, by0, bx1, by1, f);
-            // só linhas cujo centro está DENTRO da caixa clara (a margem pega um pouco de arte em volta)
-            const lines = raw.map(l => cleanLine(l, true)).filter(Boolean).filter(l => {
-                const cx = bx0 + ((l.bbox.x0 + l.bbox.x1) / 2 - pad) / f, cy = by0 + ((l.bbox.y0 + l.bbox.y1) / 2 - pad) / f;
-                return cx >= zb.x0 && cx <= zb.x1 && cy >= zb.y0 && cy <= zb.y1;
-            });
-            const hs = lines.map(l => l.bbox.y1 - l.bbox.y0).sort((a, b) => a - b);
-            return { lines, lh: hs[hs.length >> 1] || 0, f };
-        };
-        let best = await run(2);
-        if (best.lh) {                                                      // letra alvo ~52 px de altura de linha: refaz uma vez se estiver longe disso
-            const f2 = Math.min(5, Math.max(1, best.f * 52 / best.lh));
-            if (Math.abs(f2 - best.f) / best.f > 0.25) {
-                const r2 = await run(f2);
-                if (letters(r2.lines) >= letters(best.lines)) best = r2;
-            }
-        }
-        if (letters(best.lines) < 3) return '';
-        return toSpeech(joinLines(best.lines));
-    }
-
     async function ocrView() {
         for (let i = 0; i < 3; i++) {
             const t = await ocrOnce();
@@ -1283,17 +1175,6 @@
         }
         const img = new Image(); img.src = shot; await img.decode();
         const kx = img.naturalWidth / innerWidth, ky = img.naturalHeight / innerHeight;
-        // balão ampliado do Ink: se há uma caixa clara grande, lê só ela (bem mais confiável que a tela inteira)
-        const zb = findZoomBox(img);
-        if (zb) {
-            try {
-                const zt = await readZoomBox(w, img, zb);
-                if (zt) return zt;
-            } catch (e) {
-                console.warn('[Ink-OCR] balão ampliado falhou, usando leitura da tela inteira', e);
-                try { await w.setParameters({ tessedit_pageseg_mode: '11' }); } catch (_) { }
-            }
-        }
         let x0 = 0, y0 = 0, x1 = innerWidth, y1 = innerHeight;
         if (pe) {
             const r = pe.getBoundingClientRect();
@@ -1581,9 +1462,10 @@
     }
 
     /* ================================================================== *
-     * 12b. AVISO DE NOVA VERSÃO (compara com o content.js do GitHub)
-     *  Extensão do Chrome não se atualiza sozinha: o aviso oferece baixar
-     *  o arquivo novo; você troca na pasta da extensão e recarrega.
+     * 12b. ATUALIZAÇÃO (compara com o content.js do GitHub)
+     *  Na extensão: o botão "Atualizar" pede ao bg.js para baixar o arquivo
+     *  novo; depois é só apertar F5. Sem extensão (Tampermonkey): baixa o
+     *  arquivo como fallback.
      * ================================================================== */
     const UPD_URL = 'https://raw.githubusercontent.com/lucateli/ink-atualizacoes/main/content.js';
     const UPD = { text: '', ver: '' };
@@ -1593,19 +1475,48 @@
         for (let i = 0; i < Math.max(x.length, y.length); i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return d > 0; }
         return false;
     };
+
+    let updSeq = 0;
+    const updWait = new Map();
+    window.addEventListener('message', e => {
+        const d = e.data;
+        if (e.source !== window || !d || !d.inkUpdRes) return;
+        const f = updWait.get(d.inkUpdRes);
+        if (f) { updWait.delete(d.inkUpdRes); f(d); }
+    });
+    function extSync() {   // pede ao bg.js (via base.js) para baixar e registrar o script novo
+        return new Promise((res, rej) => {
+            const id = ++updSeq;
+            const t = setTimeout(() => { updWait.delete(id); rej(new Error('sem extensão')); }, 12000);
+            updWait.set(id, d => { clearTimeout(t); d.err ? rej(new Error(d.err)) : res(d.data); });
+            window.postMessage({ inkUpd: id }, '*');
+        });
+    }
+    function downloadNew() {
+        const url = URL.createObjectURL(new Blob([UPD.text], { type: 'text/javascript' }));
+        const a = document.createElement('a'); a.href = url; a.download = 'content.js';
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
+        setStatus('Baixado como content.js. Troque o arquivo e recarregue.');
+    }
+    async function applyUpdate() {
+        setStatus('⏳ Atualizando…');
+        try {
+            const r = await extSync();
+            if (r && r.ok) setStatus(`✓ Atualizado (${r.src}). Aperte F5 para aplicar.`);
+            else setStatus('⚠ Ative "Permitir scripts de usuário" nos Detalhes da extensão e tente de novo.');
+        } catch (e) {
+            if (UPD.text) downloadNew(); else setStatus('⚠ ' + (e.message || e));
+        }
+    }
+
     const hideUpd = () => { const b = $('ink-upd'); if (b) b.hidden = true; };
     function showUpd() {
         const b = $('ink-upd'); if (!b) return;
         b.textContent = '';
         const s = document.createElement('span'); s.textContent = `⬆ Nova versão ${UPD.ver}`;
-        const dl = document.createElement('button'); dl.className = 'ia-upd-b'; dl.textContent = 'Baixar';
-        dl.onclick = () => {
-            const url = URL.createObjectURL(new Blob([UPD.text], { type: 'text/javascript' }));
-            const a = document.createElement('a'); a.href = url; a.download = 'content.js';
-            document.body.appendChild(a); a.click(); a.remove();
-            setTimeout(() => URL.revokeObjectURL(url), 5000);
-            setStatus('Baixado. Troque o content.js da extensão e recarregue em chrome://extensions.');
-        };
+        const dl = document.createElement('button'); dl.className = 'ia-upd-b'; dl.textContent = 'Atualizar';
+        dl.onclick = applyUpdate;
         const x = document.createElement('button'); x.className = 'ia-upd-b'; x.textContent = '✕'; x.title = 'Ignorar esta versão';
         x.onclick = () => { cfg.updSkip = UPD.ver; saveCfg(); hideUpd(); };
         b.append(s, dl, x);
@@ -1648,7 +1559,7 @@
 
     const CSS = `
 #ink-panel{position:fixed;bottom:12px;right:12px;z-index:2147483000;width:min(248px,calc(100vw - 16px));font:12.5px/1.3 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
-box-sizing:border-box;padding:8px;border:2px solid var(--ib-line);border-radius:20px;background:var(--ib-bg);color:var(--ib-txt);max-height:calc(100vh - 24px);overflow-y:auto;overflow-x:hidden;
+box-sizing:border-box;padding:8px;border:2px solid var(--ib-line);border-radius:20px;background:var(--ib-bg);color:var(--ib-txt);max-height:calc(100dvh - 24px);overflow-y:auto;overflow-x:hidden;
 --ib-bg:rgba(255,240,245,.96);--ib-card:rgba(255,182,193,.42);--ib-card2:rgba(255,105,180,.55);--ib-line:rgba(255,192,203,.85);--ib-txt:#5c4a4a;--ib-dim:#a88b8b;--ib-ac:#ff69b4;
 box-shadow:0 8px 24px rgba(255,105,180,.28),inset 0 1px 0 rgba(255,255,255,.5);-webkit-backdrop-filter:blur(14px) saturate(1.3);backdrop-filter:blur(14px) saturate(1.3);}
 #ink-panel.mob{background:rgba(255,240,245,.99)}
@@ -1669,7 +1580,7 @@ box-shadow:0 8px 24px rgba(255,105,180,.28),inset 0 1px 0 rgba(255,255,255,.5);-
 #ink-panel.mob .ia-go{height:46px}
 #ink-panel.run .ia-go{background:var(--ib-card2);box-shadow:none;color:var(--ib-txt)}
 #ink-panel .ia-row{display:flex;gap:4px;margin-top:6px;align-items:stretch}
-#ink-panel .ia-row>.ia-chip{flex:1;min-height:34px;flex-direction:row;font-size:12px}
+#ink-panel .ia-row>.ia-chip{flex:1;min-height:34px;flex-direction:row;font-size:12px;white-space:nowrap}
 #ink-panel.mob .ia-row>.ia-chip{min-height:42px}
 #ink-panel .ia-val{min-width:38px;flex:none;text-align:center;font-weight:600;font-size:12px;align-self:center;color:var(--ib-txt)}
 #ink-panel .ia-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;margin-top:6px}
@@ -1786,7 +1697,7 @@ box-shadow:0 8px 24px rgba(255,105,180,.28),inset 0 1px 0 rgba(255,255,255,.5);-
     </div>
     <div class="ia-sec">Missão</div>
     <div class="ia-row">
-      <button class="ia-chip" id="ink-meta-btn" style="flex:2">🎯 <span id="ink-meta-lbl">Ligar meta</span></button>
+      <button class="ia-chip" id="ink-meta-btn" style="flex:3">🎯 <span id="ink-meta-lbl">Ligar meta</span></button>
       <button class="ia-chip" id="ink-meta-">−</button>
       <span class="ia-val" id="ink-meta-val">10</span>
       <button class="ia-chip" id="ink-meta+">+</button>
@@ -1899,4 +1810,145 @@ box-shadow:0 8px 24px rgba(255,105,180,.28),inset 0 1px 0 rgba(255,255,255,.5);-
             const p = e.touches ? e.touches[0] : e;
             const r = u.getBoundingClientRect();
             drag = { ox: p.clientX - r.left, oy: p.clientY - r.top };
-      
+            e.preventDefault();
+        };
+        const onMove = e => {
+            if (!drag) return;
+            const p = e.touches ? e.touches[0] : e;
+            const x = Math.max(0, Math.min(innerWidth - u.offsetWidth, p.clientX - drag.ox));
+            const y = Math.max(0, Math.min(innerHeight - u.offsetHeight, p.clientY - drag.oy));
+            u.style.left = x + 'px'; u.style.top = y + 'px'; u.style.bottom = 'auto'; u.style.right = 'auto';
+            cfg.pos = { x, y };
+        };
+        const onUp = () => { if (drag) { drag = null; saveCfg(); } };
+        head.addEventListener('mousedown', onDown);
+        head.addEventListener('touchstart', onDown, { passive: false });
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('touchmove', onMove, { passive: false });
+        document.addEventListener('mouseup', onUp);
+        document.addEventListener('touchend', onUp);
+
+        u.addEventListener('pointerdown', () => { lastUser = Date.now(); });
+        document.addEventListener('keydown', () => { lastUser = Date.now(); });
+
+        fillVoices(); musPaintList(); musPaintBtn();
+        refreshPanel(); applyTheme(); applyTab(); applyMin(); applyEye(); metaPaint();
+    }
+
+    function applyTab() {
+        const u = $('ink-panel'); if (!u) return;
+        const t = cfg.tab === 'music' ? 'music' : 'read';
+        $$('[data-tab]', u).forEach(b => b.classList.toggle('on', b.dataset.tab === t));
+        const r = u.querySelector('[data-pane="read"]'), m = u.querySelector('[data-pane="music"]');
+        if (r) r.classList.toggle('hide', t !== 'read');
+        if (m) m.classList.toggle('ghost', t !== 'music'); // fica fora da tela (não some) p/ o YouTube continuar tocando
+        applyPos();
+    }
+    function applyMin() {
+        const u = $('ink-panel'); if (!u) return;
+        u.classList.toggle('min', !!cfg.min);
+        const b = $('ink-min');
+        if (b) b.innerHTML = cfg.min ? ICO.max : ICO.min;
+        applyPos();
+    }
+    function applyPos() {
+        const u = $('ink-panel'); if (!u || !cfg.pos) return;
+        const r = u.getBoundingClientRect();
+        const x = Math.min(Math.max(0, cfg.pos.x), Math.max(0, innerWidth - r.width));
+        const y = Math.min(Math.max(0, cfg.pos.y), Math.max(0, innerHeight - r.height));
+        u.style.left = x + 'px'; u.style.top = y + 'px'; u.style.bottom = 'auto'; u.style.right = 'auto';
+    }
+    function applyTheme() {
+        const u = $('ink-panel'); if (!u) return;
+        u.classList.toggle('boy', !cfg.girl);
+        SKINS.forEach(k => u.classList.toggle('skin-' + k.id, cfg.girl && curSkin().id === k.id));
+        $$('[data-skin]', u).forEach(b => b.classList.toggle('on', b.dataset.skin === curSkin().id));
+        const t = $('ink-title');
+        if (t) t.textContent = (cfg.girl ? curSkin().nome : 'Ink') + ' ' + VERSION;
+        const g = $('ink-girl');
+        if (g) g.classList.toggle('on', cfg.girl);
+    }
+    function applyEye() {
+        let o = $('ink-eye-el');
+        if (!cfg.eye || !location.pathname.startsWith('/ler/')) { if (o) o.remove(); }
+        else {
+            if (!o) {
+                o = document.createElement('div');
+                o.id = 'ink-eye-el';
+                o.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:2147482000' + (IS_MOBILE ? '' : ';mix-blend-mode:multiply');
+                document.body.appendChild(o);
+            }
+            const a = Math.min(0.6, Math.max(0.05, cfg.eyeLvl));
+            o.style.background = IS_MOBILE ? `rgba(255,150,40,${0.04 + a * 0.3})` : `rgba(255,${Math.round(190 - a * 150)},${Math.round(110 - a * 150)},${0.35 + a * 0.9})`;
+        }
+        const b = $('ink-eye'); if (b) b.classList.toggle('on', cfg.eye);
+    }
+    function toggleEye() { cfg.eye = !cfg.eye; saveCfg(); applyEye(); }
+    function toggleVoice() {
+        cfg.voice = !cfg.voice; saveCfg(); refreshPanel();
+        if (!cfg.voice) { cancelSpeech(); musDuck(false); return; }
+        if (!TTS || !ptVoices().length) setStatus('⚠ Nenhuma voz pt encontrada');
+        else ocrWorker().then(() => { if (!running) setStatus('Audiolivro pronto'); }).catch(e => setStatus('⚠ OCR: ' + (e.message || e)));
+    }
+    function setSpeed(d) {
+        let i = 0, best = 1e9;
+        SPEEDS.forEach((v, k) => { const dd = Math.abs(v - cfg.speed); if (dd < best) { best = dd; i = k; } });
+        cfg.speed = SPEEDS[Math.min(SPEEDS.length - 1, Math.max(0, i + d))];
+        saveCfg(); refreshPanel();
+    }
+    function fillVoices() {
+        const sel = $('ink-vsel'); if (!sel) return;
+        const list = ptVoices();
+        const cur = currentVoice();
+        sel.textContent = '';
+        if (!list.length) { const o = document.createElement('option'); o.textContent = 'Nenhuma voz pt-BR'; sel.appendChild(o); return; }
+        list.forEach(v => {
+            const o = document.createElement('option');
+            o.value = v.name; o.textContent = (isNatural(v) ? '★ ' : '') + v.name.replace(/^Microsoft\s+/, '');
+            if (cur && v.name === cur.name) o.selected = true;
+            sel.appendChild(o);
+        });
+    }
+    function refreshPanel() {
+        const u = $('ink-panel'); if (!u) return;
+        u.classList.toggle('run', running);
+        const g = $('ink-go');
+        if (g) g.innerHTML = running ? ICO.pause + '<span>Pausar</span>' : ICO.play + '<span>Ler sozinho</span>';
+        const mg = $('ink-mini-go');
+        if (mg) mg.innerHTML = running ? ICO.pause : ICO.play;
+        const sp = $('ink-spd'); if (sp) sp.textContent = String(+(cfg.speed).toFixed(2)) + '×';
+        const ma = $('ink-manga'); if (ma) ma.classList.toggle('on', cfg.manga);
+        const au = $('ink-auto'); if (au) au.classList.toggle('on', cfg.auto);
+        const vo = $('ink-voice'); if (vo) vo.classList.toggle('on', cfg.voice);
+        const pe = $('ink-perf'); if (pe) pe.classList.toggle('on', isPerf());
+        const ey = $('ink-eye'); if (ey) ey.classList.toggle('on', cfg.eye);
+        const ax = $('ink-anx'); if (ax) ax.classList.toggle('on', (cfg.anx | 0) > 0);
+        const al = $('ink-anx-l'); if (al) al.textContent = ANX_LBL[cfg.anx | 0] || ANX_LBL[0];
+        const vr = $('ink-vr'); if (vr) vr.textContent = String(cfg.vrate) + '×';
+        const el = $('ink-eyel'); if (el) el.textContent = Math.round(cfg.eyeLvl * 100) + '%';
+        const mv = $('ink-meta-val'); if (mv) mv.textContent = cfg.metaGoal;
+        const dk = $('ink-duck'); if (dk) dk.classList.toggle('on', cfg.duck !== false);
+        const ys = $('ink-yt-show'); if (ys) ys.classList.toggle('on', cfg.ytShow !== false);
+        const yb = $('ink-yt-box'); if (yb) yb.classList.toggle('off', cfg.ytShow === false);
+        musPaintBtn();
+    }
+
+    /* ================================================================== *
+     * 15. INIT
+     * ================================================================== */
+    function init() {
+        injectCSS();
+        buildPanel();
+        applyPos();
+        BubbleSorter.start();
+        OrderBar.build();
+        setTimeout(() => checkUpdate(false), 4000);
+        setInterval(() => checkUpdate(false), 6 * 3600 * 1000);
+        // o site é SPA: reavalia a barra de capítulos e o filtro de olho ao navegar
+        setInterval(() => { try { OrderBar.build(); applyEye(); } catch (e) { } }, 1500);
+    }
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
+    else init();
+
+    console.info(`[Ink] v${VERSION} carregado`);
+})();
