@@ -1,0 +1,430 @@
+# Gera o APK do Ink Leitor (app com WebView + content.js + OCR) direto no GitHub.
+# Como usar: Actions > "Gerar APK" > Run workflow. Quando terminar, o APK fica em Releases ("apk-latest").
+name: Gerar APK
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/apk.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Instalar SDK do Android 34
+        run: sdkmanager --install "platforms;android-34" "build-tools;34.0.0"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Gerar projeto Android
+        env:
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          P=app-proj
+          M=$P/app/src/main
+          mkdir -p $M/java/br/inkleitor $M/res/drawable-nodpi $M/assets/ocr
+          test -f content.js || { echo "ERRO: não achei o content.js na raiz do repositório"; exit 1; }
+          cp content.js $M/assets/content.js
+          cat > $P/settings.gradle <<'EOF_SETTINGS'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = 'InkLeitor'
+          include ':app'
+          EOF_SETTINGS
+          cat > $P/build.gradle <<'EOF_ROOT'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+          }
+          EOF_ROOT
+          cat > $P/gradle.properties <<'EOF_PROPS'
+          org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8
+          EOF_PROPS
+          cat > $P/app/build.gradle <<'EOF_APP'
+          plugins {
+              id 'com.android.application'
+          }
+          android {
+              namespace 'br.inkleitor'
+              compileSdk 34
+              defaultConfig {
+                  applicationId 'br.inkleitor'
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 1
+                  versionName '1.0'
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          EOF_APP
+          cat > $M/AndroidManifest.xml <<'EOF_MANIFEST'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <application
+                  android:label="Ink Leitor"
+                  android:icon="@drawable/ic_launcher"
+                  android:allowBackup="true"
+                  android:hardwareAccelerated="true"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:windowSoftInputMode="adjustResize"
+                      android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize|uiMode|density">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF_MANIFEST
+          cat > $M/assets/shim.js <<'EOF_SHIM'
+          /* ponte app <-> content.js: faz o papel do base.js/bg.js da extensão */
+          (function () {
+            if (window.__inkShim) return;
+            window.__inkShim = 1;
+            window.__inkOcrBase = location.origin + '/__inkocr';
+            window.__inkCapDone = function (id, data, err) {
+              window.postMessage({ inkCapRes: id, data: data, err: err }, '*');
+            };
+            window.addEventListener('message', function (e) {
+              var d = e.data;
+              if (e.source !== window || !d || !d.inkCap) return;
+              try { InkNative.capture(String(d.inkCap)); }
+              catch (x) { window.__inkCapDone(d.inkCap, null, String(x)); }
+            });
+          })();
+          EOF_SHIM
+          cat > $M/java/br/inkleitor/MainActivity.java <<'EOF_JAVA'
+          package br.inkleitor;
+
+          import android.app.Activity;
+          import android.content.Intent;
+          import android.graphics.Bitmap;
+          import android.graphics.Canvas;
+          import android.graphics.Color;
+          import android.graphics.Rect;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.util.Base64;
+          import android.view.PixelCopy;
+          import android.view.WindowManager;
+          import android.webkit.CookieManager;
+          import android.webkit.JavascriptInterface;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebResourceRequest;
+          import android.webkit.WebResourceResponse;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+
+          import java.io.ByteArrayInputStream;
+          import java.io.ByteArrayOutputStream;
+          import java.io.File;
+          import java.io.FileInputStream;
+          import java.io.FileOutputStream;
+          import java.io.IOException;
+          import java.io.InputStream;
+          import java.net.HttpURLConnection;
+          import java.net.URL;
+          import java.nio.charset.StandardCharsets;
+          import java.util.HashMap;
+          import java.util.Map;
+
+          /**
+           * Ink Leitor: WebView do Ink + content.js injetado.
+           * Faz o papel da extensão: (1) captura de tela, (2) arquivos do OCR em /__inkocr/, (3) atualiza o content.js pelo GitHub.
+           */
+          public class MainActivity extends Activity {
+              static final String HOME = "https://www.ink.app.br/";
+              static final String UPDATE_URL = "@UPDATE_URL@";   // trocado pelo workflow
+              private WebView web;
+              private volatile Thread updater;
+              private final Handler ui = new Handler(Looper.getMainLooper());
+
+              @Override
+              protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                  getWindow().setStatusBarColor(Color.BLACK);
+                  getWindow().setNavigationBarColor(Color.BLACK);
+                  web = new WebView(this);
+                  setContentView(web);
+                  WebSettings s = web.getSettings();
+                  s.setJavaScriptEnabled(true);
+                  s.setDomStorageEnabled(true);
+                  s.setDatabaseEnabled(true);
+                  s.setMediaPlaybackRequiresUserGesture(false);
+                  s.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
+                  s.setUserAgentString(s.getUserAgentString().replace("; wv", ""));
+                  CookieManager cm = CookieManager.getInstance();
+                  cm.setAcceptCookie(true);
+                  cm.setAcceptThirdPartyCookies(web, true);
+                  web.addJavascriptInterface(new Bridge(), "InkNative");
+                  web.setWebChromeClient(new WebChromeClient());
+                  web.setWebViewClient(new Client());
+                  startUpdater();
+                  web.loadUrl(HOME);
+              }
+
+              @Override
+              public void onBackPressed() {
+                  if (web.canGoBack()) web.goBack();
+                  else super.onBackPressed();
+              }
+
+              /* ---------- atualização do content.js (GitHub) ---------- */
+              private void startUpdater() {
+                  updater = new Thread(() -> {
+                      try {
+                          HttpURLConnection c = (HttpURLConnection) new URL(UPDATE_URL + "?t=" + System.currentTimeMillis()).openConnection();
+                          c.setConnectTimeout(5000);
+                          c.setReadTimeout(8000);
+                          c.setUseCaches(false);
+                          if (c.getResponseCode() != 200) return;
+                          String t;
+                          try (InputStream in = c.getInputStream()) { t = readAll(in); }
+                          if (t.length() > 20000 && t.contains("const VERSION")) {
+                              File tmp = new File(getFilesDir(), "content.js.tmp");
+                              try (FileOutputStream f = new FileOutputStream(tmp)) { f.write(t.getBytes(StandardCharsets.UTF_8)); }
+                              tmp.renameTo(new File(getFilesDir(), "content.js"));
+                          }
+                      } catch (Exception ignored) { }
+                  });
+                  updater.start();
+              }
+
+              private static String readAll(InputStream in) throws IOException {
+                  ByteArrayOutputStream o = new ByteArrayOutputStream();
+                  byte[] buf = new byte[16384];
+                  int n;
+                  while ((n = in.read(buf)) > 0) o.write(buf, 0, n);
+                  return o.toString("UTF-8");
+              }
+
+              private String readAsset(String name) throws IOException {
+                  try (InputStream in = getAssets().open(name)) { return readAll(in); }
+              }
+
+              private String contentJs() throws IOException {
+                  File f = new File(getFilesDir(), "content.js");
+                  if (f.exists() && f.length() > 20000) {
+                      try (InputStream in = new FileInputStream(f)) { return readAll(in); }
+                  }
+                  return readAsset("content.js");     // reserva: o que estava no repositório quando o APK foi gerado
+              }
+
+              private void inject() {
+                  new Thread(() -> {
+                      try {
+                          Thread u = updater;
+                          if (u != null && u.isAlive()) u.join(3500);
+                          final String shim = readAsset("shim.js");
+                          final String tess = readAsset("ocr/tesseract.min.js");
+                          final String main = contentJs();
+                          ui.post(() -> {
+                              web.evaluateJavascript(shim, null);
+                              web.evaluateJavascript(tess, null);
+                              web.evaluateJavascript(main, null);
+                          });
+                      } catch (Exception ignored) { }
+                  }).start();
+              }
+
+              private static boolean isInk(String host) {
+                  return host != null && (host.equals("ink.app.br") || host.endsWith(".ink.app.br"));
+              }
+
+              private static String mime(String name) {
+                  if (name.endsWith(".js")) return "application/javascript";
+                  if (name.endsWith(".wasm")) return "application/wasm";
+                  return "application/octet-stream";
+              }
+
+              class Client extends WebViewClient {
+                  @Override
+                  public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {
+                      String sc = r.getUrl().getScheme();
+                      if ("http".equals(sc) || "https".equals(sc)) return false;
+                      try { startActivity(new Intent(Intent.ACTION_VIEW, r.getUrl())); } catch (Exception ignored) { }
+                      return true;
+                  }
+
+                  // serve os arquivos do OCR (tesseract, worker, núcleo wasm, português) como se fossem do próprio site
+                  @Override
+                  public WebResourceResponse shouldInterceptRequest(WebView v, WebResourceRequest r) {
+                      Uri u = r.getUrl();
+                      String p = u.getPath();
+                      if (p != null && p.startsWith("/__inkocr/") && isInk(u.getHost())) {
+                          String name = p.substring("/__inkocr/".length());
+                          Map<String, String> hd = new HashMap<>();
+                          hd.put("Access-Control-Allow-Origin", "*");
+                          hd.put("Cache-Control", "max-age=86400");
+                          try {
+                              if (name.isEmpty() || name.contains("/") || name.contains("..")) throw new IOException("nome inválido");
+                              WebResourceResponse res = new WebResourceResponse(mime(name), null, getAssets().open("ocr/" + name));
+                              res.setStatusCodeAndReasonPhrase(200, "OK");
+                              res.setResponseHeaders(hd);
+                              return res;
+                          } catch (IOException e) {
+                              WebResourceResponse res = new WebResourceResponse("text/plain", "utf-8", new ByteArrayInputStream(new byte[0]));
+                              res.setStatusCodeAndReasonPhrase(404, "Not Found");
+                              res.setResponseHeaders(hd);
+                              return res;
+                          }
+                      }
+                      return null;
+                  }
+
+                  @Override
+                  public void onPageFinished(WebView v, String url) {
+                      if (url == null || !isInk(Uri.parse(url).getHost())) return;
+                      v.evaluateJavascript("(window.__ink ? 1 : 0)", val -> { if (!"1".equals(val)) inject(); });
+                  }
+              }
+
+              /* ---------- captura de tela (o que a extensão fazia com captureVisibleTab) ---------- */
+              class Bridge {
+                  @JavascriptInterface
+                  public void capture(final String id) {
+                      if (id == null || !id.matches("\\d{1,9}")) return;
+                      ui.post(() -> shoot(id));
+                  }
+              }
+
+              private void shoot(final String id) {
+                  final int w = web.getWidth(), h = web.getHeight();
+                  if (w <= 0 || h <= 0) { done(id, null, "tela sem tamanho"); return; }
+                  final Bitmap bmp;
+                  try { bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888); }
+                  catch (Throwable t) { done(id, null, "sem memória para a captura"); return; }
+                  if (Build.VERSION.SDK_INT >= 26) {
+                      int[] loc = new int[2];
+                      web.getLocationInWindow(loc);
+                      try {
+                          PixelCopy.request(getWindow(), new Rect(loc[0], loc[1], loc[0] + w, loc[1] + h), bmp, res -> {
+                              if (res == PixelCopy.SUCCESS) encode(id, bmp);
+                              else drawFallback(id, bmp);
+                          }, ui);
+                          return;
+                      } catch (Throwable ignored) { }
+                  }
+                  drawFallback(id, bmp);
+              }
+
+              private void drawFallback(String id, Bitmap bmp) {
+                  try { web.draw(new Canvas(bmp)); encode(id, bmp); }
+                  catch (Throwable t) { done(id, null, String.valueOf(t)); }
+              }
+
+              private void encode(final String id, final Bitmap bmp) {
+                  new Thread(() -> {
+                      try {
+                          ByteArrayOutputStream o = new ByteArrayOutputStream();
+                          bmp.compress(Bitmap.CompressFormat.JPEG, 92, o);
+                          done(id, "data:image/jpeg;base64," + Base64.encodeToString(o.toByteArray(), Base64.NO_WRAP), null);
+                      } catch (Throwable t) { done(id, null, String.valueOf(t)); }
+                  }).start();
+              }
+
+              private void done(final String id, final String data, final String err) {
+                  final String js = "window.__inkCapDone(" + id + ","
+                          + (data == null ? "null" : "'" + data + "'") + ","
+                          + (err == null ? "null" : org.json.JSONObject.quote(err)) + ")";
+                  ui.post(() -> web.evaluateJavascript(js, null));
+              }
+          }
+          EOF_JAVA
+          sed -i "s#@UPDATE_URL@#https://raw.githubusercontent.com/${REPO}/${BRANCH}/content.js#" $M/java/br/inkleitor/MainActivity.java
+          cat > $RUNNER_TEMP/icon.py <<'EOF_ICON'
+          import zlib, struct, math, sys
+          S = 192
+          rows = []
+          for y in range(S):
+              row = bytearray([0])
+              for x in range(S):
+                  d = math.hypot(x - S / 2 + 0.5, y - S / 2 + 0.5)
+                  if d > S / 2 - 2:
+                      px = (0, 0, 0, 0)
+                  else:
+                      px = (255, 105, 180, 255)
+                      if (28 <= x <= 94 or 98 <= x <= 164) and 50 <= y <= 142:
+                          px = (255, 255, 255, 255)
+                          for k in range(5):
+                              if 66 + k * 14 <= y < 70 + k * 14 and (38 <= x <= 84 or 108 <= x <= 154):
+                                  px = (255, 105, 180, 255)
+                  row += bytes(px)
+              rows.append(bytes(row))
+          def chunk(t, d):
+              c = struct.pack(">I", len(d)) + t + d
+              return c + struct.pack(">I", zlib.crc32(t + d) & 0xffffffff)
+          png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", S, S, 8, 6, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(b"".join(rows), 9)) + chunk(b"IEND", b"")
+          open(sys.argv[1], "wb").write(png)
+          EOF_ICON
+          python3 $RUNNER_TEMP/icon.py $M/res/drawable-nodpi/ic_launcher.png
+          echo "Projeto gerado:"; find $P -type f | sort
+
+      - name: Baixar OCR (Tesseract + português)
+        run: |
+          set -euo pipefail
+          A="$GITHUB_WORKSPACE/app-proj/app/src/main/assets/ocr"
+          mkdir -p "$RUNNER_TEMP/t" && cd "$RUNNER_TEMP/t"
+          npm init -y >/dev/null
+          npm install --silent tesseract.js@5.1.1
+          cp node_modules/tesseract.js/dist/tesseract.min.js node_modules/tesseract.js/dist/worker.min.js "$A/"
+          cp node_modules/tesseract.js-core/tesseract-core*.js "$A/"
+          cp node_modules/tesseract.js-core/*.wasm "$A/" 2>/dev/null || true
+          curl -fsSL -o por.traineddata https://github.com/tesseract-ocr/tessdata_fast/raw/main/por.traineddata
+          gzip -9 -c por.traineddata > "$A/por.traineddata.gz"
+          ls -la "$A"
+
+      - name: Compilar APK
+        working-directory: app-proj
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - name: Separar o APK
+        run: cp app-proj/app/build/outputs/apk/debug/app-debug.apk ink-leitor.apk
+
+      - name: Publicar em Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apk-latest
+          name: Ink Leitor (APK)
+          body: "APK gerado automaticamente. Baixe o ink-leitor.apk abaixo e instale."
+          files: ink-leitor.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ink-leitor-apk
+          path: ink-leitor.apk
+ 
