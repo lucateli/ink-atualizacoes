@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ink Leitor
 // @namespace    ink-leitor
-// @version      4.4.0
+// @version      4.4.1
 // @description  Leitor automático, OCR, TTS, música (YouTube + Drive), ordenador de capítulos e auto-arrumar bolhas mangá/HQ
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
@@ -15,7 +15,7 @@
     if (window.__ink) return;
     window.__ink = true;
 
-    const VERSION = '4.4.0';
+    const VERSION = '4.4.1';
     const IS_MOBILE = (() => {
         try { return matchMedia('(pointer:coarse)').matches || innerWidth < 700; }
         catch (e) { return innerWidth < 700; }
@@ -325,13 +325,22 @@
     const MANGA = ['ArrowLeft', 'clickEsq', 'swipeR'];
 
     /* ================================================================== *
-     *  6. BUBBLE SORTER (Auto-Arrumar Mangá/HQ)
-     *  Corrigido: o botão era colocado no 1º <div> do modal (a "alça"
-     *  de arrastar, 4px de altura) e ficava invisível. Agora entra
-     *  logo abaixo do texto "Arraste pra mudar a ordem…".
+     *  6. BUBBLE SORTER (Auto-Arrumar Mangá/HQ)  — reescrito na 4.4.1
+     *
+     *  Como o site funciona (descoberto pelo console):
+     *   - cada bolha é um <div class="bz-order__tile"> dentro de
+     *     <div class="bz-order__track">, posicionado com translateX;
+     *   - o arraste usa EVENTOS DE PONTEIRO (onPointerDown), não o
+     *     drag-and-drop nativo (por isso a versão 4.4.0 não fazia nada);
+     *   - a miniatura (.bz-order__thumb) é um recorte da página via
+     *     background-image/-size/-position, então dá pra calcular onde
+     *     a bolha está na página a partir desses valores.
+     *  O resultado agora aparece na própria linha do botão (o painel
+     *  minimizado escondia as mensagens).
      * ================================================================== */
     const BubbleSorter = (() => {
         let isOpen = false;
+        const TILE = '.bz-order__tile';
 
         function findModal() {
             const m = document.querySelector('.bz-order');
@@ -346,101 +355,118 @@
             return null;
         }
 
-        function getItems(modal) {
-            let items = $$('[draggable="true"]', modal);
-            if (items.length >= 2) return items;
-            const imgs = $$('img,canvas', modal).filter(i => i.offsetWidth > 10);
-            if (imgs.length < 2) return [];
-            let c = imgs[0].parentElement;
-            while (c && c !== modal && imgs.some(i => !c.contains(i))) c = c.parentElement;
-            if (!c) return [];
-            return [...c.children].filter(k => k.matches('img,canvas') || k.querySelector('img,canvas'));
+        function getTiles() {
+            const modal = findModal();
+            let t = $$(TILE, modal || document);
+            if (t.length) return t;
+            const tr = (modal || document).querySelector('.bz-order__track');
+            if (tr) return [...tr.children].filter(k => /bolha/i.test(k.getAttribute('aria-label') || ''));
+            return [];
         }
 
-        const isNum = v => typeof v === 'number' && isFinite(v);
-        function xyFrom(o, d = 0) {
-            if (!o || typeof o !== 'object' || d > 3 || o instanceof Node) return null;
-            for (const [kx, ky] of [['x', 'y'], ['left', 'top'], ['cx', 'cy'], ['x0', 'y0']]) {
-                if (isNum(o[kx]) && isNum(o[ky])) {
-                    const w = isNum(o.w) ? o.w : isNum(o.width) ? o.width : 0;
-                    const h = isNum(o.h) ? o.h : isNum(o.height) ? o.height : 0;
-                    return { x: o[kx] + w / 2, y: o[ky] + h / 2 };
+        // posição da bolha na página (frações 0..1), lida do recorte da miniatura
+        function boxOf(tile) {
+            const th = tile.querySelector('.bz-order__thumb') || tile.firstElementChild;
+            if (!th) return null;
+            let cs; try { cs = getComputedStyle(th); } catch (e) { return null; }
+            const bsRaw = th.style.backgroundSize || cs.backgroundSize || '';
+            const bpRaw = th.style.backgroundPosition || cs.backgroundPosition || '';
+            if (/%/.test(bsRaw) || /%/.test(bpRaw)) return null;
+            const bs = bsRaw.match(/-?[\d.]+/g), bp = bpRaw.match(/-?[\d.]+/g);
+            if (!bs || bs.length < 2 || !bp || bp.length < 2) return null;
+            const w = parseFloat(th.style.width) || parseFloat(cs.width);
+            const h = parseFloat(th.style.height) || parseFloat(cs.height);
+            const bw = +bs[0], bh = +bs[1], px = +bp[0], py = +bp[1];
+            if (!(bw > 0 && bh > 0 && w > 0 && h > 0)) return null;
+            return { l: -px / bw, t: -py / bh, r: (-px + w) / bw, b: (-py + h) / bh };
+        }
+
+        // agrupa em fileiras por sobreposição vertical; dentro da fileira: mangá = direita→esquerda
+        function orderBoxes(pts, mode) {
+            const byTop = pts.slice().sort((a, b) => a.bx.t - b.bx.t);
+            const rows = [];
+            for (const it of byTop) {
+                const row = rows[rows.length - 1];
+                if (row) {
+                    const ov = Math.min(row.b, it.bx.b) - Math.max(row.t, it.bx.t);
+                    const minH = Math.min(row.b - row.t, it.bx.b - it.bx.t);
+                    if (ov > minH * 0.4) {
+                        row.items.push(it);
+                        row.t = Math.min(row.t, it.bx.t); row.b = Math.max(row.b, it.bx.b);
+                        continue;
+                    }
                 }
+                rows.push({ t: it.bx.t, b: it.bx.b, items: [it] });
             }
-            if (Array.isArray(o) && isNum(o[0]) && isNum(o[1])) return { x: o[0] + (isNum(o[2]) ? o[2] / 2 : 0), y: o[1] + (isNum(o[3]) ? o[3] / 2 : 0) };
-            for (const k of Object.keys(o)) {
-                if (k === 'children' || k === 'ref' || k === 'key' || typeof o[k] === 'function') continue;
-                let r = null; try { r = xyFrom(o[k], d + 1); } catch (e) { }
-                if (r) return r;
-            }
-            return null;
+            const cx = p => (p.bx.l + p.bx.r) / 2;
+            return rows.flatMap(r => r.items.sort((a, b) => mode === 'manga' ? cx(b) - cx(a) : cx(a) - cx(b))).map(p => p.el);
         }
 
-        function coordsOf(el) {
-            const ds = el.dataset || {};
-            const a = parseFloat(ds.x ?? ds.left ?? ds.cx), b = parseFloat(ds.y ?? ds.top ?? ds.cy);
-            if (isFinite(a) && isFinite(b)) return { x: a, y: b };
-            const keys = Object.keys(el);
-            const pk = keys.find(k => k.startsWith('__reactProps$'));
-            const fk = keys.find(k => k.startsWith('__reactFiber$'));
-            if (pk) { const r = xyFrom(el[pk]); if (r) return r; }
-            let f = fk ? el[fk] : null;
-            for (let i = 0; f && i < 5; i++, f = f.return) { const r = xyFrom(f.memoizedProps); if (r) return r; }
-            return null;
-        }
+        const curOrder = () => getTiles().slice().sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left);
 
-        function orderByCoords(pts, mode) {
-            const ys = pts.map(p => p.c.y);
-            const span = (Math.max(...ys) - Math.min(...ys)) || 1;
-            const norm = Math.max(...pts.map(p => Math.max(Math.abs(p.c.x), Math.abs(p.c.y)))) <= 1.5;
-            const tol = norm ? 0.05 : Math.max(30, span * 0.06);
-            const byY = pts.slice().sort((a, b) => a.c.y - b.c.y);
-            const rows = []; let row = [byY[0]];
-            for (let i = 1; i < byY.length; i++) {
-                if (byY[i].c.y - row[0].c.y <= tol) row.push(byY[i]);
-                else { rows.push(row); row = [byY[i]]; }
+        const pev = (type, x, y) => new PointerEvent(type, {
+            bubbles: true, cancelable: true, composed: true, view: window,
+            clientX: x, clientY: y, screenX: x, screenY: y,
+            pointerId: 1, pointerType: 'mouse', isPrimary: true,
+            button: type === 'pointermove' ? -1 : 0,
+            buttons: type === 'pointerup' ? 0 : 1
+        });
+
+        async function dragBy(el, dx) {
+            const r = el.getBoundingClientRect();
+            const x0 = r.left + r.width / 2, y = r.top + r.height / 2;
+            el.dispatchEvent(pev('pointerdown', x0, y));
+            await sleep(50);
+            const steps = 14;
+            for (let i = 1; i <= steps; i++) {
+                el.dispatchEvent(pev('pointermove', x0 + dx * i / steps, y));
+                await sleep(16);
             }
-            rows.push(row);
-            return rows.flatMap(r => r.sort((a, b) => mode === 'manga' ? b.c.x - a.c.x : a.c.x - b.c.x)).map(p => p.el);
+            await sleep(70);
+            el.dispatchEvent(pev('pointerup', x0 + dx, y));
+            await sleep(200);
         }
 
         async function reorder(sorted) {
-            const cur = () => { const m = findModal(); return m ? getItems(m) : []; };
-            const same = () => { const c = cur(); return sorted.every((e, i) => c[i] === e); };
-            if (same()) return 'ok';
-            const fire = (el, type, d) => {
-                const r = el.getBoundingClientRect();
-                try { el.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, composed: true, dataTransfer: d, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 })); } catch (e) { }
-            };
-            for (let i = 0; i < sorted.length; i++) {
-                const c = cur();
-                if (!c.length || c[i] === sorted[i]) continue;
-                let d = null; try { d = new DataTransfer(); } catch (e) { }
-                fire(sorted[i], 'dragstart', d); await sleep(30);
-                fire(c[i], 'dragenter', d); fire(c[i], 'dragover', d); fire(c[i], 'drop', d);
-                fire(sorted[i], 'dragend', d);
-                await sleep(60);
+            // pointer capture com ponteiro sintético dá erro; engole só durante o arraste
+            const oSet = Element.prototype.setPointerCapture, oRel = Element.prototype.releasePointerCapture;
+            Element.prototype.setPointerCapture = function (id) { try { return oSet.call(this, id); } catch (e) { } };
+            Element.prototype.releasePointerCapture = function (id) { try { return oRel.call(this, id); } catch (e) { } };
+            try {
+                for (let i = 0; i < sorted.length; i++) {
+                    let cur = curOrder();
+                    if (cur[i] === sorted[i]) continue;
+                    const el = sorted[i];
+                    for (let tryN = 0; tryN < 2; tryN++) {
+                        const target = cur[i].getBoundingClientRect(), me = el.getBoundingClientRect();
+                        let dx = (target.left + target.width / 2) - (me.left + me.width / 2);
+                        dx += Math.sign(dx) * (6 + tryN * 22);
+                        await dragBy(el, dx);
+                        cur = curOrder();
+                        if (cur[i] === el) break;
+                    }
+                    if (curOrder()[i] !== el) return false;
+                }
+                return curOrder().every((e, i) => e === sorted[i]);
+            } finally {
+                Element.prototype.setPointerCapture = oSet;
+                Element.prototype.releasePointerCapture = oRel;
             }
-            if (same()) return 'dnd';
-            const parent = sorted[0].parentNode;
-            if (parent) sorted.forEach(e => parent.appendChild(e));
-            return 'dom';
         }
 
-        async function run(mode) {
-            const modal = findModal();
-            if (!modal) return;
-            const items = getItems(modal);
-            if (items.length < 2) { setStatus(items.length ? '⚠ Só 1 balão, nada pra ordenar' : '⚠ Não achei os balões nesta tela'); return; }
-            const pts = items.map(el => ({ el, c: coordsOf(el) }));
-            if (pts.some(p => !p.c) || new Set(pts.map(p => p.c.x + ',' + p.c.y)).size < 2) {
-                setStatus('⚠ Não achei a posição dos balões (mande o HTML do modal que eu ajusto).');
-                return;
-            }
-            const res = await reorder(orderByCoords(pts, mode));
-            setStatus(res === 'dom'
-                ? '⚠ Reordenei só visualmente. Confira os números antes de Salvar.'
-                : `✓ ${items.length} balões arrumados (${mode === 'manga' ? 'mangá' : 'HQ'})`);
+        async function run(mode, say) {
+            const tiles = getTiles();
+            if (tiles.length < 2) { say(tiles.length ? '⚠ Só 1 balão, nada pra ordenar' : '⚠ Não achei os balões nesta tela'); return; }
+            const pts = tiles.map(el => ({ el, bx: boxOf(el) }));
+            if (pts.some(p => !p.bx)) { say('⚠ Não consegui ler a posição das bolhas (thumb sem recorte)'); return; }
+            const sorted = orderBoxes(pts, mode);
+            const lbl = e => (e.getAttribute('aria-label') || '?').replace(/\D+/g, '');
+            console.info('[Ink] ordem atual:', curOrder().map(lbl).join(','), '→ alvo:', sorted.map(lbl).join(','));
+            if (curOrder().every((e, i) => e === sorted[i])) { say(`✓ Já estava na ordem certa (${mode === 'manga' ? 'mangá' : 'HQ'})`); return; }
+            say('⏳ Arrumando…');
+            const ok = await reorder(sorted);
+            if (ok) say(`✓ ${tiles.length} balões arrumados (${mode === 'manga' ? 'mangá' : 'HQ'}). Confira e toque em Salvar.`);
+            else say('⚠ Não consegui arrastar tudo. Confira os números antes de Salvar.');
         }
 
         function injectUI() {
@@ -448,25 +474,31 @@
             if (!modal || modal.querySelector('#ink-auto-row')) return;
             const row = document.createElement('div');
             row.id = 'ink-auto-row';
-            row.style.cssText = 'display:flex;gap:8px;margin:8px 0;align-items:center;';
+            row.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;margin:8px 0;align-items:center;';
             const css = 'color:#fff;border:none;border-radius:10px;padding:9px 14px;font-weight:700;cursor:pointer;font-size:13px;font-family:inherit;';
             const btn = document.createElement('button');
             const tog = document.createElement('button');
+            const msg = document.createElement('div');
             btn.type = tog.type = 'button';
             btn.style.cssText = css + 'flex:1;';
             tog.style.cssText = css + 'background:rgba(255,255,255,.14);';
+            msg.style.cssText = 'flex:1 1 100%;font-size:12.5px;line-height:1.35;color:#a9d2ff;min-height:0;';
             tog.textContent = '⇄';
             tog.title = 'Trocar entre HQ (← →) e Mangá (→ ←)';
+            const say = t => { msg.textContent = t; setStatus(t); };
             const paint = () => { btn.textContent = cfg.manga ? '↔ Auto Mangá (→ ←)' : '↔ Auto HQ (← →)'; btn.style.background = cfg.manga ? '#e8573f' : '#ff69b4'; };
             paint();
             tog.onclick = e => { e.preventDefault(); cfg.manga = !cfg.manga; saveCfg(); paint(); refreshPanel(); };
             btn.onclick = async e => {
                 e.preventDefault();
+                if (btn.dataset.busy) return;
+                btn.dataset.busy = '1';
                 btn.textContent = '⏳ Arrumando…';
-                try { await run(cfg.manga ? 'manga' : 'hq'); } catch (err) { setStatus('⚠ ' + (err.message || err)); }
-                setTimeout(paint, 1200);
+                try { await run(cfg.manga ? 'manga' : 'hq', say); } catch (err) { say('⚠ ' + (err.message || err)); }
+                delete btn.dataset.busy;
+                paint();
             };
-            row.append(btn, tog);
+            row.append(btn, tog, msg);
             const hint = $$('p,div,span', modal).find(e => e.childElementCount === 0 && /arraste pra mudar/i.test(e.textContent || ''));
             const re = $$('button', modal).find(b => /^reescanear$/i.test(txt(b)));
             if (hint) hint.insertAdjacentElement('afterend', row);
