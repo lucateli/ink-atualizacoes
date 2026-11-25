@@ -148,10 +148,17 @@
        PARTE A — LEITURA AUTOMÁTICA (só em /ler/...)
        ===================================================================== */
     const LS = 'ink_autoread_cfg_v3';
-    let cfg = { speed: 1.5, method: '', methodM: '', manga: false, min: null, eye: false, eyeLvl: 0.25, pos: null, auto: true, voice: false, vrate: 1, vname: '', dbg: false, perf: null, bin: false, bin1: false, smooth: true, metaGoal: 10, girl: true, anx: 0 };
+    let cfg = { speed: 1.5, method: '', methodM: '', manga: false, min: null, eye: false, eyeLvl: 0.25, pos: null, auto: true, voice: false, vrate: 1, vname: '', dbg: false, perf: null, bin: false, bin1: false, smooth: true, metaGoal: 10, girl: true, anx: 0, skin: 'gato' };
     try { Object.assign(cfg, JSON.parse(localStorage.getItem(LS) || '{}')); } catch (e) { }
     cfg.smooth = true;
     cfg.anx = cfg.anx === true ? 1 : (+cfg.anx === 1 || +cfg.anx === 2 ? +cfg.anx : 0);
+    // skins do modo menina (para criar outra: some um item aqui + um bloco CSS .skin-<id> no INK_CSS)
+    const SKINS = [
+        { id: 'gato', nome: 'Gatinha', emo: '🐱', mascote: '🐾', msg: 'Skin Gatinha 🐱' },
+        { id: 'lobo', nome: 'Lobo', emo: '🐺', mascote: '🐺', msg: 'Skin Lobo 🐺 Auuuu!' }
+    ];
+    const curSkin = () => SKINS.find(k => k.id === cfg.skin) || SKINS[0];
+    const mascot = () => curSkin().mascote;
     const isPerf = () => cfg.perf == null ? MOBILE : !!cfg.perf;
     let saveT = 0;
     const save = () => { clearTimeout(saveT); saveT = setTimeout(() => { try { localStorage.setItem(LS, JSON.stringify(cfg)); } catch (e) { } }, 150); };
@@ -1129,7 +1136,7 @@
         cfg.voice = !cfg.voice; save(); refreshBtn();
         if (!cfg.voice) { cancelSpeech(); return; }
         if (!TTS || !ptVoices().length) setSt('⚠ Nenhuma voz em português encontrada.');
-        else ocrWorker().then(() => { if (!running) setSt('Audiolivro pronto. Toque em Ler sozinho.' + (cfg.girl ? ' 🐾' : '')); }).catch(e => setSt('⚠ OCR: ' + (e.message || e)));
+        else ocrWorker().then(() => { if (!running) setSt('Audiolivro pronto. Toque em Ler sozinho.' + (cfg.girl ? ' ' + mascot() : '')); }).catch(e => setSt('⚠ OCR: ' + (e.message || e)));
     }
 
     function setSt(t) {
@@ -1234,6 +1241,28 @@ border:1px solid var(--ia-line);border-radius:18px;padding-top:8px;box-shadow:0 
 #ink-auto-ui.boy .ia-chip svg{color:currentColor}
 #ink-auto-ui.boy .ia-row{border-color:transparent}
 #ink-auto-ui.boy .ia-row.on{border-color:rgba(232,87,63,.55);background:rgba(232,87,63,.16)}
+/* seletor de skin (só aparece no modo menina) */
+#ink-auto-ui .ia-skins{margin-top:2px}
+#ink-auto-ui .ia-skin-btns{display:flex;gap:4px}
+#ink-auto-ui .ia-skin{flex:1;display:flex;align-items:center;justify-content:center;gap:4px;min-height:32px;padding:6px 4px;border-radius:11px;font-size:11.5px;font-weight:600;
+background:var(--ia-card);border:1px solid var(--ia-line);color:var(--ia-txt);white-space:nowrap;transition:background .12s,border-color .12s}
+#ink-auto-ui.mob .ia-skin{min-height:40px}
+#ink-auto-ui .ia-skin:active{background:var(--ia-card2)}
+#ink-auto-ui .ia-skin.on{color:#fff;background:var(--ia-ac);border-color:var(--ia-ac2)}
+#ink-auto-ui.boy .ia-skins{display:none}
+/* ===== SKIN LOBO ===== */
+#ink-auto-ui.skin-lobo{--ia-bg:rgba(28,34,48,.95);--ia-card:rgba(150,170,205,.16);--ia-card2:rgba(150,170,205,.30);--ia-line:rgba(170,190,225,.30);--ia-txt:#e9eef7;--ia-dim:#8f9bb5;--ia-ac:#5f8fd0;--ia-ac2:#aebfdc;
+box-shadow:0 8px 24px rgba(10,16,32,.55),0 0 18px rgba(120,160,230,.18),inset 0 1px 0 rgba(255,255,255,.12)}
+#ink-auto-ui.skin-lobo.mob{background:rgba(28,34,48,.98)}
+#ink-auto-ui.skin-lobo::before,#ink-auto-ui.skin-lobo::after{top:-28px;width:30px;height:38px;border:0;clip-path:polygon(50% 0,100% 100%,0 100%);
+background:radial-gradient(ellipse 45% 55% at 50% 100%,#3a4666 0 55%,var(--ia-ac2) 58%)}
+#ink-auto-ui.skin-lobo::before{left:18px;transform:rotate(-10deg)}
+#ink-auto-ui.skin-lobo::after{right:18px;transform:rotate(10deg)}
+#ink-auto-ui.skin-lobo .ia-title{color:#cfe0ff;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;letter-spacing:.2px}
+#ink-auto-ui.skin-lobo #ink-auto-go{box-shadow:0 4px 12px rgba(95,143,208,.35)}
+#ink-auto-ui.skin-lobo.run #ink-auto-go{box-shadow:none}
+#ink-auto-ui.skin-lobo .ia-chip.on{border-color:var(--ia-ac2)}
+#ink-auto-ui.skin-lobo .ia-row.on{border-color:var(--ia-ac2)}
 #ink-ord-bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:10px 0 4px}
 #ink-ord-bar .io-pill{display:inline-flex;align-items:center;gap:6px;font:600 12.5px/1 system-ui,-apple-system,"Segoe UI",sans-serif;color:#f1efec;
 background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.1);border-radius:12px;padding:9px 12px;cursor:pointer;white-space:nowrap;
@@ -1303,8 +1332,14 @@ background:rgba(90,170,255,.1);border:1px solid rgba(90,170,255,.22);color:#a9d2
     function applyTheme() {
         const u = document.getElementById('ink-auto-ui'); if (!u) return;
         u.classList.toggle('boy', !cfg.girl);
+        SKINS.forEach(k => u.classList.toggle('skin-' + k.id, cfg.girl && curSkin().id === k.id));
+        u.querySelectorAll('[data-skin]').forEach(b => {
+            const on = b.dataset.skin === curSkin().id;
+            b.classList.toggle('on', on);
+            b.setAttribute('aria-pressed', on ? 'true' : 'false');
+        });
         const t = document.getElementById('ink-auto-title');
-        if (t) t.textContent = (cfg.girl ? 'Modo Meninas 🐾' : 'Leitura automática') + ' ' + INK_VERSION;
+        if (t) t.textContent = (cfg.girl ? 'Modo Meninas ' + mascot() : 'Leitura automática') + ' ' + INK_VERSION;
         const l = document.getElementById('ink-gender-lbl');
         if (l) l.textContent = cfg.girl ? '👧 Menina · toque p/ menino' : '👦 Menino · toque p/ menina';
     }
@@ -1467,7 +1502,7 @@ background:rgba(90,170,255,.1);border:1px solid rgba(90,170,255,.22);color:#a9d2
                 <button id="ink-auto-min" class="ia-ib" type="button"></button>
             </div>
             <div id="ink-auto-body">
-                <div id="ink-auto-st" class="ia-st">${MOBILE ? 'Parado. Toque em Ler sozinho.' : 'Parado. Alt+L liga/desliga.'}${cfg.girl ? ' 🐾' : ''}</div>
+                <div id="ink-auto-st" class="ia-st">${MOBILE ? 'Parado. Toque em Ler sozinho.' : 'Parado. Alt+L liga/desliga.'}${cfg.girl ? ' ' + mascot() : ''}</div>
                 <div class="ia-main">
                     <button id="ink-auto-go" type="button"></button>
                     <div class="ia-step"><button id="ink-auto-slow" type="button" title="mais devagar">−</button><span id="ink-auto-sp" class="ia-val"></span><button id="ink-auto-fast" type="button" title="mais rápido">+</button></div>
@@ -1489,6 +1524,10 @@ background:rgba(90,170,255,.1);border:1px solid rgba(90,170,255,.22);color:#a9d2
                     <div class="ia-step"><button id="ink-eye-less" type="button" title="menos intenso">−</button><span id="ink-eye-lvl" class="ia-val"></span><button id="ink-eye-more" type="button" title="mais intenso">+</button></div>
                 </div>
                 <button id="ink-gender-btn" class="ia-row" type="button" title="Trocar entre menina e menino"><span class="ia-lbl" id="ink-gender-lbl"></span></button>
+                <div id="ink-skin-row" class="ia-skins" role="group" aria-label="Skin do modo menina">
+                    <span class="ia-sec">Skin</span>
+                    <div class="ia-skin-btns">${SKINS.map(k => `<button type="button" class="ia-skin" data-skin="${k.id}" title="Skin ${k.nome}">${k.emo} ${k.nome}</button>`).join('')}</div>
+                </div>
                 <div class="ia-sec">Missão</div>
                 <button id="ink-meta-pick" class="ia-row" type="button"><span class="ia-lbl" id="ink-meta-pick-lbl"></span></button>
                 <div class="ia-sub">
@@ -1538,9 +1577,15 @@ background:rgba(90,170,255,.1);border:1px solid rgba(90,170,255,.22);color:#a9d2
             cfg.anx = ((cfg.anx | 0) + 1) % 3; save(); refreshBtn();
             setSt(ANX_MSG[cfg.anx]);
         };
+        d.querySelectorAll('[data-skin]').forEach(b => {
+            b.onclick = () => {
+                cfg.skin = b.dataset.skin; save(); applyTheme();
+                setSt(curSkin().msg);
+            };
+        });
         d.querySelector('#ink-gender-btn').onclick = () => {
             cfg.girl = !cfg.girl; save(); applyTheme();
-            setSt(cfg.girl ? 'Tema menina 🐾' : 'Tema menino.');
+            setSt(cfg.girl ? 'Tema menina ' + mascot() : 'Tema menino.');
         };
 
         const head = d.querySelector('#ink-auto-head');
