@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ink Leitor
 // @namespace    ink-leitor
-// @version      4.4.1
+// @version      4.4.2
 // @description  Leitor automático, OCR, TTS, música (YouTube + Drive), ordenador de capítulos e auto-arrumar bolhas mangá/HQ
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
@@ -15,7 +15,7 @@
     if (window.__ink) return;
     window.__ink = true;
 
-    const VERSION = '4.4.1';
+    const VERSION = '4.4.2';
     const IS_MOBILE = (() => {
         try { return matchMedia('(pointer:coarse)').matches || innerWidth < 700; }
         catch (e) { return innerWidth < 700; }
@@ -358,26 +358,33 @@
         function getTiles() {
             const modal = findModal();
             let t = $$(TILE, modal || document);
-            if (t.length) return t;
-            const tr = (modal || document).querySelector('.bz-order__track');
-            if (tr) return [...tr.children].filter(k => /bolha/i.test(k.getAttribute('aria-label') || ''));
-            return [];
+            if (!t.length) {
+                const tr = (modal || document).querySelector('.bz-order__track');
+                if (tr) t = [...tr.children];
+            }
+            const only = t.filter(k => /bolha/i.test(k.getAttribute('aria-label') || ''));
+            return only.length >= 2 ? only : t.filter(k => k.querySelector('.bz-order__thumb'));
         }
 
         // posição da bolha na página (frações 0..1), lida do recorte da miniatura
+        let lastWhy = '';
         function boxOf(tile) {
             const th = tile.querySelector('.bz-order__thumb') || tile.firstElementChild;
-            if (!th) return null;
-            let cs; try { cs = getComputedStyle(th); } catch (e) { return null; }
+            if (!th) { lastWhy = 'sem .bz-order__thumb'; return null; }
+            let cs; try { cs = getComputedStyle(th); } catch (e) { lastWhy = 'sem estilo'; return null; }
             const bsRaw = th.style.backgroundSize || cs.backgroundSize || '';
             const bpRaw = th.style.backgroundPosition || cs.backgroundPosition || '';
-            if (/%/.test(bsRaw) || /%/.test(bpRaw)) return null;
-            const bs = bsRaw.match(/-?[\d.]+/g), bp = bpRaw.match(/-?[\d.]+/g);
-            if (!bs || bs.length < 2 || !bp || bp.length < 2) return null;
             const w = parseFloat(th.style.width) || parseFloat(cs.width);
             const h = parseFloat(th.style.height) || parseFloat(cs.height);
-            const bw = +bs[0], bh = +bs[1], px = +bp[0], py = +bp[1];
-            if (!(bw > 0 && bh > 0 && w > 0 && h > 0)) return null;
+            const bs = bsRaw.match(/-?[\d.]+(?:px|%)?/g), bp = bpRaw.match(/-?[\d.]+(?:px|%)?/g);
+            lastWhy = `size="${bsRaw}" pos="${bpRaw}" w=${w} h=${h}`;
+            if (!bs || bs.length < 2 || !bp || bp.length < 2 || !(w > 0 && h > 0)) return null;
+            const bw = /%$/.test(bs[0]) ? w * parseFloat(bs[0]) / 100 : parseFloat(bs[0]);
+            const bh = /%$/.test(bs[1]) ? h * parseFloat(bs[1]) / 100 : parseFloat(bs[1]);
+            if (!(bw > 0 && bh > 0)) return null;
+            const px = /%$/.test(bp[0]) ? (w - bw) * parseFloat(bp[0]) / 100 : parseFloat(bp[0]);
+            const py = /%$/.test(bp[1]) ? (h - bh) * parseFloat(bp[1]) / 100 : parseFloat(bp[1]);
+            if (!isFinite(px) || !isFinite(py)) return null;
             return { l: -px / bw, t: -py / bh, r: (-px + w) / bw, b: (-py + h) / bh };
         }
 
@@ -457,8 +464,12 @@
         async function run(mode, say) {
             const tiles = getTiles();
             if (tiles.length < 2) { say(tiles.length ? '⚠ Só 1 balão, nada pra ordenar' : '⚠ Não achei os balões nesta tela'); return; }
-            const pts = tiles.map(el => ({ el, bx: boxOf(el) }));
-            if (pts.some(p => !p.bx)) { say('⚠ Não consegui ler a posição das bolhas (thumb sem recorte)'); return; }
+            const pts = [];
+            for (let i = 0; i < tiles.length; i++) {
+                const bx = boxOf(tiles[i]);
+                if (!bx) { console.warn('[Ink] bolha', i + 1, lastWhy, tiles[i].outerHTML.slice(0, 400)); say(`⚠ Não li a posição da bolha ${i + 1} (${lastWhy})`); return; }
+                pts.push({ el: tiles[i], bx });
+            }
             const sorted = orderBoxes(pts, mode);
             const lbl = e => (e.getAttribute('aria-label') || '?').replace(/\D+/g, '');
             console.info('[Ink] ordem atual:', curOrder().map(lbl).join(','), '→ alvo:', sorted.map(lbl).join(','));
