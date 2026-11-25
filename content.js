@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Ink Leitor
 // @namespace    ink-leitor
-// @version      4.1.0
-// @description  Leitor automático, OCR, TTS, ordenador de capítulos e auto-arrumar bolhas mangá/HQ
+// @version      4.2.0
+// @description  Leitor automático, OCR, TTS, música (YouTube + Drive), ordenador de capítulos e auto-arrumar bolhas mangá/HQ
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
 // @run-at       document-idle
@@ -15,7 +15,7 @@
     if (window.__ink) return;
     window.__ink = true;
 
-    const VERSION = '4.1.0';
+    const VERSION = '4.2.0';
     const IS_MOBILE = (() => {
         try { return matchMedia('(pointer:coarse)').matches || innerWidth < 700; }
         catch (e) { return innerWidth < 700; }
@@ -29,6 +29,7 @@
     const sleep = ms => new Promise(r => setTimeout(r, ms));
     const rnd = (a, b) => a + Math.random() * (b - a);
     const gauss = () => { let u = 0, v = 0; while (!u) u = Math.random(); while (!v) v = Math.random(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); };
+    const txt = el => (el.textContent || '').replace(/\s+/g, ' ').trim();
 
     /* ================================================================== *
      *  2. CONFIG
@@ -40,8 +41,9 @@
         girl: true, skin: 'gato',
         eye: false, eyeLvl: 0.25,
         perf: null, anx: 0, metaGoal: 10,
-        pos: null, min: false,
+        pos: null, min: false, tab: 'read',
         musicUrl: '', musicKey: '', musicVol: 0.6,
+        ytUrl: '', ytShow: true, duck: true,
     };
     const cfg = { ...DEFAULTS };
     try { Object.assign(cfg, JSON.parse(localStorage.getItem(CFG_KEY) || '{}')); } catch (e) { }
@@ -64,7 +66,7 @@
     (() => {
         const KEY = 'serei sempre legal';
         const LOCKS = new Set(['modal-open', 'no-scroll', 'locked', 'overflow-hidden', 'is-locked', 'scroll-lock', 'blur']);
-        const MINE = '#ink-panel,#ink-eye,#ink-order,#ink-dbg,#ink-auto-arrange-btn';
+        const MINE = '#ink-panel,#ink-eye-el,#ink-order,#ink-dbg,#ink-auto-row';
         let popupAt = 0, timer = 0, lastRun = 0;
 
         const isMine = el => !!(el && el.closest && el.closest(MINE));
@@ -73,7 +75,7 @@
             const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
                 acceptNode: n => {
                     const p = n.parentElement;
-                    if (!p || /^(SCRIPT|STYLE|NOSCRIPT|TEXTAREA)$/.test(p.tagName)) return NodeFilter.FILTER_REJECT;
+                    if (!p || /^(SCRIPT|STYLE|NOSCRIPT|TEXTAREA|INPUT)$/.test(p.tagName)) return NodeFilter.FILTER_REJECT;
                     return NodeFilter.FILTER_ACCEPT;
                 }
             });
@@ -214,7 +216,7 @@
         const out = [];
         const maxN = isPerf() ? 2 : 5;
         for (const e of list) {
-            if (e === document.documentElement || e === document.body || e.closest('#ink-panel,#ink-eye')) continue;
+            if (e === document.documentElement || e === document.body || e.closest('#ink-panel,#ink-eye-el')) continue;
             const r = e.getBoundingClientRect();
             if (isPerf()) out.push(`${r.left | 0},${r.top | 0},${r.width | 0},${r.height | 0}`);
             else {
@@ -324,102 +326,162 @@
 
     /* ================================================================== *
      *  6. BUBBLE SORTER (Auto-Arrumar Mangá/HQ)
+     *  Corrigido: o botão era colocado no 1º <div> do modal (a "alça"
+     *  de arrastar, 4px de altura) e ficava invisível. Agora entra
+     *  logo abaixo do texto "Arraste pra mudar a ordem…".
      * ================================================================== */
     const BubbleSorter = (() => {
-        // Encontra as coordenadas originais do balão no DOM
-        function getCoords(el) {
-            const x = parseFloat(el.dataset.x || el.dataset.left || el.dataset.cx || el.style.left || 0);
-            const y = parseFloat(el.dataset.y || el.dataset.top || el.dataset.cy || el.style.top || 0);
-            return { x, y };
+        let isOpen = false;
+
+        function findModal() {
+            const m = document.querySelector('.bz-order');
+            if (m) return m;
+            for (const b of $$('button')) {
+                if (!/^reescanear$/i.test(txt(b)) || b.closest('#ink-panel')) continue;
+                let el = b.parentElement;
+                for (let i = 0; i < 8 && el && el !== document.body; i++, el = el.parentElement) {
+                    if (/arrumar as bolhas/i.test(el.textContent || '') && $$('button', el).some(x => /^salvar$/i.test(txt(x)))) return el;
+                }
+            }
+            return null;
         }
 
-        function sortBubbles(mode) {
-            const modal = document.querySelector('.bz-order'); // Classe do modal do site
+        function getItems(modal) {
+            let items = $$('[draggable="true"]', modal);
+            if (items.length >= 2) return items;
+            const imgs = $$('img,canvas', modal).filter(i => i.offsetWidth > 10);
+            if (imgs.length < 2) return [];
+            let c = imgs[0].parentElement;
+            while (c && c !== modal && imgs.some(i => !c.contains(i))) c = c.parentElement;
+            if (!c) return [];
+            return [...c.children].filter(k => k.matches('img,canvas') || k.querySelector('img,canvas'));
+        }
+
+        const isNum = v => typeof v === 'number' && isFinite(v);
+        function xyFrom(o, d = 0) {
+            if (!o || typeof o !== 'object' || d > 3 || o instanceof Node) return null;
+            for (const [kx, ky] of [['x', 'y'], ['left', 'top'], ['cx', 'cy'], ['x0', 'y0']]) {
+                if (isNum(o[kx]) && isNum(o[ky])) {
+                    const w = isNum(o.w) ? o.w : isNum(o.width) ? o.width : 0;
+                    const h = isNum(o.h) ? o.h : isNum(o.height) ? o.height : 0;
+                    return { x: o[kx] + w / 2, y: o[ky] + h / 2 };
+                }
+            }
+            if (Array.isArray(o) && isNum(o[0]) && isNum(o[1])) return { x: o[0] + (isNum(o[2]) ? o[2] / 2 : 0), y: o[1] + (isNum(o[3]) ? o[3] / 2 : 0) };
+            for (const k of Object.keys(o)) {
+                if (k === 'children' || k === 'ref' || k === 'key' || typeof o[k] === 'function') continue;
+                let r = null; try { r = xyFrom(o[k], d + 1); } catch (e) { }
+                if (r) return r;
+            }
+            return null;
+        }
+
+        function coordsOf(el) {
+            const ds = el.dataset || {};
+            const a = parseFloat(ds.x ?? ds.left ?? ds.cx), b = parseFloat(ds.y ?? ds.top ?? ds.cy);
+            if (isFinite(a) && isFinite(b)) return { x: a, y: b };
+            const keys = Object.keys(el);
+            const pk = keys.find(k => k.startsWith('__reactProps$'));
+            const fk = keys.find(k => k.startsWith('__reactFiber$'));
+            if (pk) { const r = xyFrom(el[pk]); if (r) return r; }
+            let f = fk ? el[fk] : null;
+            for (let i = 0; f && i < 5; i++, f = f.return) { const r = xyFrom(f.memoizedProps); if (r) return r; }
+            return null;
+        }
+
+        function orderByCoords(pts, mode) {
+            const ys = pts.map(p => p.c.y);
+            const span = (Math.max(...ys) - Math.min(...ys)) || 1;
+            const norm = Math.max(...pts.map(p => Math.max(Math.abs(p.c.x), Math.abs(p.c.y)))) <= 1.5;
+            const tol = norm ? 0.05 : Math.max(30, span * 0.06);
+            const byY = pts.slice().sort((a, b) => a.c.y - b.c.y);
+            const rows = []; let row = [byY[0]];
+            for (let i = 1; i < byY.length; i++) {
+                if (byY[i].c.y - row[0].c.y <= tol) row.push(byY[i]);
+                else { rows.push(row); row = [byY[i]]; }
+            }
+            rows.push(row);
+            return rows.flatMap(r => r.sort((a, b) => mode === 'manga' ? b.c.x - a.c.x : a.c.x - b.c.x)).map(p => p.el);
+        }
+
+        async function reorder(sorted) {
+            const cur = () => { const m = findModal(); return m ? getItems(m) : []; };
+            const same = () => { const c = cur(); return sorted.every((e, i) => c[i] === e); };
+            if (same()) return 'ok';
+            const fire = (el, type, d) => {
+                const r = el.getBoundingClientRect();
+                try { el.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, composed: true, dataTransfer: d, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 })); } catch (e) { }
+            };
+            for (let i = 0; i < sorted.length; i++) {
+                const c = cur();
+                if (!c.length || c[i] === sorted[i]) continue;
+                let d = null; try { d = new DataTransfer(); } catch (e) { }
+                fire(sorted[i], 'dragstart', d); await sleep(30);
+                fire(c[i], 'dragenter', d); fire(c[i], 'dragover', d); fire(c[i], 'drop', d);
+                fire(sorted[i], 'dragend', d);
+                await sleep(60);
+            }
+            if (same()) return 'dnd';
+            const parent = sorted[0].parentNode;
+            if (parent) sorted.forEach(e => parent.appendChild(e));
+            return 'dom';
+        }
+
+        async function run(mode) {
+            const modal = findModal();
             if (!modal) return;
-
-            // Pega todos os elementos arrastáveis (os balões)
-            let items = Array.from(modal.querySelectorAll('[draggable="true"], .bz-order-item, [class*="item"]'));
-            // Filtra lixos (botões, headers)
-            items = items.filter(el => el.offsetWidth > 20 && !el.querySelector('button:not(.delete)') && !el.id.includes('ink'));
-
-            if (items.length < 2) {
-                setStatus('⚠ Não encontrei os balões para ordenar.');
+            const items = getItems(modal);
+            if (items.length < 2) { setStatus(items.length ? '⚠ Só 1 balão, nada pra ordenar' : '⚠ Não achei os balões nesta tela'); return; }
+            const pts = items.map(el => ({ el, c: coordsOf(el) }));
+            if (pts.some(p => !p.c) || new Set(pts.map(p => p.c.x + ',' + p.c.y)).size < 2) {
+                setStatus('⚠ Não achei a posição dos balões (mande o HTML do modal que eu ajusto).');
                 return;
             }
-
-            items.sort((a, b) => {
-                const ca = getCoords(a);
-                const cb = getCoords(b);
-
-                // Se tiver coordenadas (eixo Y é a linha, X é a coluna)
-                if (ca.x !== 0 || ca.y !== 0 || cb.x !== 0 || cb.y !== 0) {
-                    // Se a diferença no eixo Y for maior que 30px, significa que estão em linhas diferentes
-                    if (Math.abs(ca.y - cb.y) > 30) {
-                        return ca.y - cb.y;
-                    }
-                    // Se estão na mesma linha, ordena no eixo X (Mangá = direita p/ esquerda, HQ = esquerda p/ direita)
-                    return mode === 'manga' ? cb.x - ca.x : ca.x - cb.x;
-                }
-                
-                // Fallback se não tiver coordenadas
-                return 0;
-            });
-
-            const parent = items[0].parentNode;
-            if (parent) {
-                // Move os elementos no DOM para a nova ordem
-                items.forEach(item => parent.appendChild(item));
-                // Dispara eventos para frameworks (React/Vue) atualizarem o estado
-                items.forEach(item => {
-                    item.dispatchEvent(new Event('change', { bubbles: true }));
-                    item.dispatchEvent(new Event('input', { bubbles: true }));
-                });
-            }
+            const res = await reorder(orderByCoords(pts, mode));
+            setStatus(res === 'dom'
+                ? '⚠ Reordenei só visualmente. Confira os números antes de Salvar.'
+                : `✓ ${items.length} balões arrumados (${mode === 'manga' ? 'mangá' : 'HQ'})`);
         }
 
         function injectUI() {
-            const modal = document.querySelector('.bz-order');
-            if (!modal || modal.querySelector('#ink-auto-arrange-btn')) return;
-
-            // Procura o container do título ou o header
-            const header = modal.querySelector('.title, h2, h3, header') || modal;
+            const modal = findModal();
+            if (!modal || modal.querySelector('#ink-auto-row')) return;
+            const row = document.createElement('div');
+            row.id = 'ink-auto-row';
+            row.style.cssText = 'display:flex;gap:8px;margin:8px 0;align-items:center;';
+            const css = 'color:#fff;border:none;border-radius:10px;padding:9px 14px;font-weight:700;cursor:pointer;font-size:13px;font-family:inherit;';
             const btn = document.createElement('button');
-            btn.id = 'ink-auto-arrange-btn';
-            btn.type = 'button';
-            
-            const updateBtnText = () => {
-                btn.textContent = cfg.manga ? '↔ Auto Mangá' : '↔ Auto HQ';
-                btn.style.background = cfg.manga ? '#e8573f' : '#ff69b4';
-            };
-            updateBtnText();
-
-            btn.style.cssText = 'color:#fff; border:none; border-radius:8px; padding:6px 12px; font-weight:bold; cursor:pointer; font-size:12px; margin-left:10px; display:inline-flex; align-items:center; transition:0.2s; box-shadow:0 2px 8px rgba(0,0,0,0.2);';
-            
-            btn.onclick = (e) => {
+            const tog = document.createElement('button');
+            btn.type = tog.type = 'button';
+            btn.style.cssText = css + 'flex:1;';
+            tog.style.cssText = css + 'background:rgba(255,255,255,.14);';
+            tog.textContent = '⇄';
+            tog.title = 'Trocar entre HQ (← →) e Mangá (→ ←)';
+            const paint = () => { btn.textContent = cfg.manga ? '↔ Auto Mangá (→ ←)' : '↔ Auto HQ (← →)'; btn.style.background = cfg.manga ? '#e8573f' : '#ff69b4'; };
+            paint();
+            tog.onclick = e => { e.preventDefault(); cfg.manga = !cfg.manga; saveCfg(); paint(); refreshPanel(); };
+            btn.onclick = async e => {
                 e.preventDefault();
-                sortBubbles(cfg.manga ? 'manga' : 'hq');
-                const oldText = btn.textContent;
-                btn.textContent = '✓ Arrumado!';
-                setTimeout(() => { btn.textContent = oldText; }, 1500);
+                btn.textContent = '⏳ Arrumando…';
+                try { await run(cfg.manga ? 'manga' : 'hq'); } catch (err) { setStatus('⚠ ' + (err.message || err)); }
+                setTimeout(paint, 1200);
             };
-
-            // Insere no cabeçalho (onde fica o botão "Reescanear")
-            const headerContainer = modal.querySelector('div'); 
-            if (headerContainer) {
-                headerContainer.appendChild(btn);
-            } else {
-                modal.prepend(btn);
-            }
+            row.append(btn, tog);
+            const hint = $$('p,div,span', modal).find(e => e.childElementCount === 0 && /arraste pra mudar/i.test(e.textContent || ''));
+            const re = $$('button', modal).find(b => /^reescanear$/i.test(txt(b)));
+            if (hint) hint.insertAdjacentElement('afterend', row);
+            else if (re && re.parentElement) re.parentElement.insertAdjacentElement('afterend', row);
+            else modal.prepend(row);
         }
 
         function start() {
-            // Fica observando a DOM para ver se a tela "Arrumar as bolhas" abriu
             setInterval(() => {
-                if (document.querySelector('.bz-order')) injectUI();
-            }, 1000);
+                isOpen = !!findModal();
+                if (isOpen) injectUI();
+            }, isPerf() ? 1200 : 700);
         }
 
-        return { start };
+        return { start, get isOpen() { return isOpen; } };
     })();
 
     /* ================================================================== *
@@ -429,10 +491,10 @@
         const KEY = 'ink_ord_cfg';
         const CAP_LINK = 'a[href*="/ler/"],a[href*="/capitulo/"],a[href*="/cap/"],a[href*="/chapter/"]';
         const RX_NUM = /(?:capitulo|cap|ch|chapter|ler|ep)[\-\/]?(\d+(?:[.,]\d+)?)/i;
-        const state = { mode: 'asc', dir: 'west', orig: new WeakMap() };
-        try { const j = JSON.parse(localStorage.getItem(KEY) || '{}'); if (j.mode) state.mode = j.mode; if (j.dir) state.dir = j.dir; } catch (e) { }
+        const state = { mode: 'asc', dir: cfg.manga ? 'manga' : 'west', orig: new WeakMap() };
+        try { const j = JSON.parse(localStorage.getItem(KEY) || '{}'); if (j.mode) state.mode = j.mode; } catch (e) { }
 
-        const save = () => { try { localStorage.setItem(KEY, JSON.stringify({ mode: state.mode, dir: state.dir })); } catch (e) { } };
+        const save = () => { try { localStorage.setItem(KEY, JSON.stringify({ mode: state.mode })); } catch (e) { } };
         const status = t => { const el = $('ink-order-status'); if (el && el.textContent !== t) el.textContent = t; };
 
         function findContainer() {
@@ -473,6 +535,9 @@
             return out;
         }
 
+        const modeLabel = () => ({ asc: 'Crescente', desc: 'Decrescente', orig: 'Original' }[state.mode] || 'Ordenar');
+        const dirLabel = () => state.dir === 'manga' ? 'Mangá' : 'Ocidental';
+
         function apply() {
             const box = findContainer();
             if (!box) { status('⚠ Lista não encontrada'); return false; }
@@ -492,8 +557,6 @@
             if (state.dir === 'manga') { box.style.direction = 'rtl'; box.style.flexDirection = 'row-reverse'; }
             else { box.style.direction = ''; box.style.flexDirection = ''; }
 
-            cfg.manga = state.dir === 'manga';
-            saveCfg();
             status(`✓ ${modeLabel()} · ${dirLabel()}`);
             paint();
             return true;
@@ -523,16 +586,14 @@
             state.mode = 'orig';
             save();
             status('✓ Ordem original restaurada');
+            paint();
             return true;
         }
 
         function cycleMode() {
             state.mode = state.mode === 'asc' ? 'desc' : state.mode === 'desc' ? 'orig' : 'asc';
-            save(); apply(); paint();
+            save(); apply();
         }
-
-        const modeLabel = () => ({ asc: 'Crescente', desc: 'Decrescente', orig: 'Original' }[state.mode] || 'Ordenar');
-        const dirLabel = () => state.dir === 'manga' ? 'Mangá' : 'Ocidental';
 
         function paint() {
             const bar = $('ink-order');
@@ -542,12 +603,21 @@
             bar.querySelectorAll('[data-dir]').forEach(b => b.classList.toggle('on', b.dataset.dir === state.dir));
         }
 
+        // chamado pelo chip "Mangá" do painel
+        function sync() {
+            state.dir = cfg.manga ? 'manga' : 'west';
+            if ($('ink-order')) apply();
+        }
+
         function build() {
             if ($('ink-order')) return;
-            if (!location.pathname.startsWith('/ler/') && !/(manga|manhwa|hq|comic|obra|capitulo)/i.test(location.pathname)) return;
+            // NÃO monta na tela de leitura: lá os links /ler/ são o carrossel "Próximas leituras"
+            if (location.pathname.startsWith('/ler/')) return;
+            if (!/(manga|manhwa|hq|comic|obra|capitulo|titulo|series)/i.test(location.pathname)) return;
             const box = findContainer();
             if (!box || collectItems(box).length < 2) return;
 
+            state.dir = cfg.manga ? 'manga' : 'west';
             const bar = document.createElement('div');
             bar.id = 'ink-order';
             bar.innerHTML = `
@@ -568,13 +638,17 @@
             bar.querySelector('[data-ord="sort"]').onclick = cycleMode;
             bar.querySelector('[data-ord="clean"]').onclick = clean;
             bar.querySelector('[data-ord="reset"]').onclick = reset;
-            bar.querySelectorAll('[data-dir]').forEach(b => b.onclick = () => { state.dir = b.dataset.dir; save(); apply(); paint(); });
+            bar.querySelectorAll('[data-dir]').forEach(b => b.onclick = () => {
+                state.dir = b.dataset.dir;
+                cfg.manga = state.dir === 'manga'; saveCfg(); refreshPanel();
+                apply();
+            });
 
             paint();
             if (state.mode !== 'orig' || state.dir !== 'west') apply();
         }
 
-        return { build, apply, paint };
+        return { build, apply, paint, sync };
     })();
 
     /* ================================================================== *
@@ -644,7 +718,7 @@
         return Math.min(9000, Math.max(300, ms / sp));
     }
     const userIdle = () => Date.now() - lastUser > 1800;
-    const paused = () => document.hidden || !!document.querySelector('.bz-order') || !userIdle();
+    const paused = () => document.hidden || BubbleSorter.isOpen || !!document.querySelector('.bz-order') || !userIdle();
 
     async function humanWait(ms, st, id) {
         let left = ms, last = performance.now(), ui = 0, chk = 0;
@@ -749,7 +823,7 @@
         let list; try { list = document.elementsFromPoint(innerWidth / 2, innerHeight * 0.45); } catch (e) { return ''; }
         const out = [];
         for (const e of list) {
-            if (e === document.documentElement || e === document.body || e.closest('#ink-panel,#ink-eye')) continue;
+            if (e === document.documentElement || e === document.body || e.closest('#ink-panel,#ink-eye-el')) continue;
             const r = e.getBoundingClientRect();
             let tf = ''; try { tf = getComputedStyle(e).transform; } catch (x) { }
             out.push(`${r.top | 0},${r.height | 0},${tf}`);
@@ -937,7 +1011,7 @@
     const TTS = window.speechSynthesis || null;
     let voices = [];
     const loadVoices = () => { try { voices = TTS ? TTS.getVoices() : []; } catch (e) { voices = []; } };
-    if (TTS) { loadVoices(); try { TTS.addEventListener('voiceschanged', () => { loadVoices(); refreshPanel(); }); } catch (e) { } }
+    if (TTS) { loadVoices(); try { TTS.addEventListener('voiceschanged', () => { loadVoices(); fillVoices(); }); } catch (e) { } }
 
     const VRATES = [0.7, 0.8, 0.9, 1, 1.1, 1.2, 1.3, 1.5, 1.7, 2];
     const isNatural = v => /natural|neural|online/i.test(v.name);
@@ -947,7 +1021,7 @@
         return (br.length ? br : pt).slice().sort((a, b) => isNatural(b) - isNatural(a));
     }
     const currentVoice = () => { const l = ptVoices(); return l.find(v => v.name === cfg.vname) || l[0] || null; };
-    
+
     function mkUtt(text) {
         const u = new SpeechSynthesisUtterance(text);
         const v = currentVoice();
@@ -981,7 +1055,7 @@
     const cancelSpeech = () => { try { if (TTS) TTS.cancel(); } catch (e) { } };
 
     /* ================================================================== *
-     * 10. OCR
+     * 10. OCR  (a captura de tela depende da extensão: window.postMessage inkCap)
      * ================================================================== */
     const OCR = { worker: null, promise: null };
     const ocrBase = () => {
@@ -993,7 +1067,7 @@
         if (OCR.worker) return Promise.resolve(OCR.worker);
         if (OCR.promise) return OCR.promise;
         OCR.promise = (async () => {
-            if (typeof Tesseract === 'undefined') throw new Error('Tesseract não carregou.');
+            if (typeof Tesseract === 'undefined') throw new Error('Tesseract não carregou (precisa da extensão).');
             setStatus('⏳ Carregando OCR…');
             const base = ocrBase();
             const opts = { logger: () => { }, errorHandler: e => console.warn('[Ink-OCR]', e) };
@@ -1018,7 +1092,7 @@
     function capture() {
         return new Promise((res, rej) => {
             const id = ++capSeq;
-            const t = setTimeout(() => { capWait.delete(id); rej(new Error('captura não respondeu')); }, 5000);
+            const t = setTimeout(() => { capWait.delete(id); rej(new Error('captura não respondeu (precisa da extensão)')); }, 5000);
             capWait.set(id, d => { clearTimeout(t); d.err ? rej(new Error(d.err)) : res(d.data); });
             window.postMessage({ inkCap: id }, '*');
         });
@@ -1083,7 +1157,7 @@
             try { list = document.elementsFromPoint(innerWidth / 2, innerHeight * 0.45); } catch (e) { }
             for (const e of list) {
                 if (e === document.documentElement || e === document.body) break;
-                if (e.closest && e.closest('#ink-panel,#ink-eye,#ink-dbg')) continue;
+                if (e.closest && e.closest('#ink-panel,#ink-eye-el,#ink-dbg')) continue;
                 if (e.tagName === 'IMG' || e.tagName === 'CANVAS') return e;
             }
             return null;
@@ -1152,13 +1226,96 @@
     }
 
     /* ================================================================== *
-     * 11. MÚSICA (Drive via Apps Script)
+     * 11. MÚSICA — YouTube (iframe embed) + Drive (Apps Script)
      * ================================================================== */
     const MUS = { list: [], cur: -1, audio: null, blob: null, shuffle: false };
     try { MUS.list = JSON.parse(localStorage.getItem('ink_music_list') || '[]'); } catch (e) { }
     const musVol = () => cfg.musicVol == null ? 0.6 : cfg.musicVol;
     const musStatus = t => { const el = $('ink-music-status'); if (el && el.textContent !== t) el.textContent = t; };
+    const DUCK_PCT = 12;
 
+    /* ---- YouTube: player oficial embutido, controlado por postMessage (sem baixar nada) ---- */
+    const YT = { active: false, ready: false, playing: false, ducked: false, frame: null, timer: 0 };
+    const ytPct = () => YT.ducked ? Math.min(DUCK_PCT, Math.round(musVol() * 100)) : Math.round(musVol() * 100);
+
+    function ytCmd(func, args) {
+        try {
+            if (YT.frame && YT.frame.contentWindow)
+                YT.frame.contentWindow.postMessage(JSON.stringify({ event: 'command', func, args: args || [] }), '*');
+        } catch (e) { }
+    }
+
+    function ytParse(u) {
+        u = (u || '').trim();
+        if (!u) return null;
+        if (/^[\w-]{11}$/.test(u)) return { id: u, list: '' };
+        if (/^(PL|UU|OL|FL|RD)[\w-]{10,}$/.test(u)) return { id: '', list: u };
+        try {
+            const x = new URL(/^https?:/i.test(u) ? u : 'https://' + u);
+            const list = x.searchParams.get('list') || '';
+            let id = '';
+            if (/(^|\.)youtu\.be$/.test(x.hostname)) id = x.pathname.slice(1).split('/')[0];
+            else if (/(^|\.)youtube(-nocookie)?\.com$/.test(x.hostname)) {
+                id = x.searchParams.get('v') || '';
+                const m = /^\/(?:shorts|embed|live|v)\/([\w-]{11})/.exec(x.pathname);
+                if (!id && m) id = m[1];
+            } else return null;
+            if (id && !/^[\w-]{11}$/.test(id)) id = '';
+            return (id || list) ? { id, list } : null;
+        } catch (e) { return null; }
+    }
+
+    function ytStop() {
+        clearTimeout(YT.timer);
+        const box = $('ink-yt-box');
+        if (box) box.textContent = '';
+        YT.active = false; YT.ready = false; YT.playing = false; YT.ducked = false; YT.frame = null;
+        musPaintBtn();
+    }
+
+    function ytLoad() {
+        const inp = $('ink-yt-url');
+        const p = ytParse(inp ? inp.value : cfg.ytUrl);
+        if (!p) { musStatus('⚠ Link do YouTube inválido'); return; }
+        cfg.ytUrl = inp ? inp.value.trim() : cfg.ytUrl; saveCfg();
+        if (MUS.audio && !MUS.audio.paused) MUS.audio.pause();
+        ytStop();
+        const q = new URLSearchParams({ enablejsapi: '1', autoplay: '1', playsinline: '1', rel: '0', origin: location.origin });
+        if (p.list) q.set('list', p.list);
+        const f = document.createElement('iframe');
+        f.src = `https://www.youtube.com/embed/${p.id || 'videoseries'}?${q}`;
+        f.allow = 'autoplay; encrypted-media; picture-in-picture';
+        f.referrerPolicy = 'strict-origin-when-cross-origin';
+        f.title = 'YouTube';
+        f.addEventListener('load', () => {
+            try { f.contentWindow.postMessage(JSON.stringify({ event: 'listening', id: 1, channel: 'widget' }), '*'); } catch (e) { }
+            setTimeout(() => ytCmd('setVolume', [ytPct()]), 900);
+        });
+        $('ink-yt-box').appendChild(f);
+        YT.frame = f; YT.active = true; YT.playing = true;
+        musStatus('⏳ Carregando YouTube…');
+        musPaintBtn();
+        YT.timer = setTimeout(() => { if (!YT.ready) musStatus('⚠ O player não respondeu. O site pode estar bloqueando o YouTube.'); }, 8000);
+    }
+
+    window.addEventListener('message', e => {
+        if (!YT.frame || e.source !== YT.frame.contentWindow) return;
+        let d = e.data;
+        if (typeof d === 'string') { try { d = JSON.parse(d); } catch (x) { return; } }
+        if (!d || typeof d !== 'object') return;
+        if (!YT.ready) { YT.ready = true; clearTimeout(YT.timer); ytCmd('setVolume', [ytPct()]); musStatus('🎵 YouTube'); }
+        const s = d.event === 'onStateChange' ? d.info : (d.info && d.info.playerState);
+        if (typeof s === 'number') { YT.playing = s === 1 || s === 3; musPaintBtn(); }
+        const vd = d.info && d.info.videoData;
+        if (vd && vd.title) musStatus('🎵 ' + vd.title);
+    });
+
+    // avisa se o CSP do site bloquear o iframe do YouTube
+    document.addEventListener('securitypolicyviolation', e => {
+        if (/youtube/i.test(e.blockedURI || '')) musStatus('⚠ O site bloqueou o player do YouTube (CSP).');
+    });
+
+    /* ---- Drive ---- */
     async function musApi(action, data) {
         if (!cfg.musicUrl) throw new Error('URL do app da web não configurada');
         const r = await fetch(cfg.musicUrl, {
@@ -1190,7 +1347,13 @@
         }
         return MUS.audio;
     }
+    // Baixa o volume da música (YouTube ou Drive) enquanto o audiolivro fala
     function musDuck(on) {
+        if (on && cfg.duck === false) return;
+        if (YT.active) {
+            if (on && !YT.ducked) { YT.ducked = true; ytCmd('setVolume', [ytPct()]); }
+            else if (!on && YT.ducked) { YT.ducked = false; ytCmd('setVolume', [ytPct()]); }
+        }
         const a = MUS.audio;
         if (!a || !a.src || a.paused) return;
         if (on) { if (a._ducked) return; a._ducked = true; a._preVol = a.volume; a.volume = Math.min(a.volume, 0.12); }
@@ -1199,6 +1362,7 @@
     async function musPlay(i) {
         const t = MUS.list[i];
         if (!t) return;
+        if (YT.active) ytStop();
         const a = musAudio();
         MUS.cur = i; musPaintList();
         try {
@@ -1223,6 +1387,7 @@
         }
     }
     function musNext(d) {
+        if (YT.active) { ytCmd(d > 0 ? 'nextVideo' : 'previousVideo'); return; }
         const n = MUS.list.length;
         if (!n) return;
         if (MUS.shuffle && n > 1) { let j; do { j = Math.floor(Math.random() * n); } while (j === MUS.cur); musPlay(j); return; }
@@ -1230,18 +1395,23 @@
         musPlay(((base + d) % n + n) % n);
     }
     function musToggle() {
+        if (YT.active) {
+            ytCmd(YT.playing ? 'pauseVideo' : 'playVideo');
+            YT.playing = !YT.playing; musPaintBtn(); return;
+        }
         const a = musAudio();
-        if (!a.src) { if (MUS.list.length) musPlay(Math.max(0, MUS.cur)); else musStatus('Lista vazia'); return; }
+        if (!a.src) { if (MUS.list.length) musPlay(Math.max(0, MUS.cur)); else musStatus('Cole um link do YouTube ou sincronize o Drive'); return; }
         if (a.paused) a.play().catch(() => { }); else a.pause();
     }
     function musVolStep(d) {
         cfg.musicVol = Math.min(1, Math.max(0, Math.round((musVol() + d) * 10) / 10));
         saveCfg();
+        if (YT.active) ytCmd('setVolume', [ytPct()]);
         if (MUS.audio) { if (MUS.audio._ducked) MUS.audio._preVol = cfg.musicVol; else MUS.audio.volume = cfg.musicVol; }
         musPaintBtn();
     }
     function musPaintBtn() {
-        const playing = !!(MUS.audio && !MUS.audio.paused && MUS.audio.src);
+        const playing = YT.active ? YT.playing : !!(MUS.audio && !MUS.audio.paused && MUS.audio.src);
         const p = $('ink-music-play');
         if (p) p.textContent = playing ? '⏸' : '▶';
         const v = $('ink-music-vol');
@@ -1267,7 +1437,6 @@
      * ================================================================== */
     const meta = { on: false, done: 0, seen: new Set() };
     const metaKey = st => { const c = st.p != null ? st.p : st.pg; return c == null ? null : location.pathname + '#' + c; };
-    const pendingMissions = () => { try { return (JSON.parse(localStorage.getItem('ink_missions') || '{}').list || []).filter(x => !x.done && x.n > x.c); } catch (e) { return []; } };
 
     function metaToggle() {
         if (meta.on) { meta.on = false; metaPaint(); setStatus('Meta desligada'); return; }
@@ -1310,7 +1479,7 @@
 
     const CSS = `
 #ink-panel{position:fixed;bottom:12px;right:12px;z-index:2147483000;width:min(248px,calc(100vw - 16px));font:12.5px/1.3 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
-box-sizing:border-box;padding:8px;border:2px solid var(--ib-line);border-radius:20px;background:var(--ib-bg);color:var(--ib-txt);
+box-sizing:border-box;padding:8px;border:2px solid var(--ib-line);border-radius:20px;background:var(--ib-bg);color:var(--ib-txt);max-height:calc(100vh - 24px);overflow-y:auto;overflow-x:hidden;
 --ib-bg:rgba(255,240,245,.96);--ib-card:rgba(255,182,193,.42);--ib-card2:rgba(255,105,180,.55);--ib-line:rgba(255,192,203,.85);--ib-txt:#5c4a4a;--ib-dim:#a88b8b;--ib-ac:#ff69b4;
 box-shadow:0 8px 24px rgba(255,105,180,.28),inset 0 1px 0 rgba(255,255,255,.5);-webkit-backdrop-filter:blur(14px) saturate(1.3);backdrop-filter:blur(14px) saturate(1.3);}
 #ink-panel.mob{background:rgba(255,240,245,.99)}
@@ -1322,33 +1491,45 @@ box-shadow:0 8px 24px rgba(255,105,180,.28),inset 0 1px 0 rgba(255,255,255,.5);-
 #ink-panel .ia-title{flex:1;font-weight:800;font-size:13px;color:var(--ib-ac);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #ink-panel .ia-ib{width:26px;height:26px;border-radius:8px;background:var(--ib-card);color:var(--ib-txt);flex:none}
 #ink-panel.mob .ia-ib{width:36px;height:36px;border-radius:11px}
+#ink-panel .ia-tabs{display:flex;gap:4px;margin-bottom:4px}
+#ink-panel .ia-tab{flex:1;min-height:28px;border-radius:9px;background:var(--ib-card);border:1px solid var(--ib-line);color:var(--ib-txt);font-size:11.5px;font-weight:700}
+#ink-panel .ia-tab.on{background:var(--ib-ac);color:#fff;border-color:var(--ib-ac)}
+#ink-panel .ia-pane.hide{display:none}
+#ink-panel .ia-pane.ghost{position:absolute;left:-9999px;top:0;width:230px}
 #ink-panel .ia-go{width:100%;height:38px;border-radius:12px;font-weight:800;font-size:13px;color:#fff;background:linear-gradient(135deg,var(--ib-ac),#ffb6c1);box-shadow:0 4px 12px rgba(255,105,180,.4);margin-top:4px}
 #ink-panel.mob .ia-go{height:46px}
 #ink-panel.run .ia-go{background:var(--ib-card2);box-shadow:none;color:var(--ib-txt)}
 #ink-panel .ia-row{display:flex;gap:4px;margin-top:6px;align-items:stretch}
-#ink-panel .ia-step{display:flex;align-items:center;border-radius:11px;background:var(--ib-card);flex:none}
-#ink-panel .ia-step button{width:28px;height:32px;font-size:16px;line-height:1;color:var(--ib-txt)}
-#ink-panel.mob .ia-step button{width:34px;height:42px}
-#ink-panel .ia-val{min-width:34px;text-align:center;font-weight:600;font-size:12px;align-self:center;color:var(--ib-txt)}
+#ink-panel .ia-row>.ia-chip{flex:1;min-height:34px;flex-direction:row;font-size:12px}
+#ink-panel.mob .ia-row>.ia-chip{min-height:42px}
+#ink-panel .ia-val{min-width:38px;flex:none;text-align:center;font-weight:600;font-size:12px;align-self:center;color:var(--ib-txt)}
 #ink-panel .ia-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;margin-top:6px}
-#ink-panel .ia-chip{flex-direction:column;min-height:42px;padding:4px;border-radius:11px;background:var(--ib-card);border:1px solid var(--ib-line);color:var(--ib-txt);font-size:9.5px;font-weight:600;gap:2px}
+#ink-panel .ia-chip{flex-direction:column;min-height:42px;padding:4px;border-radius:11px;background:var(--ib-card);border:1px solid var(--ib-line);color:var(--ib-txt);font-size:9.5px;font-weight:600;gap:2px;text-align:center}
 #ink-panel.mob .ia-chip{min-height:50px}
 #ink-panel .ia-chip.on{background:var(--ib-ac);color:#fff;border-color:var(--ib-ac)}
 #ink-panel .ia-chip svg{width:15px;height:15px}
+#ink-panel .ia-inp{display:block;width:100%;margin-top:4px;padding:6px 8px;border-radius:9px;border:1px solid var(--ib-line);background:var(--ib-card);color:var(--ib-txt);font:inherit;font-size:11.5px;outline:none}
+#ink-panel .ia-inp::placeholder{color:var(--ib-dim)}
 #ink-panel .ia-status{margin-top:6px;padding:5px 8px;border-radius:9px;background:var(--ib-card);color:var(--ib-txt);font-size:11.5px;line-height:1.3;word-break:break-word;min-height:20px;border:1px solid var(--ib-line)}
 #ink-panel.run .ia-status{border-color:var(--ib-ac)}
 #ink-panel .ia-sec{margin:8px 2px 4px;font-size:9.5px;letter-spacing:.9px;text-transform:uppercase;color:var(--ib-dim);font-weight:700}
 #ink-panel .ia-skins{display:flex;gap:4px}
 #ink-panel .ia-skin{flex:1;min-height:30px;border-radius:10px;background:var(--ib-card);border:1px solid var(--ib-line);color:var(--ib-txt);font-size:11.5px;font-weight:600}
 #ink-panel .ia-skin.on{background:var(--ib-ac);color:#fff;border-color:var(--ib-ac)}
-#ink-panel.min{width:auto;padding:6px;border-radius:14px}
-#ink-panel.min .ia-title,#ink-panel.min #ink-body{display:none}
-#ink-panel.min #ink-mini-go{display:inline-flex}
+#ink-panel.min{width:auto;padding:6px;border-radius:14px;overflow:visible}
+#ink-panel.min .ia-title{display:none}
+#ink-panel.min #ink-body{position:absolute;left:-9999px;top:0;width:232px}
 #ink-panel #ink-mini-go{display:none;width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,var(--ib-ac),#ffb6c1);color:#fff}
+#ink-panel.min #ink-mini-go{display:inline-flex}
+#ink-panel #ink-yt-box{margin-top:6px;border-radius:10px;overflow:hidden;aspect-ratio:16/9;background:#000}
+#ink-panel #ink-yt-box:empty{display:none}
+#ink-panel #ink-yt-box.off{position:absolute;left:-9999px;top:0;width:200px;height:113px;margin:0}
+#ink-panel #ink-yt-box iframe{width:100%;height:100%;border:0;display:block}
+#ink-panel .ia-mstat{margin-top:6px;font-size:11px;color:var(--ib-dim);word-break:break-word;min-height:14px}
 #ink-panel .ia-trk{display:flex;align-items:center;padding:4px;border-radius:6px;font-size:11px;color:var(--ib-dim)}
 #ink-panel .ia-trk.on{background:var(--ib-ac);color:#fff}
-#ink-panel .ia-trk-t{flex:1;text-align:left;padding:3px 5px;border-radius:4px;color:inherit;font-size:11px}
-#ink-panel .ia-music-list{max-height:100px;overflow:auto;margin-top:4px;padding:2px;background:var(--ib-card);border-radius:8px;border:1px solid var(--ib-line)}
+#ink-panel .ia-trk-t{flex:1;justify-content:flex-start;text-align:left;padding:3px 5px;border-radius:4px;color:inherit;font-size:11px}
+#ink-panel .ia-music-list{max-height:100px;overflow:auto;margin-top:4px;padding:2px;background:var(--ib-card);border-radius:8px;border:1px solid var(--ib-line);font-size:11px;color:var(--ib-dim)}
 
 #ink-order{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:10px 0 4px;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
 #ink-order .io-pill{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:600;color:#f1efec;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.12);border-radius:11px;padding:8px 12px;cursor:pointer;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
@@ -1367,10 +1548,10 @@ box-shadow:0 8px 24px rgba(255,105,180,.28),inset 0 1px 0 rgba(255,255,255,.5);-
 `;
 
     function injectCSS() {
-        if ($('ink-css') && $('ink-css').dataset.v === '4.1.0') return;
+        if ($('ink-css') && $('ink-css').dataset.v === VERSION) return;
         const old = $('ink-css'); if (old) old.remove();
         const s = document.createElement('style');
-        s.id = 'ink-css'; s.dataset.v = '4.1.0'; s.textContent = CSS;
+        s.id = 'ink-css'; s.dataset.v = VERSION; s.textContent = CSS;
         (document.head || document.documentElement).appendChild(s);
     }
 
@@ -1390,55 +1571,149 @@ box-shadow:0 8px 24px rgba(255,105,180,.28),inset 0 1px 0 rgba(255,255,255,.5);-
   <button class="ia-ib" id="ink-min" title="minimizar">${ICO.min}</button>
 </div>
 <div id="ink-body">
-  <button class="ia-go" id="ink-go">${ICO.play}<span>Ler sozinho</span></button>
-  <div class="ia-row">
-    <button class="ia-chip" id="ink-spd-">−</button>
-    <span class="ia-val" id="ink-spd">1.5×</span>
-    <button class="ia-chip" id="ink-spd+">+</button>
+  <div class="ia-tabs">
+    <button class="ia-tab" data-tab="read">📖 Leitor</button>
+    <button class="ia-tab" data-tab="music">🎵 Música</button>
   </div>
-  <div class="ia-grid">
-    <button class="ia-chip" id="ink-manga">${ICO.book}<span>Mangá</span></button>
-    <button class="ia-chip" id="ink-auto">✓<span>Auto-próx</span></button>
-    <button class="ia-chip" id="ink-voice">${ICO.voice}<span>Voz</span></button>
-    <button class="ia-chip" id="ink-eye">🌙<span>Olho</span></button>
-    <button class="ia-chip" id="ink-girl">👧<span>Menina</span></button>
-    <button class="ia-chip" id="ink-perf">⚡<span>Leve</span></button>
+
+  <div class="ia-pane" data-pane="read">
+    <button class="ia-go" id="ink-go">${ICO.play}<span>Ler sozinho</span></button>
+    <div class="ia-row">
+      <button class="ia-chip" id="ink-spd-">−</button>
+      <span class="ia-val" id="ink-spd">1.5×</span>
+      <button class="ia-chip" id="ink-spd+">+</button>
+    </div>
+    <div class="ia-grid">
+      <button class="ia-chip" id="ink-manga">${ICO.book}<span>Mangá</span></button>
+      <button class="ia-chip" id="ink-auto">✓<span>Auto-próx</span></button>
+      <button class="ia-chip" id="ink-voice">${ICO.voice}<span>Voz</span></button>
+      <button class="ia-chip" id="ink-eye">🌙<span>Olho</span></button>
+      <button class="ia-chip" id="ink-girl">👧<span>Menina</span></button>
+      <button class="ia-chip" id="ink-perf">⚡<span>Leve</span></button>
+      <button class="ia-chip" id="ink-anx">😬<span id="ink-anx-l">Ansiedade</span></button>
+    </div>
+    <div class="ia-sec">Voz do audiolivro</div>
+    <select class="ia-inp" id="ink-vsel"></select>
+    <div class="ia-row">
+      <button class="ia-chip" id="ink-vr-">−</button>
+      <span class="ia-val" id="ink-vr">1×</span>
+      <button class="ia-chip" id="ink-vr+">+</button>
+    </div>
+    <div class="ia-sec">Filtro de olho</div>
+    <div class="ia-row">
+      <button class="ia-chip" id="ink-eyel-">−</button>
+      <span class="ia-val" id="ink-eyel">25%</span>
+      <button class="ia-chip" id="ink-eyel+">+</button>
+    </div>
+    <div class="ia-sec">Skins</div>
+    <div class="ia-skins">
+      ${SKINS.map(k => `<button class="ia-skin" data-skin="${k.id}">${k.emo} ${k.nome}</button>`).join('')}
+    </div>
+    <div class="ia-sec">Missão</div>
+    <div class="ia-row">
+      <button class="ia-chip" id="ink-meta-btn" style="flex:2">🎯 <span id="ink-meta-lbl">Ligar meta</span></button>
+      <button class="ia-chip" id="ink-meta-">−</button>
+      <span class="ia-val" id="ink-meta-val">10</span>
+      <button class="ia-chip" id="ink-meta+">+</button>
+    </div>
   </div>
-  <div class="ia-sec">Skins</div>
-  <div class="ia-skins">
-    ${SKINS.map(k => `<button class="ia-skin" data-skin="${k.id}">${k.emo} ${k.nome}</button>`).join('')}
+
+  <div class="ia-pane" data-pane="music">
+    <div class="ia-sec">YouTube</div>
+    <input class="ia-inp" id="ink-yt-url" type="text" inputmode="url" autocomplete="off" placeholder="Cole o link (vídeo ou playlist)">
+    <div class="ia-row">
+      <button class="ia-chip" id="ink-yt-go" style="flex:2">▶ Tocar link</button>
+      <button class="ia-chip" id="ink-yt-show" title="Mostrar/ocultar vídeo">🎬</button>
+      <button class="ia-chip" id="ink-yt-x" title="Fechar player">✖</button>
+    </div>
+    <div id="ink-yt-box"></div>
+    <div class="ia-sec">Controles</div>
+    <div class="ia-row">
+      <button class="ia-chip" id="ink-music-prev">⏮</button>
+      <button class="ia-chip" id="ink-music-play">▶</button>
+      <button class="ia-chip" id="ink-music-next">⏭</button>
+    </div>
+    <div class="ia-row">
+      <button class="ia-chip" id="ink-music-vol-">🔉 −</button>
+      <span class="ia-val" id="ink-music-vol">60%</span>
+      <button class="ia-chip" id="ink-music-vol+">🔊 +</button>
+    </div>
+    <div class="ia-row">
+      <button class="ia-chip" id="ink-duck">🎧 Baixar volume na fala</button>
+    </div>
+    <div class="ia-mstat" id="ink-music-status"></div>
+    <div class="ia-sec">Drive (opcional)</div>
+    <input class="ia-inp" id="ink-mus-url" type="text" autocomplete="off" placeholder="URL do app da web (Apps Script)">
+    <input class="ia-inp" id="ink-mus-key" type="password" autocomplete="off" placeholder="Chave">
+    <div class="ia-row">
+      <button class="ia-chip" id="ink-mus-sync">☁ Sincronizar</button>
+      <button class="ia-chip" id="ink-mus-shuf">🔀</button>
+    </div>
+    <div class="ia-music-list" id="ink-music-list"></div>
   </div>
-  <div class="ia-sec">Missão</div>
-  <div class="ia-row">
-    <button class="ia-chip" id="ink-meta-btn" style="flex:1">🎯 <span id="ink-meta-lbl">Ligar meta</span></button>
-    <button class="ia-chip" id="ink-meta-">−</button>
-    <span class="ia-val" id="ink-meta-val">10</span>
-    <button class="ia-chip" id="ink-meta+">+</button>
-  </div>
+
   <div class="ia-status" id="ink-status"></div>
 </div>`;
         (document.body || document.documentElement).appendChild(u);
 
-        // Handlers
+        // ---- Handlers ----
         $('ink-go').onclick = () => { if (running) stop('Parado.'); else mainLoop(); };
         $('ink-mini-go').onclick = $('ink-go').onclick;
         $('ink-min').onclick = () => { cfg.min = !cfg.min; saveCfg(); applyMin(); };
+        $$('[data-tab]', u).forEach(b => b.onclick = () => { cfg.tab = b.dataset.tab; saveCfg(); applyTab(); });
         $('ink-spd-').onclick = () => setSpeed(-1);
         $('ink-spd+').onclick = () => setSpeed(1);
-        $('ink-manga').onclick = () => {
-            cfg.manga = !cfg.manga;
-            OrderBar.apply();
-            refreshPanel();
-        };
+        $('ink-manga').onclick = () => { cfg.manga = !cfg.manga; saveCfg(); OrderBar.sync(); refreshPanel(); };
         $('ink-auto').onclick = () => { cfg.auto = !cfg.auto; saveCfg(); refreshPanel(); };
         $('ink-voice').onclick = toggleVoice;
         $('ink-eye').onclick = toggleEye;
         $('ink-girl').onclick = () => { cfg.girl = !cfg.girl; saveCfg(); applyTheme(); };
         $('ink-perf').onclick = () => { cfg.perf = !isPerf(); saveCfg(); refreshPanel(); };
+        $('ink-anx').onclick = () => { cfg.anx = ((cfg.anx | 0) + 1) % 3; saveCfg(); refreshPanel(); };
         $$('[data-skin]', u).forEach(b => b.onclick = () => { cfg.skin = b.dataset.skin; saveCfg(); applyTheme(); });
         $('ink-meta-btn').onclick = metaToggle;
-        $('ink-meta-').onclick = () => { cfg.metaGoal = Math.max(1, cfg.metaGoal - 1); saveCfg(); metaPaint(); };
-        $('ink-meta+').onclick = () => { cfg.metaGoal = Math.min(300, cfg.metaGoal + 1); saveCfg(); metaPaint(); };
+        $('ink-meta-').onclick = () => { cfg.metaGoal = Math.max(1, cfg.metaGoal - 1); saveCfg(); metaPaint(); refreshPanel(); };
+        $('ink-meta+').onclick = () => { cfg.metaGoal = Math.min(300, cfg.metaGoal + 1); saveCfg(); metaPaint(); refreshPanel(); };
+
+        // voz
+        $('ink-vsel').onchange = e => { cfg.vname = e.target.value; saveCfg(); };
+        const stepRate = d => {
+            let i = 0, best = 1e9;
+            VRATES.forEach((v, k) => { const dd = Math.abs(v - cfg.vrate); if (dd < best) { best = dd; i = k; } });
+            cfg.vrate = VRATES[Math.min(VRATES.length - 1, Math.max(0, i + d))];
+            saveCfg(); refreshPanel();
+        };
+        $('ink-vr-').onclick = () => stepRate(-1);
+        $('ink-vr+').onclick = () => stepRate(1);
+
+        // olho
+        const stepEye = d => { cfg.eyeLvl = Math.min(0.6, Math.max(0.05, Math.round((cfg.eyeLvl + d) * 100) / 100)); saveCfg(); applyEye(); refreshPanel(); };
+        $('ink-eyel-').onclick = () => stepEye(-0.05);
+        $('ink-eyel+').onclick = () => stepEye(0.05);
+
+        // música
+        $('ink-yt-url').value = cfg.ytUrl || '';
+        $('ink-yt-url').addEventListener('keydown', e => { if (e.key === 'Enter') ytLoad(); });
+        $('ink-yt-go').onclick = ytLoad;
+        $('ink-yt-x').onclick = () => { ytStop(); musStatus('Player fechado'); };
+        $('ink-yt-show').onclick = () => { cfg.ytShow = !cfg.ytShow; saveCfg(); refreshPanel(); };
+        $('ink-music-play').onclick = musToggle;
+        $('ink-music-prev').onclick = () => musNext(-1);
+        $('ink-music-next').onclick = () => musNext(1);
+        $('ink-music-vol-').onclick = () => musVolStep(-0.1);
+        $('ink-music-vol+').onclick = () => musVolStep(0.1);
+        $('ink-duck').onclick = () => { cfg.duck = cfg.duck === false; saveCfg(); if (cfg.duck === false) musDuck(false); refreshPanel(); };
+        $('ink-mus-url').value = cfg.musicUrl || '';
+        $('ink-mus-key').value = cfg.musicKey || '';
+        $('ink-mus-url').onchange = e => { cfg.musicUrl = e.target.value.trim(); saveCfg(); };
+        $('ink-mus-key').onchange = e => { cfg.musicKey = e.target.value.trim(); saveCfg(); };
+        $('ink-mus-sync').onclick = musSync;
+        $('ink-mus-shuf').onclick = () => { MUS.shuffle = !MUS.shuffle; $('ink-mus-shuf').classList.toggle('on', MUS.shuffle); };
+
+        // campos de texto: não deixa as teclas vazarem pros atalhos do site
+        ['keydown', 'keyup', 'keypress'].forEach(t => u.addEventListener(t, e => {
+            if (/^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)) e.stopPropagation();
+        }));
 
         // Drag
         const head = $('ink-head');
@@ -1469,9 +1744,18 @@ box-shadow:0 8px 24px rgba(255,105,180,.28),inset 0 1px 0 rgba(255,255,255,.5);-
         u.addEventListener('pointerdown', () => { lastUser = Date.now(); });
         document.addEventListener('keydown', () => { lastUser = Date.now(); });
 
-        refreshPanel(); applyTheme(); applyMin(); applyEye(); metaPaint();
+        fillVoices(); musPaintList(); musPaintBtn();
+        refreshPanel(); applyTheme(); applyTab(); applyMin(); applyEye(); metaPaint();
     }
 
+    function applyTab() {
+        const u = $('ink-panel'); if (!u) return;
+        const t = cfg.tab === 'music' ? 'music' : 'read';
+        $$('[data-tab]', u).forEach(b => b.classList.toggle('on', b.dataset.tab === t));
+        const r = u.querySelector('[data-pane="read"]'), m = u.querySelector('[data-pane="music"]');
+        if (r) r.classList.toggle('hide', t !== 'read');
+        if (m) m.classList.toggle('ghost', t !== 'music'); // fica fora da tela (não some) p/ o YouTube continuar tocando
+    }
     function applyMin() {
         const u = $('ink-panel'); if (!u) return;
         u.classList.toggle('min', !!cfg.min);
@@ -1524,6 +1808,19 @@ box-shadow:0 8px 24px rgba(255,105,180,.28),inset 0 1px 0 rgba(255,255,255,.5);-
         cfg.speed = SPEEDS[Math.min(SPEEDS.length - 1, Math.max(0, i + d))];
         saveCfg(); refreshPanel();
     }
+    function fillVoices() {
+        const sel = $('ink-vsel'); if (!sel) return;
+        const list = ptVoices();
+        const cur = currentVoice();
+        sel.textContent = '';
+        if (!list.length) { const o = document.createElement('option'); o.textContent = 'Nenhuma voz pt-BR'; sel.appendChild(o); return; }
+        list.forEach(v => {
+            const o = document.createElement('option');
+            o.value = v.name; o.textContent = (isNatural(v) ? '★ ' : '') + v.name.replace(/^Microsoft\s+/, '');
+            if (cur && v.name === cur.name) o.selected = true;
+            sel.appendChild(o);
+        });
+    }
     function refreshPanel() {
         const u = $('ink-panel'); if (!u) return;
         u.classList.toggle('run', running);
@@ -1537,7 +1834,15 @@ box-shadow:0 8px 24px rgba(255,105,180,.28),inset 0 1px 0 rgba(255,255,255,.5);-
         const vo = $('ink-voice'); if (vo) vo.classList.toggle('on', cfg.voice);
         const pe = $('ink-perf'); if (pe) pe.classList.toggle('on', isPerf());
         const ey = $('ink-eye'); if (ey) ey.classList.toggle('on', cfg.eye);
+        const ax = $('ink-anx'); if (ax) ax.classList.toggle('on', (cfg.anx | 0) > 0);
+        const al = $('ink-anx-l'); if (al) al.textContent = ANX_LBL[cfg.anx | 0] || ANX_LBL[0];
+        const vr = $('ink-vr'); if (vr) vr.textContent = String(cfg.vrate) + '×';
+        const el = $('ink-eyel'); if (el) el.textContent = Math.round(cfg.eyeLvl * 100) + '%';
         const mv = $('ink-meta-val'); if (mv) mv.textContent = cfg.metaGoal;
+        const dk = $('ink-duck'); if (dk) dk.classList.toggle('on', cfg.duck !== false);
+        const ys = $('ink-yt-show'); if (ys) ys.classList.toggle('on', cfg.ytShow !== false);
+        const yb = $('ink-yt-box'); if (yb) yb.classList.toggle('off', cfg.ytShow === false);
+        musPaintBtn();
     }
 
     /* ================================================================== *
@@ -1547,18 +1852,10 @@ box-shadow:0 8px 24px rgba(255,105,180,.28),inset 0 1px 0 rgba(255,255,255,.5);-
         injectCSS();
         buildPanel();
         applyPos();
-        
-        // Inicia o observador do modal de bolhas
         BubbleSorter.start();
-        
-        // Inicia a barra de ordenar capítulos (se estiver na página de catálogo)
         OrderBar.build();
-        let tries = 0;
-        const w = setInterval(() => {
-            if ($('ink-order')) { clearInterval(w); return; }
-            if (++tries > 30) { clearInterval(w); return; }
-            OrderBar.build();
-        }, 500);
+        // o site é SPA: reavalia a barra de capítulos e o filtro de olho ao navegar
+        setInterval(() => { try { OrderBar.build(); applyEye(); } catch (e) { } }, 1500);
     }
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
     else init();
