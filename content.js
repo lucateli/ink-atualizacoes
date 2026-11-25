@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Ink Leitor (leitura automática)
 // @namespace    ink-leitor
-// @version      3.4.0
-// @description  Leitura automática, ordem das bolhas, ordenador de mangá/HQ e modo menina (skins Gatinha/Lobo) para ink.app.br
+// @version      3.3.1
+// @description  Leitura automática, ordem das bolhas e modo menina (skins Gatinha/Lobo) para ink.app.br
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
 // @run-at       document-idle
@@ -12,18 +12,20 @@
 // ==/UserScript==
 /* =====================================================================
    REGRA OBRIGATÓRIA PARA QUALQUER IA / PESSOA QUE EDITAR ESTE ARQUIVO:
-   - O arquivo DEVE se chamar SEMPRE "content.js".
+   - O arquivo DEVE se chamar SEMPRE "content.js" (nunca leitor.js nem outro nome).
    - @updateURL e @downloadURL DEVEM apontar para .../ink-atualizacoes/main/content.js
-   - Ao entregar nova versão, aumente @version e INK_VERSION e entregue como content.js.
+   - Ao entregar uma nova versão, aumente @version e INK_VERSION e entregue o arquivo como content.js.
    ===================================================================== */
 (() => {
     if (window.__inkLeitorV3) return;
     window.__inkLeitorV3 = true;
-    const INK_VERSION = 'v3.4.0';
+    const INK_VERSION = 'v3.3.1';
     try { console.info('[Ink] leitor ' + INK_VERSION + ' carregado'); } catch (e) { }
 
     /* =====================================================================
-       PATCH ANDROID — remove popup/tela preta sem quebrar layout do site
+       PATCH ANDROID v2 — remove o popup/tela preta SEM quebrar o layout do site
+       (v1 apagava qualquer elemento fixed/absolute "transparente" — inclusive
+       o conteúdo do próprio site — e forçava position:static no html/body)
        ===================================================================== */
     (function androidFixes() {
         const KEY = 'serei sempre legal';
@@ -33,6 +35,7 @@
 
         const isMine = el => !!(el && el.closest && el.closest(MINE));
 
+        // Acha o texto do popup (ignora <script>/<style>) e devolve o elemento onde ele está
         function findPopupText() {
             const root = document.body;
             if (!root) return null;
@@ -50,6 +53,7 @@
             return null;
         }
 
+        // Sobe até o contêiner mais externo do popup (fixed / dialog), sem nunca pegar o site inteiro
         function popupContainer(hit) {
             const ui = document.getElementById('ink-auto-ui');
             let best = null, el = hit;
@@ -62,6 +66,7 @@
                 if (el.tagName === 'DIALOG' || el.getAttribute('role') === 'dialog' || el.getAttribute('aria-modal') === 'true' || pos === 'fixed') best = el;
             }
             if (best) return best;
+            // fallback: primeiro DIV/SECTION acima do texto
             for (el = hit; el && el !== document.body && el !== document.documentElement; el = el.parentElement) {
                 if (el.tagName === 'DIV' || el.tagName === 'SECTION') return el;
             }
@@ -81,9 +86,10 @@
             const m = /rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)(?:[,\s/]+([\d.]+))?/.exec(c || '');
             if (!m) return false;
             const a = m[4] == null ? 1 : parseFloat(m[4]);
-            return a >= 0.3 && (+m[1] + +m[2] + +m[3]) < 120;
+            return a >= 0.3 && (+m[1] + +m[2] + +m[3]) < 120;   // transparente (alpha 0) NÃO conta
         };
 
+        // Remove só "cortinas": vazias, fixed, cobrindo ~a tela toda e escuras
         function killBackdrops() {
             document.querySelectorAll('body > *, body > * > *').forEach(el => {
                 if (isMine(el) || el.childElementCount > 0 || (el.textContent || '').trim()) return;
@@ -94,6 +100,7 @@
             });
         }
 
+        // Só desfaz o que o popup travou (evidência inline/classe) — não força nada no resto
         function unlock() {
             const html = document.documentElement, body = document.body;
             if (!html || !body) return;
@@ -109,7 +116,7 @@
                     if (nc !== el.className.trim()) el.className = nc;
                 }
             });
-            if (body.style.position === 'fixed') {
+            if (body.style.position === 'fixed') {      // padrão "scroll lock": restaura a posição de rolagem
                 const top = parseInt(body.style.top || '0', 10) || 0;
                 ['position', 'top', 'width', 'left', 'right'].forEach(p => body.style.removeProperty(p));
                 try { scrollTo(0, -top); } catch (e) { }
@@ -121,6 +128,7 @@
             if (Date.now() - popupAt < 6000) { killBackdrops(); unlock(); }
         }
 
+        // Debounce: no máx. 1 execução a cada ~600 ms (evita travar o celular)
         function schedule() {
             if (timer) return;
             timer = setTimeout(() => { timer = 0; lastRun = Date.now(); try { tick(); } catch (e) { } },
@@ -139,8 +147,8 @@
             new MutationObserver(muts => {
                 if (Date.now() - popupAt < 6000) { schedule(); return; }
                 for (const m of muts) for (const n of m.addedNodes) if (hasKey(n)) { schedule(); return; }
-            }).observe(document.documentElement, { childList: true, subtree: true });
-            setInterval(schedule, 3000);
+            }).observe(document.documentElement, { childList: true, subtree: true });   // sem 'attributes' → sem loop
+            setInterval(schedule, 3000);                                                // backup leve
         };
         if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
         else start();
@@ -155,18 +163,14 @@
     const MOBILE = (() => { try { return matchMedia('(pointer:coarse)').matches || innerWidth < 700; } catch (e) { return innerWidth < 700; } })();
 
     /* =====================================================================
-       CONFIG
+       PARTE A — LEITURA AUTOMÁTICA (só em /ler/...)
        ===================================================================== */
     const LS = 'ink_autoread_cfg_v3';
-    let cfg = {
-        speed: 1.5, method: '', methodM: '', manga: false, min: null, eye: false, eyeLvl: 0.25, pos: null,
-        auto: true, voice: false, vrate: 1, vname: '', dbg: false, perf: null, bin: false, bin1: false,
-        smooth: true, metaGoal: 10, girl: true, anx: 0, skin: 'gato', musicUrl: '', musicKey: '', musicVol: 0.6
-    };
+    let cfg = { speed: 1.5, method: '', methodM: '', manga: false, min: null, eye: false, eyeLvl: 0.25, pos: null, auto: true, voice: false, vrate: 1, vname: '', dbg: false, perf: null, bin: false, bin1: false, smooth: true, metaGoal: 10, girl: true, anx: 0, skin: 'gato', musicUrl: '', musicKey: '', musicVol: 0.6 };
     try { Object.assign(cfg, JSON.parse(localStorage.getItem(LS) || '{}')); } catch (e) { }
     cfg.smooth = true;
     cfg.anx = cfg.anx === true ? 1 : (+cfg.anx === 1 || +cfg.anx === 2 ? +cfg.anx : 0);
-
+    // skins do modo menina (para criar outra: some um item aqui + um bloco CSS .skin-<id> no INK_CSS)
     const SKINS = [
         { id: 'gato', nome: 'Gatinha', emo: '🐱', mascote: '🐾', msg: 'Skin Gatinha 🐱' },
         { id: 'lobo', nome: 'Lobo', emo: '🐺', mascote: '🐺', msg: 'Skin Lobo 🐺 Auuuu!' }
@@ -181,9 +185,6 @@
     const alive = id => running && id === runId;
     const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 3, 4, 5, 6];
 
-    /* =====================================================================
-       DETECÇÃO DE ESTADO DO LEITOR
-       ===================================================================== */
     const RX_CTR = /^\s*(\d+)\s*\/\s*(\d+)\s*[·•|-]\s*(\d+)\s*\/\s*(\d+)\s*$/;
     const RX_PG = /^\s*(\d+)\s*\/\s*(\d+)\s*$/;
     const RX_PCT = /^\s*(\d{1,3})\s*%\s*$/;
@@ -197,7 +198,6 @@
         pg: m => +m[2] > 1 && +m[1] >= 1 && +m[1] <= +m[2],
         pct: m => +m[1] >= 0 && +m[1] <= 100
     };
-
     function scan() {
         const mine = document.getElementById('ink-auto-ui');
         let c = null, g = null, p = null;
@@ -223,8 +223,9 @@
         for (const e of list) {
             if (e === document.documentElement || e === document.body || e.closest('#ink-auto-ui,#ink-eye')) continue;
             const r = e.getBoundingClientRect();
-            if (isPerf()) out.push((r.left | 0) + ',' + (r.top | 0) + ',' + (r.width | 0) + ',' + (r.height | 0));
-            else {
+            if (isPerf()) {
+                out.push((r.left | 0) + ',' + (r.top | 0) + ',' + (r.width | 0) + ',' + (r.height | 0));
+            } else {
                 const cs = getComputedStyle(e);
                 out.push((r.left | 0) + ',' + (r.top | 0) + ',' + (r.width | 0) + ',' + (r.height | 0) + ',' + cs.transform + ',' + cs.backgroundPosition + ',' + cs.objectPosition);
             }
@@ -254,9 +255,6 @@
     const nearEnd = st => atEnd(st) || (st.pg != null && st.pg === st.pgt) || (st.pct != null && st.pct >= 98);
     const label = st => st.b != null ? `balão ${st.b}/${st.bt} · pág ${st.p}/${st.pt}` : (st.pg != null ? `pág ${st.pg}/${st.pgt}` : (st.pct != null ? `${st.pct}%` : 'lendo'));
 
-    /* =====================================================================
-       ENTRADA / NAVEGAÇÃO
-       ===================================================================== */
     function sendKey(k, code, kc) {
         const t = document.activeElement || document.body;
         const o = { key: k, code, keyCode: kc, which: kc, bubbles: true, cancelable: true };
@@ -289,7 +287,10 @@
             try {
                 const tc = new Touch({ identifier: 9, target: t, clientX: x, clientY: y, screenX: x, screenY: y, pageX: x, pageY: y });
                 const end = type === 'touchend';
-                t.dispatchEvent(new TouchEvent(type, { bubbles: true, cancelable: true, composed: true, touches: end ? [] : [tc], targetTouches: end ? [] : [tc], changedTouches: [tc] }));
+                t.dispatchEvent(new TouchEvent(type, {
+                    bubbles: true, cancelable: true, composed: true,
+                    touches: end ? [] : [tc], targetTouches: end ? [] : [tc], changedTouches: [tc]
+                }));
                 return true;
             } catch (e) { return false; }
         };
@@ -312,8 +313,7 @@
         PageDown: () => sendKey('PageDown', 'PageDown', 34),
         wheel: () => {
             const r = stageRect(); const t = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2) || document.body;
-            t.dispatchEvent(new WheelEvent('wheel', { deltaY: 120, bubbles: true, cancelable: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 }));
-            return true;
+            t.dispatchEvent(new WheelEvent('wheel', { deltaY: 120, bubbles: true, cancelable: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 })); return true;
         },
         botao: () => {
             const b = [...document.querySelectorAll('button,[role=button]')].find(x =>
@@ -340,7 +340,8 @@
                     }
                     return true;
                 }
-            } else if (s.sig !== before.sig) return true;
+            }
+            else if (s.sig !== before.sig) return true;
         }
         return false;
     }
@@ -372,9 +373,6 @@
         }
     }
 
-    /* =====================================================================
-       LOOP PRINCIPAL
-       ===================================================================== */
     function dwellFor(st) {
         const sp = cfg.speed || 1;
         let ms = 2000 * Math.exp(gauss() * 0.22);
@@ -468,9 +466,6 @@
         return true;
     }
 
-    /* =====================================================================
-       ROLAGEM SUAVE / ANSIEDADE
-       ===================================================================== */
     let smoothOff = false;
     function scrollerEl() {
         let e = document.elementFromPoint(innerWidth / 2, innerHeight * 0.45);
@@ -535,7 +530,11 @@
         return anxS.mul * (anxS.mul > 0 ? fadiga : 1);
     }
     const ANX_LBL = ['Ansiedade', 'Ans. normal', 'Ans. crônica'];
-
+    const ANX_MSG = [
+        'Modo ansiedade desligado.',
+        '😬 Ansiedade normal: tensão em episódios curtos, depois passa.',
+        '😰 Ansiedade crônica: inquieta o tempo todo, perde o foco, relê e cansa.'
+    ];
     async function smoothRun(id) {
         if (readState().b != null) return 'none';
         let el = scrollerEl(), mode = el ? 'scroll' : 'wheel';
@@ -671,9 +670,6 @@
     }
     document.addEventListener('visibilitychange', () => { if (running && !document.hidden) keepAwake(true); });
 
-    /* =====================================================================
-       TTS
-       ===================================================================== */
     const TTS = window.speechSynthesis || null;
     let ttsVoices = [];
     function loadVoices() { try { ttsVoices = TTS ? TTS.getVoices() : []; } catch (e) { ttsVoices = []; } }
@@ -738,12 +734,15 @@
     const cancelSpeech = () => { try { if (TTS) TTS.cancel(); } catch (e) { } };
 
     /* =====================================================================
-       OCR
+       PATCH 2: OCR COM FALLBACK
        ===================================================================== */
     const OCR = { w: null, p: null };
     function ocrBase() {
         let b = window.__inkOcrBase || (document.documentElement.dataset && document.documentElement.dataset.inkOcr) || '';
         if (!b) { try { if (chrome && chrome.runtime && chrome.runtime.getURL) b = chrome.runtime.getURL('ocr'); } catch (e) { } }
+        if (!b || b === 'file:///android_asset/ocr') {
+            console.log("[Ink-OCR] Usando caminho local ou fallback CDN");
+        }
         return b.replace(/\/$/, '');
     }
     function ocrWorker() {
@@ -753,6 +752,7 @@
             if (typeof Tesseract === 'undefined') throw new Error('Tesseract não carregou.');
             const base = ocrBase();
             setSt('⏳ Carregando o OCR…');
+
             const options = { logger: () => { }, errorHandler: e => console.warn('[Ink-OCR]', e) };
             if (base) {
                 options.workerPath = base + '/worker.min.js';
@@ -760,6 +760,7 @@
                 options.langPath = base;
                 options.gzip = true;
             }
+
             const w = await Tesseract.createWorker('por', 1, options);
             await w.setParameters({ tessedit_pageseg_mode: '11', preserve_interword_spaces: '1', user_defined_dpi: '300' });
             OCR.w = w;
@@ -780,7 +781,7 @@
     function capture() {
         return new Promise((res, rej) => {
             const id = ++capSeq;
-            const t = setTimeout(() => { capWait.delete(id); rej(new Error('a captura de tela não respondeu.')); }, 5000);
+            const t = setTimeout(() => { capWait.delete(id); rej(new Error('a captura de tela não respondeu (o modo Voz precisa do app/extensão que faz a captura).')); }, 5000);
             capWait.set(id, d => { clearTimeout(t); d.err ? rej(new Error(d.err)) : res(d.data); });
             window.postMessage({ inkCap: id }, '*');
         });
@@ -793,6 +794,7 @@
         }
     }
 
+    const descEl = e => e.tagName + (typeof e.className === 'string' && e.className.trim() ? '.' + e.className.trim().split(/\s+/)[0] : '');
     function pageImgEl(x, y) {
         let list = [];
         try { list = document.elementsFromPoint(x, y); } catch (e) { }
@@ -1013,7 +1015,10 @@
         const gray = new Uint8ClampedArray(w * h);
         for (let i = 0, j = 0; i < d.length; i += 4, j++) gray[j] = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
         const W = w + 1, S = new Float64Array(W * (h + 1));
-        for (let y = 0; y < h; y++) { let row = 0; for (let x = 0; x < w; x++) { row += gray[y * w + x]; S[(y + 1) * W + x + 1] = S[y * W + x + 1] + row; } }
+        for (let y = 0; y < h; y++) {
+            let row = 0;
+            for (let x = 0; x < w; x++) { row += gray[y * w + x]; S[(y + 1) * W + x + 1] = S[y * W + x + 1] + row; }
+        }
         const r = Math.max(8, Math.round(Math.min(w, h) / 24));
         const bin = new Uint8ClampedArray(w * h);
         for (let y = 0; y < h; y++) {
@@ -1102,8 +1107,11 @@
             } catch (e) { }
             await w.setParameters({ tessedit_pageseg_mode: '6' });
             let r2;
-            try { r2 = await w.recognize(c2, {}, { blocks: true, text: true }); }
-            finally { await w.setParameters({ tessedit_pageseg_mode: '11' }); }
+            try {
+                r2 = await w.recognize(c2, {}, { blocks: true, text: true });
+            } finally {
+                await w.setParameters({ tessedit_pageseg_mode: '11' });
+            }
             const raw2 = linesOf(r2.data);
             const cx = ((bx0 + bx1) / 2 - bx0) * f + pad, cy = ((by0 + by1) / 2 - by0) * f + pad;
             let pick2 = [];
@@ -1126,7 +1134,7 @@
 
     async function narrate(st, id) {
         try { await narrate0(st, id); }
-        finally { if (typeof musDuck === 'function') musDuck(false); }
+        finally { if (typeof musDuck === 'function') musDuck(false); }   // solta a música assim que o balão termina
     }
     async function narrate0(st, id) {
         if (typeof musDuck === 'function') musDuck(true);
@@ -1154,9 +1162,6 @@
         else ocrWorker().then(() => { if (!running) setSt('Audiolivro pronto. Toque em Ler sozinho.' + (cfg.girl ? ' ' + mascot() : '')); }).catch(e => setSt('⚠ OCR: ' + (e.message || e)));
     }
 
-    /* =====================================================================
-       UI — ÍCONES E CSS
-       ===================================================================== */
     function setSt(t) {
         const s = document.getElementById('ink-auto-st');
         if (s && s.textContent !== t) s.textContent = t;
@@ -1175,7 +1180,6 @@
         'ink-ord-clean': svg('<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M19 17v4M17 19h4"/>'),
         'ink-ord-zero': svg('<path d="M3 12a9 9 0 1 0 3-6.7M3 4v5h5"/>')
     };
-
     const INK_CSS = `
 #ink-auto-ui{--ia-bg:rgba(255,240,245,.95);--ia-card:rgba(255,182,193,.4);--ia-card2:rgba(255,105,180,.5);--ia-line:rgba(255,192,203,.8);--ia-txt:#5c4a4a;--ia-dim:#a88b8b;--ia-ac:#ff69b4;--ia-ac2:#ffb6c1;
 position:fixed;z-index:2147483000;width:min(236px,calc(100vw - 16px));box-sizing:border-box;padding:8px;padding-top:12px;color:var(--ia-txt);
@@ -1260,6 +1264,7 @@ border:1px solid var(--ia-line);border-radius:18px;padding-top:8px;box-shadow:0 
 #ink-auto-ui.boy .ia-chip svg{color:currentColor}
 #ink-auto-ui.boy .ia-row{border-color:transparent}
 #ink-auto-ui.boy .ia-row.on{border-color:rgba(232,87,63,.55);background:rgba(232,87,63,.16)}
+/* seletor de skin (só aparece no modo menina) */
 #ink-auto-ui .ia-skins{margin-top:2px}
 #ink-auto-ui .ia-skin-btns{display:flex;gap:4px}
 #ink-auto-ui .ia-skin{flex:1;display:flex;align-items:center;justify-content:center;gap:4px;min-height:32px;padding:6px 4px;border-radius:11px;font-size:11.5px;font-weight:600;
@@ -1268,6 +1273,7 @@ background:var(--ia-card);border:1px solid var(--ia-line);color:var(--ia-txt);wh
 #ink-auto-ui .ia-skin:active{background:var(--ia-card2)}
 #ink-auto-ui .ia-skin.on{color:#fff;background:var(--ia-ac);border-color:var(--ia-ac2)}
 #ink-auto-ui.boy .ia-skins{display:none}
+/* ===== SKIN LOBO ===== */
 #ink-auto-ui.skin-lobo{--ia-bg:rgba(28,34,48,.95);--ia-card:rgba(150,170,205,.16);--ia-card2:rgba(150,170,205,.30);--ia-line:rgba(170,190,225,.30);--ia-txt:#e9eef7;--ia-dim:#8f9bb5;--ia-ac:#5f8fd0;--ia-ac2:#aebfdc;
 box-shadow:0 8px 24px rgba(10,16,32,.55),0 0 18px rgba(120,160,230,.18),inset 0 1px 0 rgba(255,255,255,.12)}
 #ink-auto-ui.skin-lobo.mob{background:rgba(28,34,48,.98)}
@@ -1306,182 +1312,13 @@ background:rgba(90,170,255,.1);border:1px solid rgba(90,170,255,.22);color:#a9d2
 `;
     function injectCSS() {
         const old = document.getElementById('ink-ui-css');
-        if (old && old.dataset.v === '3.2') return;
-        if (old) old.remove();
+        if (old && old.dataset.v === '3.1') return;
+        if (old) old.remove();   // CSS de versão antiga: troca pelo novo (senão a skin nova não aparece)
         const s = document.createElement('style');
-        s.id = 'ink-ui-css'; s.dataset.v = '3.2'; s.textContent = INK_CSS;
+        s.id = 'ink-ui-css'; s.dataset.v = '3.1'; s.textContent = INK_CSS;
         (document.head || document.documentElement).appendChild(s);
     }
 
-    /* =====================================================================
-       ORDENADOR DE CAPÍTULOS (mangá / HQ)
-       ===================================================================== */
-    const ORD = { mode: 'asc', dir: 'west', origOrder: new WeakMap() };
-    try {
-        const j = JSON.parse(localStorage.getItem('ink_ord_cfg') || '{}');
-        if (j.mode) ORD.mode = j.mode;
-        if (j.dir) ORD.dir = j.dir;
-    } catch (e) { }
-    const ordSave = () => { try { localStorage.setItem('ink_ord_cfg', JSON.stringify({ mode: ORD.mode, dir: ORD.dir })); } catch (e) { } };
-    const ordStatus = t => { const s = document.getElementById('ink-ord-st'); if (s && s.textContent !== t) s.textContent = t; };
-    const RX_CAP_LINK = 'a[href*="/ler/"],a[href*="/capitulo/"],a[href*="/cap/"],a[href*="/chapter/"]';
-
-    function ordList() {
-        const links = [...document.querySelectorAll(RX_CAP_LINK)];
-        if (links.length < 2) return null;
-        const map = new Map();
-        for (const a of links) {
-            const p = a.parentElement;
-            if (!p) continue;
-            map.set(p, (map.get(p) || 0) + 1);
-        }
-        let best = null, n = 1;
-        for (const [p, c] of map) if (c > n) { n = c; best = p; }
-        return best;
-    }
-    function ordNum(h) {
-        try {
-            const u = new URL(h, location.href);
-            const m = /(?:capitulo|cap|ch|chapter|ler|ep)[\-\/]?(\d+(?:[.,]\d+)?)/i.exec(u.pathname + u.search);
-            if (m) return parseFloat(m[1].replace(',', '.'));
-            const nums = (u.pathname + u.search).match(/\d+(?:[.,]\d+)?/g);
-            if (nums) return parseFloat(nums[nums.length - 1].replace(',', '.'));
-        } catch (e) { }
-        return 0;
-    }
-    function ordItems(box) {
-        const links = [...box.querySelectorAll(RX_CAP_LINK)];
-        const out = [], seen = new Set();
-        for (const a of links) {
-            let it = a;
-            for (let i = 0; i < 6; i++) {
-                if (!it.parentElement || it.parentElement === box || it.parentElement === document.body) break;
-                it = it.parentElement;
-                if (it.querySelectorAll(RX_CAP_LINK).length > 1) { it = it.firstElementChild || a; break; }
-            }
-            if (seen.has(it)) continue;
-            seen.add(it);
-            out.push({ el: it, num: ordNum(a.getAttribute('href') || ''), href: (a.getAttribute('href') || '').split('?')[0] });
-        }
-        return out;
-    }
-    function ordApply() {
-        const box = ordList();
-        if (!box) { ordStatus('⚠ Não achei a lista de capítulos nesta página.'); return false; }
-        const items = ordItems(box);
-        if (!items.length) { ordStatus('⚠ Lista vazia.'); return false; }
-        if (!ORD.origOrder.has(box)) ORD.origOrder.set(box, items.map(x => x.el));
-        const list = items.slice();
-        if (ORD.mode === 'asc') list.sort((a, b) => a.num - b.num);
-        else if (ORD.mode === 'desc') list.sort((a, b) => b.num - a.num);
-        else {
-            const orig = ORD.origOrder.get(box) || [];
-            list.sort((a, b) => orig.indexOf(a.el) - orig.indexOf(b.el));
-        }
-        const frag = document.createDocumentFragment();
-        for (const it of list) frag.appendChild(it.el);
-        box.appendChild(frag);
-        if (ORD.dir === 'manga') {
-            box.style.direction = 'rtl';
-            try { box.style.flexDirection = 'row-reverse'; } catch (e) { }
-            box.dataset.inkDir = 'manga';
-        } else {
-            box.style.direction = '';
-            box.style.flexDirection = '';
-            box.dataset.inkDir = 'west';
-        }
-        cfg.manga = (ORD.dir === 'manga');
-        save();
-        ordStatus(`✓ ${ORD.mode === 'asc' ? 'Crescente' : ORD.mode === 'desc' ? 'Decrescente' : 'Original'} · ${ORD.dir === 'manga' ? 'Mangá (dir→esq)' : 'Ocidental (esq→dir)'}`);
-        return true;
-    }
-    function ordClean() {
-        const box = ordList();
-        if (!box) { ordStatus('⚠ Não achei a lista.'); return false; }
-        const items = ordItems(box);
-        const seen = new Set();
-        let removed = 0;
-        for (const it of items) {
-            const key = it.href.replace(/\/$/, '');
-            if (seen.has(key)) { it.el.remove(); removed++; }
-            else seen.add(key);
-        }
-        ordStatus(`✓ Limpo: ${removed} duplicata(s) removida(s).`);
-        return true;
-    }
-    function ordReset() {
-        const box = ordList();
-        if (!box) { ordStatus('⚠ Não achei a lista.'); return false; }
-        const orig = ORD.origOrder.get(box);
-        if (!orig || !orig.length) { ordStatus('⚠ Sem ordem original salva. Recarregue a página.'); return false; }
-        for (const el of orig) { try { el.isConnected && box.appendChild(el); } catch (e) { } }
-        box.style.direction = '';
-        box.style.flexDirection = '';
-        ORD.mode = 'orig';
-        ordSave();
-        ordStatus('✓ Ordem original restaurada.');
-        return true;
-    }
-    function ordCycleMode() {
-        ORD.mode = ORD.mode === 'asc' ? 'desc' : ORD.mode === 'desc' ? 'orig' : 'asc';
-        ordSave(); ordApply(); ordPaint();
-    }
-    function ordPaint() {
-        const bar = document.getElementById('ink-ord-bar');
-        if (!bar) return;
-        const map = { asc: 'Ordenar ↑', desc: 'Ordenar ↓', orig: 'Original' };
-        const pb = bar.querySelector('[data-ord-pill="sort"] span');
-        if (pb) pb.textContent = map[ORD.mode] || 'Ordenar';
-        bar.querySelectorAll('[data-ord-dir]').forEach(b => b.classList.toggle('on', b.dataset.ordDir === ORD.dir));
-    }
-    function buildOrderBar() {
-        if (document.getElementById('ink-ord-bar')) return;
-        if (!location.pathname.startsWith('/ler/') && !/(manga|manhwa|hq|comic|obra|capitulo)/i.test(location.pathname)) return;
-        const box = ordList();
-        if (!box) return;
-        if (ordItems(box).length < 2) return;
-
-        const bar = document.createElement('div');
-        bar.id = 'ink-ord-bar';
-        bar.innerHTML = `
-            <button type="button" class="io-pill" data-ord-pill="sort" title="Alternar ordem">
-                ${ICO_O['ink-ord-btn']}<span>Ordenar</span>
-            </button>
-            <button type="button" class="io-pill" data-ord-pill="clean" title="Remover duplicados">
-                ${ICO_O['ink-ord-clean']}<span>Limpar</span>
-            </button>
-            <button type="button" class="io-pill" data-ord-pill="zero" title="Restaurar ordem original">
-                ${ICO_O['ink-ord-zero']}<span>Zerar</span>
-            </button>
-            <div class="io-seg" role="group" aria-label="Direção de leitura">
-                <button type="button" data-ord-dir="west">Ocidental</button>
-                <button type="button" data-ord-dir="manga">Mangá</button>
-            </div>`;
-        const st = document.createElement('div');
-        st.id = 'ink-ord-st';
-
-        try {
-            const parent = box.parentElement || document.body;
-            parent.insertBefore(bar, box);
-            parent.insertBefore(st, box);
-        } catch (e) {
-            document.body.insertBefore(bar, document.body.firstChild);
-            document.body.insertBefore(st, bar.nextSibling);
-        }
-
-        bar.querySelector('[data-ord-pill="sort"]').addEventListener('click', ordCycleMode);
-        bar.querySelector('[data-ord-pill="clean"]').addEventListener('click', ordClean);
-        bar.querySelector('[data-ord-pill="zero"]').addEventListener('click', ordReset);
-        bar.querySelectorAll('[data-ord-dir]').forEach(b =>
-            b.addEventListener('click', () => { ORD.dir = b.dataset.ordDir; ordSave(); ordApply(); ordPaint(); })
-        );
-        ordPaint();
-        if (ORD.mode !== 'orig' || ORD.dir !== 'west') ordApply();
-    }
-
-    /* =====================================================================
-       PAINEL PRINCIPAL (ink-auto-ui)
-       ===================================================================== */
     const sw = (id, on) => {
         const e = document.getElementById(id);
         if (e) { e.classList.toggle('on', !!on); e.setAttribute('aria-pressed', on ? 'true' : 'false'); }
@@ -1547,7 +1384,10 @@ background:rgba(90,170,255,.1);border:1px solid rgba(90,170,255,.22);color:#a9d2
         const y = Math.min(Math.max(0, cfg.pos.y), Math.max(0, innerHeight - r.height));
         u.style.left = x + 'px'; u.style.top = y + 'px'; u.style.bottom = 'auto';
     }
-    function toggle() { if (running) stop('Parado.'); else loop(); }
+    function toggle() {
+        if (running) stop('Parado.');
+        else loop();
+    }
     function setSpeed(dir) {
         let i = 0, best = 1e9;
         SPEEDS.forEach((v, k) => { const d = Math.abs(v - (cfg.speed || 1)); if (d < best) { best = d; i = k; } });
@@ -1581,9 +1421,6 @@ background:rgba(90,170,255,.1);border:1px solid rgba(90,170,255,.22);color:#a9d2
         save(); applyEye();
     }
 
-    /* =====================================================================
-       MISSÕES
-       ===================================================================== */
     const MS_KEY = 'ink_missions';
     function scanMissions() {
         if (document.hidden) return;
@@ -1607,6 +1444,18 @@ background:rgba(90,170,255,.1);border:1px solid rgba(90,170,255,.22);color:#a9d2
     const pendingMissions = () => { try { return (JSON.parse(localStorage.getItem(MS_KEY) || '{}').list || []).filter(x => !x.done && x.n > x.c); } catch (e) { return []; } };
     let metaSel = -1;
     const allTargets = L => { const nf = L.filter(x => !x.fac); return (nf.length ? nf : L).slice().sort((a, b) => (a.n - a.c) - (b.n - b.c)); };
+    function metaPick() {
+        const L = pendingMissions();
+        if (!L.length) { setSt('Sem missões de leitura pendentes. Abra o painel do evento uma vez e volte.'); return; }
+        metaSel = (metaSel + 1) % (L.length + 1);
+        if (metaSel === L.length) {
+            cfg.metaGoal = Math.max(1, ...allTargets(L).map(x => x.n - x.c));
+        } else {
+            cfg.metaGoal = Math.max(1, L[metaSel].n - L[metaSel].c);
+            if (L[metaSel].fac) setSt('Missão de facção: leia uma HQ do herói da sua facção.');
+        }
+        save(); metaPaint();
+    }
     const meta = { on: false, done: 0, seen: new Set(), targets: [] };
     const metaKey = st => { const c = st.p != null ? st.p : st.pg; return c == null ? null : location.pathname + '#' + c; };
     function metaPaint() {
@@ -1636,6 +1485,8 @@ background:rgba(90,170,255,.1);border:1px solid rgba(90,170,255,.22);color:#a9d2
         const k = metaKey(readState());
         if (!k || meta.seen.has(k)) return;
         meta.seen.add(k); meta.done++;
+        const hit = meta.targets.filter(x => x.r === meta.done).map(x => x.t);
+        if (hit.length) console.info('[Ink] missão completa:', hit.join(' | '));
         if (meta.done >= cfg.metaGoal) {
             meta.on = false;
             const fac = pendingMissions().some(x => x.fac) ? ' Missões de facção: leia HQs do herói da sua facção.' : '';
@@ -1646,18 +1497,24 @@ background:rgba(90,170,255,.1);border:1px solid rgba(90,170,255,.22);color:#a9d2
     setInterval(metaTick, 500);
 
     /* =====================================================================
-       MÚSICA — Drive via Apps Script
+       ABA MÚSICA — banco de dados no Google Drive (via Apps Script "Code.gs")
        ===================================================================== */
     const MUS = { list: [], cur: -1, a: null, blob: null, shuffle: false, tab: 'read', synced: false };
     const MUS_LS = 'ink_music_list';
     try { MUS.list = JSON.parse(localStorage.getItem(MUS_LS) || '[]'); } catch (e) { }
     const musVolNow = () => cfg.musicVol == null ? 0.6 : cfg.musicVol;
     const musSt = t => { const s = document.getElementById('ink-mus-st'); if (s && s.textContent !== t) s.textContent = t; };
+    const musDirect = u => {
+        u = (u || '').trim();
+        const m = /drive\.google\.com\/(?:file\/d\/|open\?id=|uc\?(?:export=\w+&)?id=)([\w-]{10,})/.exec(u);
+        return m ? 'https://drive.google.com/uc?export=download&id=' + m[1] : u;
+    };
+
     async function musApi(action, data) {
         if (!cfg.musicUrl) throw new Error('Toque em "Drive" e cole a URL do app da web.');
         const r = await fetch(cfg.musicUrl, {
             method: 'POST',
-            headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+            headers: { 'Content-Type': 'text/plain;charset=utf-8' },   // "simple request" → sem preflight CORS
             body: JSON.stringify({ action, key: cfg.musicKey || '', ...data })
         });
         const j = await r.json();
@@ -1677,6 +1534,7 @@ background:rgba(90,170,255,.1);border:1px solid rgba(90,170,255,.22);color:#a9d2
             musSt('☁ ' + j.list.length + ' faixa(s)' + (j.added ? ' · +' + j.added + ' nova(s)' : ''));
         } catch (e) { musSt('⚠ ' + (e.message || e)); }
     }
+
     function musAudio() {
         if (!MUS.a) {
             const a = new Audio();
@@ -1688,6 +1546,8 @@ background:rgba(90,170,255,.1);border:1px solid rgba(90,170,255,.22);color:#a9d2
         }
         return MUS.a;
     }
+
+    // Ducka (abaixa) a música enquanto o audiolivro fala. Idempotente.
     function musDuck(on) {
         const a = MUS.a;
         if (!a || !a.src || a.paused) return;
@@ -1702,6 +1562,8 @@ background:rgba(90,170,255,.1);border:1px solid rgba(90,170,255,.22);color:#a9d2
             a._preVol = null;
         }
     }
+
+    // Cache das faixas do Drive no IndexedDB (evita baixar de novo até 20 MB a cada play)
     const MUS_DB = 'ink_music_cache', MUS_MAX = 8;
     function musIdb() {
         return new Promise((res, rej) => {
@@ -1737,7 +1599,10 @@ background:rgba(90,170,255,.1);border:1px solid rgba(90,170,255,.22);color:#a9d2
             st.put({ fid, blob, at: Date.now() });
         } catch (e) { }
     }
-    function musKeep(fid) { musCacheGet(fid).then(r => { if (r) musCachePut(fid, r.blob); }); }
+    function musKeep(fid) {   // marca como usada agora (LRU simples)
+        musCacheGet(fid).then(r => { if (r) musCachePut(fid, r.blob); });
+    }
+
     async function musPlay(i) {
         const t = MUS.list[i];
         if (!t) return;
@@ -1752,7 +1617,7 @@ background:rgba(90,170,255,.1);border:1px solid rgba(90,170,255,.22);color:#a9d2
                 else {
                     musSt('⏳ Baixando do Drive…');
                     const j = await musApi('file', { fid: t.fid });
-                    if (MUS.cur !== i) return;
+                    if (MUS.cur !== i) return;                      // trocou de faixa enquanto baixava
                     const bin = atob(j.b64), u8 = new Uint8Array(bin.length);
                     for (let k = 0; k < bin.length; k++) u8[k] = bin.charCodeAt(k);
                     blob = new Blob([u8], { type: j.mime || 'audio/mpeg' });
@@ -1769,9 +1634,10 @@ background:rgba(90,170,255,.1);border:1px solid rgba(90,170,255,.22);color:#a9d2
             musSt('🎵 ' + t.title);
         } catch (e) {
             if (MUS.cur !== i) return;
-            if (e && (e.name === 'NotAllowedError' || e.name === 'AbortError')) {
+            if (e && (e.name === 'NotAllowedError' || e.name === 'AbortError')) {   // bloqueio de autoplay/interrupção: não é erro da faixa
                 MUS.fail = 0; musSt('⚠ Toque em ▶ para tocar (o navegador bloqueou o início automático).'); return;
             }
+            // faixa com erro: pula para a próxima (no máximo uma volta na lista)
             MUS.fail = (MUS.fail || 0) + 1;
             if (MUS.list.length > 1 && MUS.fail < MUS.list.length) {
                 musSt('⚠ ' + (e.message || e) + ' — pulando…');
@@ -1785,8 +1651,10 @@ background:rgba(90,170,255,.1);border:1px solid rgba(90,170,255,.22);color:#a9d2
         if (MUS.shuffle && n > 1) {
             let j;
             do { j = Math.floor(Math.random() * n); } while (j === MUS.cur);
-            musPlay(j); return;
+            musPlay(j);
+            return;
         }
+        // se nada está tocando: d>0 começa do 0, d<0 começa do último
         const base = MUS.cur < 0 ? (d > 0 ? -1 : 0) : MUS.cur;
         musPlay(((base + d) % n + n) % n);
     }
@@ -1803,11 +1671,12 @@ background:rgba(90,170,255,.1);border:1px solid rgba(90,170,255,.22);color:#a9d2
         cfg.musicVol = Math.min(1, Math.max(0, Math.round((musVolNow() + d) * 10) / 10));
         save();
         if (MUS.a) {
-            if (MUS.a._ducked) MUS.a._preVol = cfg.musicVol;
+            if (MUS.a._ducked) MUS.a._preVol = cfg.musicVol;   // abaixada: guarda o novo volume para restaurar depois
             else MUS.a.volume = cfg.musicVol;
         }
         musPaintBtn();
     }
+
     function musPaintBtn() {
         const playing = !!(MUS.a && !MUS.a.paused && MUS.a.src);
         const p = document.getElementById('ink-mus-play');
@@ -1839,7 +1708,9 @@ background:rgba(90,170,255,.1);border:1px solid rgba(90,170,255,.22);color:#a9d2
                     if (MUS.cur === i) {
                         MUS.cur = -1;
                         if (MUS.a) { MUS.a.pause(); MUS.a.removeAttribute('src'); MUS.a.load(); musPaintBtn(); }
-                    } else if (MUS.cur > i) { MUS.cur--; }
+                    } else if (MUS.cur > i) {
+                        MUS.cur--;
+                    }
                     musSetList(j.list);
                 } catch (e) { musSt('⚠ ' + (e.message || e)); }
             };
@@ -1848,158 +1719,309 @@ background:rgba(90,170,255,.1);border:1px solid rgba(90,170,255,.22);color:#a9d2
         });
     }
 
-    /* =====================================================================
-       BUILD PAINEL
-       ===================================================================== */
-    const PANEL_HTML = `
-<div class="ia-head" id="ink-auto-head">
-  <div class="ia-logo">${ICO.book}</div>
-  <div class="ia-title" id="ink-auto-title">Leitura automática ${INK_VERSION}</div>
-  <button class="ia-ib" id="ink-auto-mini-go" type="button" title="Ler sozinho">${ICO.play}</button>
-  <button class="ia-ib" id="ink-auto-min" type="button" title="minimizar">${ICO.down}</button>
-</div>
-<div id="ink-auto-body">
-  <div class="ia-st" id="ink-auto-st"></div>
-  <div class="ia-main">
-    <button id="ink-auto-go" type="button">${ICO.play}<span>Ler sozinho</span></button>
-    <div class="ia-step"><button id="ink-auto-spm" type="button">−</button><span class="ia-val" id="ink-auto-sp">1×</span><button id="ink-auto-spp" type="button">+</button></div>
-  </div>
-  <div class="ia-chips">
-    <button class="ia-chip" id="ink-auto-manga" type="button">${ICO.book}<span>Mangá</span></button>
-    <button class="ia-chip" id="ink-auto-next" type="button">✓<span>Próximo auto</span></button>
-    <button class="ia-chip" id="ink-voice-btn" type="button">${ICO.voice}<span>Voz</span></button>
-  </div>
-  <div class="ia-sub dim" id="ink-voice-combo">
-    <button class="ia-row" id="ink-voice-cycle" type="button"><span class="ia-lbl" id="ink-voice-name">—</span></button>
-    <div class="ia-step"><button id="ink-voice-m" type="button">−</button><span class="ia-val" id="ink-voice-sp">1×</span><button id="ink-voice-p" type="button">+</button></div>
-  </div>
-  <div class="ia-sec">Aparência</div>
-  <button class="ia-row" id="ink-gender-btn" type="button"><span class="ia-ico">👧</span><span class="ia-lbl" id="ink-gender-lbl">Menina</span></button>
-  <div class="ia-skins">
-    <div class="ia-skin-btns">
-      ${SKINS.map(k => `<button class="ia-skin" type="button" data-skin="${k.id}">${k.emo}<span>${k.nome}</span></button>`).join('')}
-    </div>
-  </div>
-  <div class="ia-sec">Conforto</div>
-  <button class="ia-row" id="ink-eye-btn" type="button"><span class="ia-ico">🌙</span><span class="ia-lbl">Olho descanso</span><span id="ink-eye-lvl" class="ia-ico">25%</span></button>
-  <div class="ia-sub" id="ink-eye-sub">
-    <div class="ia-step"><button id="ink-eye-m" type="button">−</button><span class="ia-val" id="ink-eye-cur">25%</span><button id="ink-eye-p" type="button">+</button></div>
-  </div>
-  <div class="ia-sec">Desempenho</div>
-  <button class="ia-row" id="ink-perf-btn" type="button"><span class="ia-ico">⚡</span><span class="ia-lbl">Modo leve</span></button>
-  <button class="ia-row" id="ink-anx-btn" type="button"><span class="ia-ico">🧠</span><span class="ia-lbl">Ansiedade</span></button>
-  <div class="ia-sec">Missão</div>
-  <button class="ia-row" id="ink-meta-btn" type="button"><span class="ia-ico">🎯</span><span class="ia-lbl" id="ink-meta-lbl">Ligar meta</span></button>
-  <div class="ia-sub">
-    <button class="ia-row" id="ink-meta-pick" type="button"><span class="ia-lbl" id="ink-meta-pick-lbl">Escolher missão</span></button>
-    <div class="ia-step"><button id="ink-meta-m" type="button">−</button><span class="ia-val" id="ink-meta-val">10</span><button id="ink-meta-p" type="button">+</button></div>
-  </div>
-</div>`;
+    function musCss() {
+        if (document.getElementById('ink-mus-css')) return;
+        const s = document.createElement('style');
+        s.id = 'ink-mus-css';
+        s.textContent = `
+#ink-auto-ui .ia-tabs{display:flex;gap:4px;margin:2px 0 6px}
+#ink-auto-ui .ia-tab{flex:1;display:flex;align-items:center;justify-content:center;gap:4px;min-height:32px;padding:5px 4px;border-radius:11px;font-size:11.5px;font-weight:700;background:var(--ia-card);border:1px solid var(--ia-line);color:var(--ia-txt)}
+#ink-auto-ui.mob .ia-tab{min-height:40px}
+#ink-auto-ui .ia-tab.on{color:#fff;background:var(--ia-ac);border-color:var(--ia-ac2)}
+#ink-auto-ui .ia-trks{margin-top:6px;max-height:150px;overflow:auto;border-radius:11px;background:var(--ia-card);border:1px solid var(--ia-line);font-size:11.5px;color:var(--ia-dim);padding:2px}
+#ink-auto-ui .ia-trk{display:flex;align-items:center;gap:2px;border-radius:8px}
+#ink-auto-ui .ia-trk.on{background:var(--ia-ac);color:#fff}
+#ink-auto-ui .ia-trk-t{flex:1;min-width:0;padding:7px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--ia-txt)}
+#ink-auto-ui .ia-trk.on .ia-trk-t{color:#fff}
+#ink-auto-ui .ia-trk-x{width:28px;text-align:center;padding:7px 0;color:inherit;opacity:.7}
+#ink-auto-ui .ia-in{display:block;width:100%;margin-top:4px;padding:7px 9px;border-radius:10px;border:1px solid var(--ia-line);background:var(--ia-card);color:var(--ia-txt);font:inherit;outline:none}
+#ink-auto-ui .ia-in:focus{border-color:var(--ia-ac)}
+`;
+        (document.head || document.documentElement).appendChild(s);
+    }
 
-    function buildPanel() {
-        if (document.getElementById('ink-auto-ui')) return;
-        const u = document.createElement('div');
-        u.id = 'ink-auto-ui';
-        if (MOBILE) u.classList.add('mob');
-        if (cfg.min) u.classList.add('min');
-        u.innerHTML = PANEL_HTML;
-        if (!cfg.pos) {
-            u.style.bottom = '12px'; u.style.right = '12px';
+    function musTab(t) {
+        MUS.tab = t;
+        const r = document.getElementById('ink-tab-read'), m = document.getElementById('ink-tab-music');
+        if (r) r.style.display = t === 'read' ? '' : 'none';
+        if (m) m.style.display = t === 'music' ? '' : 'none';
+        document.querySelectorAll('#ink-auto-ui [data-tab]').forEach(b => b.classList.toggle('on', b.dataset.tab === t));
+        if (t === 'music') {
+            musPaintList(); musPaintBtn();
+            if (!MUS.synced) {
+                MUS.synced = true;
+                if (cfg.musicUrl) musSync(false);
+                else { const c = document.getElementById('ink-mus-cfg'); if (c) c.style.display = ''; musSt('Configure o Drive para começar.'); }
+            }
         }
-        (document.body || document.documentElement).appendChild(u);
-
-        // handlers
-        const $ = id => u.querySelector('#' + id);
-        $('ink-auto-go').onclick = toggle;
-        $('ink-auto-mini-go').onclick = toggle;
-        $('ink-auto-min').onclick = () => { cfg.min = !cfg.min; save(); applyMin(); };
-        $('ink-auto-spm').onclick = () => setSpeed(-1);
-        $('ink-auto-spp').onclick = () => setSpeed(1);
-        $('ink-auto-manga').onclick = () => {
-            cfg.manga = !cfg.manga;
-            ORD.dir = cfg.manga ? 'manga' : 'west';
-            ordSave(); save();
-            if (document.getElementById('ink-ord-bar')) ordApply();
-            refreshBtn(); ordPaint();
-        };
-        $('ink-auto-next').onclick = () => { cfg.auto = !cfg.auto; save(); refreshBtn(); };
-        $('ink-voice-btn').onclick = toggleVoice;
-        $('ink-voice-cycle').onclick = cycleVoice;
-        $('ink-voice-m').onclick = () => setVRate(-1);
-        $('ink-voice-p').onclick = () => setVRate(1);
-        $('ink-gender-btn').onclick = () => { cfg.girl = !cfg.girl; save(); applyTheme(); };
-        u.querySelectorAll('[data-skin]').forEach(b => {
-            b.onclick = () => { cfg.skin = b.dataset.skin; save(); applyTheme(); };
-        });
-        $('ink-eye-btn').onclick = toggleEye;
-        $('ink-eye-m').onclick = () => setEyeLvl(-0.05);
-        $('ink-eye-p').onclick = () => setEyeLvl(0.05);
-        $('ink-perf-btn').onclick = () => { cfg.perf = !isPerf(); save(); refreshBtn(); };
-        $('ink-anx-btn').onclick = () => {
-            cfg.anx = ((cfg.anx | 0) + 1) % 3;
-            save(); refreshBtn(); setSt(ANX_LBL[cfg.anx]);
-        };
-        $('ink-meta-btn').onclick = metaToggle;
-        $('ink-meta-m').onclick = () => metaGoalStep(-1);
-        $('ink-meta-p').onclick = () => metaGoalStep(1);
-        $('ink-meta-pick').onclick = () => {
-            const L = pendingMissions();
-            if (!L.length) { setSt('Sem missões pendentes. Abra o painel do evento uma vez.'); return; }
-            metaSel = (metaSel + 1) % (L.length + 1);
-            if (metaSel === L.length) cfg.metaGoal = Math.max(1, ...allTargets(L).map(x => x.n - x.c));
-            else cfg.metaGoal = Math.max(1, L[metaSel].n - L[metaSel].c);
-            save(); metaPaint();
-        };
-
-        // arrastar cabeçalho
-        const head = $('ink-auto-head');
-        let drag = null;
-        const onDown = e => {
-            if (e.target.closest('button')) return;
-            const p = e.touches ? e.touches[0] : e;
-            const r = u.getBoundingClientRect();
-            drag = { ox: p.clientX - r.left, oy: p.clientY - r.top };
-            e.preventDefault();
-        };
-        const onMove = e => {
-            if (!drag) return;
-            const p = e.touches ? e.touches[0] : e;
-            const x = Math.max(0, Math.min(innerWidth - u.offsetWidth, p.clientX - drag.ox));
-            const y = Math.max(0, Math.min(innerHeight - u.offsetHeight, p.clientY - drag.oy));
-            u.style.left = x + 'px'; u.style.top = y + 'px'; u.style.bottom = 'auto'; u.style.right = 'auto';
-            cfg.pos = { x, y };
-        };
-        const onUp = () => { if (drag) { drag = null; save(); } };
-        head.addEventListener('mousedown', onDown);
-        head.addEventListener('touchstart', onDown, { passive: false });
-        document.addEventListener('mousemove', onMove);
-        document.addEventListener('touchmove', onMove, { passive: false });
-        document.addEventListener('mouseup', onUp);
-        document.addEventListener('touchend', onUp);
-
-        // marcar interação do usuário (pausa leitura)
-        u.addEventListener('pointerdown', () => { lastUser = Date.now(); });
-        document.addEventListener('keydown', () => { lastUser = Date.now(); });
-
-        refreshBtn(); applyTheme(); applyMin(); applyEye(); metaPaint();
+        if (typeof applyPos === 'function') applyPos();
     }
 
-    /* =====================================================================
-       INIT
-       ===================================================================== */
-    function init() {
+    function musMount(d) {
+        const body = d.querySelector('#ink-auto-body');
+        if (!body || body.querySelector('#ink-tabs')) return;
+        musCss();
+
+        // 1) move TODO o conteúdo atual (inclusive #ink-auto-st) para a aba Leitura
+        const read = document.createElement('div');
+        read.id = 'ink-tab-read';
+        [...body.children].forEach(c => read.appendChild(c));
+
+        // 2) barra de abas
+        const tabs = document.createElement('div');
+        tabs.id = 'ink-tabs'; tabs.className = 'ia-tabs';
+        tabs.innerHTML = '<button type="button" class="ia-tab" data-tab="read">📖 Leitura</button><button type="button" class="ia-tab" data-tab="music">🎵 Música</button>';
+
+        // 3) aba Música
+        const pane = document.createElement('div');
+        pane.id = 'ink-tab-music'; pane.style.display = 'none';
+        const chip = (id, ico, txt) => '<button id="' + id + '" class="ia-chip" type="button"><span style="font-size:15px">' + ico + '</span><span>' + txt + '</span></button>';
+        pane.innerHTML =
+            '<div id="ink-mus-st" class="ia-st">Música no Drive.</div>' +
+            '<div class="ia-chips">' +
+            chip('ink-mus-prev', '⏮', 'Anterior') +
+            '<button id="ink-mus-play" class="ia-chip" type="button"></button>' +
+            chip('ink-mus-next', '⏭', 'Próxima') +
+            chip('ink-mus-shuf', '🔀', 'Aleatória') +
+            chip('ink-mus-sync', '☁', 'Sincronizar') +
+            chip('ink-mus-cfgb', '🔗', 'Drive') +
+            '</div>' +
+            '<div class="ia-sub"><span class="ia-row" style="cursor:default"><span class="ia-lbl">Volume</span></span>' +
+            '<div class="ia-step"><button id="ink-mus-vless" type="button">−</button><span id="ink-mus-vol" class="ia-val"></span><button id="ink-mus-vmore" type="button">+</button></div></div>' +
+            '<div id="ink-mus-list" class="ia-trks"></div>' +
+            '<button id="ink-mus-addb" class="ia-row" type="button" style="margin-top:6px"><span class="ia-lbl">+ Adicionar por link</span></button>' +
+            '<div id="ink-mus-add" style="display:none">' +
+            '<input id="ink-mus-addt" class="ia-in" placeholder="Nome da faixa" autocomplete="off">' +
+            '<input id="ink-mus-addu" class="ia-in" placeholder="Link do áudio (Drive ou direto)" autocomplete="off" inputmode="url">' +
+            '<button id="ink-mus-adds" class="ia-row" type="button" style="margin-top:4px"><span class="ia-lbl">Salvar faixa</span></button></div>' +
+            '<div id="ink-mus-cfg" style="display:none">' +
+            '<input id="ink-mus-cu" class="ia-in" placeholder="URL do app da web (script.google.com/…/exec)" autocomplete="off" inputmode="url">' +
+            '<input id="ink-mus-ck" class="ia-in" placeholder="Senha (se definiu no Code.gs)" autocomplete="off">' +
+            '<button id="ink-mus-cs" class="ia-row" type="button" style="margin-top:4px"><span class="ia-lbl">Salvar e sincronizar</span></button></div>';
+
+        body.append(tabs, read, pane);
+
+        // teclas digitadas nos campos não viram atalhos do site
+        pane.addEventListener('keydown', e => e.stopPropagation());
+        pane.addEventListener('keyup', e => e.stopPropagation());
+
+        const $ = id => pane.querySelector(id);
+        tabs.querySelectorAll('[data-tab]').forEach(b => { b.onclick = () => musTab(b.dataset.tab); });
+        $('#ink-mus-play').onclick = musToggle;
+        $('#ink-mus-prev').onclick = () => musNext(-1);
+        $('#ink-mus-next').onclick = () => musNext(1);
+        $('#ink-mus-shuf').onclick = () => { MUS.shuffle = !MUS.shuffle; musPaintBtn(); };
+        $('#ink-mus-sync').onclick = () => musSync(true);
+        $('#ink-mus-vless').onclick = () => musVol(-0.1);
+        $('#ink-mus-vmore').onclick = () => musVol(0.1);
+        $('#ink-mus-cfgb').onclick = () => {
+            const c = $('#ink-mus-cfg');
+            $('#ink-mus-cu').value = cfg.musicUrl || ''; $('#ink-mus-ck').value = cfg.musicKey || '';
+            c.style.display = c.style.display === 'none' ? '' : 'none';
+        };
+        $('#ink-mus-cs').onclick = () => {
+            const u = $('#ink-mus-cu').value.trim();
+            if (u && !/^https:\/\/script\.google(usercontent)?\.com\//.test(u)) { musSt('⚠ A URL deve começar com https://script.google.com/'); return; }
+            cfg.musicUrl = u; cfg.musicKey = $('#ink-mus-ck').value.trim(); save();
+            $('#ink-mus-cfg').style.display = 'none';
+            if (u) { MUS.synced = true; musSync(true); }
+        };
+        $('#ink-mus-addb').onclick = () => { const a = $('#ink-mus-add'); a.style.display = a.style.display === 'none' ? '' : 'none'; };
+        $('#ink-mus-adds').onclick = async () => {
+            const url = musDirect($('#ink-mus-addu').value);
+            if (!url) { musSt('⚠ Cole o link do áudio.'); return; }
+            try {
+                const j = await musApi('add', { title: $('#ink-mus-addt').value.trim() || 'Sem título', url });
+                musSetList(j.list);
+                $('#ink-mus-addt').value = ''; $('#ink-mus-addu').value = ''; $('#ink-mus-add').style.display = 'none';
+                musSt('✓ Faixa adicionada.');
+            } catch (e) { musSt('⚠ ' + (e.message || e)); }
+        };
+
+        musTab(MUS.tab);
+    }
+
+    function mount() {
+        const stale = document.getElementById('ink-auto-ui');
+        if (stale && stale.dataset.v !== '3.1') stale.remove();
+        if (document.getElementById('ink-auto-ui') || !document.body) return;
         injectCSS();
-        buildPanel();
-        applyPos();
-        buildOrderBar();
-        // SPA: tenta de novo nos primeiros ~15s
-        let ordTries = 0;
-        const ordWatch = setInterval(() => {
-            if (document.getElementById('ink-ord-bar')) { clearInterval(ordWatch); return; }
-            if (++ordTries > 30) { clearInterval(ordWatch); return; }
-            buildOrderBar();
-        }, 500);
+        const d = document.createElement('div');
+        d.id = 'ink-auto-ui';
+        d.dataset.v = '3.1';
+        if (MOBILE) d.classList.add('mob');
+        d.style.left = (MOBILE ? 8 : 24) + 'px';
+        d.style.bottom = `calc(${MOBILE ? 96 : 120}px + env(safe-area-inset-bottom,0px))`;
+        const moon = svg('<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>');
+        const bolt = svg('<path d="M13 2L4 14h7l-1 8 9-12h-7z"/>');
+        const IC = {
+            manga: svg('<path d="M19 12H5M11 6l-6 6 6 6"/>'),
+            next: svg('<path d="M5 5l9 7-9 7zM18 5v14"/>'),
+            voice: ICO.voice,
+            eye: moon,
+            perf: bolt,
+            anx: svg('<path d="M3 12h4l2-6 4 12 2-6h6"/>')
+        };
+        const chip = (id, ico, txt, tip) => `<button id="${id}" class="ia-chip" type="button" title="${tip}">${ico}<span>${txt}</span></button>`;
+
+        d.innerHTML =
+            `<div id="ink-auto-head" class="ia-head">
+                <span class="ia-logo">${ICO.book}</span>
+                <span class="ia-title" id="ink-auto-title"></span>
+                <button id="ink-auto-mini-go" class="ia-ib" type="button"></button>
+                <button id="ink-auto-min" class="ia-ib" type="button"></button>
+            </div>
+            <div id="ink-auto-body">
+                <div id="ink-auto-st" class="ia-st">${MOBILE ? 'Parado. Toque em Ler sozinho.' : 'Parado. Alt+L liga/desliga.'}${cfg.girl ? ' ' + mascot() : ''}</div>
+                <div class="ia-main">
+                    <button id="ink-auto-go" type="button"></button>
+                    <div class="ia-step"><button id="ink-auto-slow" type="button" title="mais devagar">−</button><span id="ink-auto-sp" class="ia-val"></span><button id="ink-auto-fast" type="button" title="mais rápido">+</button></div>
+                </div>
+                <div class="ia-chips">
+                    ${chip('ink-auto-manga', IC.manga, 'Mangá', 'Modo mangá: leitura da direita para a esquerda')}
+                    ${chip('ink-auto-next', IC.next, 'Auto', 'Ao terminar o capítulo, abre o próximo e continua')}
+                    ${chip('ink-voice-btn', IC.voice, 'Voz', 'Lê os balões em voz alta (OCR + voz do navegador)')}
+                    ${chip('ink-eye-btn', IC.eye, 'Olhos', 'Filtro quente que reduz a luz azul (Alt+C)')}
+                    ${chip('ink-perf-btn', IC.perf, 'Leve', 'Modo desempenho (menos CPU/GPU)')}
+                    ${chip('ink-anx-btn', IC.anx, 'Ansiedade', 'Modo ansiedade: lê nervoso, em rajadas, com travadinhas e voltinhas')}
+                </div>
+                <div id="ink-voice-combo" class="ia-sub">
+                    <button id="ink-voice-pick" class="ia-row" type="button" title="Trocar a voz"><span class="ia-lbl" id="ink-voice-name"></span></button>
+                    <div class="ia-step"><button id="ink-voice-slow" type="button" title="voz mais devagar">−</button><span id="ink-voice-sp" class="ia-val"></span><button id="ink-voice-fast" type="button" title="voz mais rápida">+</button></div>
+                </div>
+                <div id="ink-eye-sub" class="ia-sub">
+                    <span class="ia-row" style="cursor:default"><span class="ia-lbl">Intensidade do filtro</span></span>
+                    <div class="ia-step"><button id="ink-eye-less" type="button" title="menos intenso">−</button><span id="ink-eye-lvl" class="ia-val"></span><button id="ink-eye-more" type="button" title="mais intenso">+</button></div>
+                </div>
+                <button id="ink-gender-btn" class="ia-row" type="button" title="Trocar entre menina e menino"><span class="ia-lbl" id="ink-gender-lbl"></span></button>
+                <div id="ink-skin-row" class="ia-skins" role="group" aria-label="Skin do modo menina">
+                    <span class="ia-sec">Skin</span>
+                    <div class="ia-skin-btns">${SKINS.map(k => `<button type="button" class="ia-skin" data-skin="${k.id}" title="Skin ${k.nome}">${k.emo} ${k.nome}</button>`).join('')}</div>
+                </div>
+                <div class="ia-sec">Missão</div>
+                <button id="ink-meta-pick" class="ia-row" type="button"><span class="ia-lbl" id="ink-meta-pick-lbl"></span></button>
+                <div class="ia-sub">
+                    <button id="ink-meta-btn" class="ia-row" type="button" title="Lê sozinho até completar a meta de páginas e para"><span class="ia-lbl" id="ink-meta-lbl"></span></button>
+                    <div class="ia-step"><button id="ink-meta-less" type="button" title="−1 página">−</button><span id="ink-meta-val" class="ia-val"></span><button id="ink-meta-more" type="button" title="+1 página">+</button></div>
+                </div>
+            </div>`;
+        document.body.appendChild(d);
+
+        const halt = e => { e.stopPropagation(); };
+        ['pointerdown', 'pointerup', 'touchstart', 'touchend', 'mousedown', 'mouseup', 'click'].forEach(ev => {
+            d.addEventListener(ev, halt, { passive: true });
+        });
+
+        d.querySelector('#ink-meta-pick').onclick = metaPick;
+        d.querySelector('#ink-meta-btn').onclick = metaToggle;
+        d.querySelector('#ink-meta-less').onclick = () => metaGoalStep(-1);
+        d.querySelector('#ink-meta-more').onclick = () => metaGoalStep(1);
+        metaPaint();
+        d.querySelector('#ink-auto-go').onclick = toggle;
+        d.querySelector('#ink-auto-mini-go').onclick = toggle;
+        d.querySelector('#ink-auto-slow').onclick = () => setSpeed(-1);
+        d.querySelector('#ink-auto-fast').onclick = () => setSpeed(1);
+        d.querySelector('#ink-auto-min').onclick = () => { cfg.min = !(cfg.min == null ? false : cfg.min); save(); applyMin(); };
+        d.querySelector('#ink-auto-manga').onclick = () => {
+            cfg.manga = !cfg.manga; save(); refreshBtn();
+            setSt(cfg.manga ? 'Modo mangá: avança para a esquerda.' : 'Modo ocidental: avança para a direita.');
+        };
+        d.querySelector('#ink-voice-btn').onclick = toggleVoice;
+        d.querySelector('#ink-voice-pick').onclick = cycleVoice;
+        d.querySelector('#ink-voice-slow').onclick = () => setVRate(-1);
+        d.querySelector('#ink-voice-fast').onclick = () => setVRate(1);
+        d.querySelector('#ink-auto-next').onclick = () => { cfg.auto = !cfg.auto; save(); refreshBtn(); };
+        d.querySelector('#ink-eye-btn').onclick = toggleEye;
+        d.querySelector('#ink-eye-less').onclick = () => setEyeLvl(-0.05);
+        d.querySelector('#ink-eye-more').onclick = () => setEyeLvl(0.05);
+        d.querySelector('#ink-perf-btn').onclick = () => {
+            if (cfg.perf == null) cfg.perf = true;
+            else if (cfg.perf === true) cfg.perf = false;
+            else cfg.perf = null;
+            save(); refreshBtn();
+            setSt(isPerf() ? '⚡ Modo desempenho ligado.' : '⚡ Modo desempenho desligado.');
+        };
+
+        d.querySelector('#ink-anx-btn').onclick = () => {
+            cfg.anx = ((cfg.anx | 0) + 1) % 3; save(); refreshBtn();
+            setSt(ANX_MSG[cfg.anx]);
+        };
+        d.querySelectorAll('[data-skin]').forEach(b => {
+            b.onclick = () => {
+                cfg.skin = b.dataset.skin; save(); applyTheme();
+                setSt(curSkin().msg);
+            };
+        });
+        d.querySelector('#ink-gender-btn').onclick = () => {
+            cfg.girl = !cfg.girl; save(); applyTheme();
+            setSt(cfg.girl ? 'Tema menina ' + mascot() : 'Tema menino.');
+        };
+
+        const head = d.querySelector('#ink-auto-head');
+        let drag = null;
+        head.addEventListener('pointerdown', e => {
+            if (e.target.closest('button')) return;
+            e.stopPropagation();
+            const r = d.getBoundingClientRect();
+            drag = { dx: e.clientX - r.left, dy: e.clientY - r.top, id: e.pointerId, sx: e.clientX, sy: e.clientY, moved: false };
+            try { head.setPointerCapture(e.pointerId); } catch (_) { }
+            head.style.cursor = 'grabbing';
+        });
+        head.addEventListener('pointermove', e => {
+            if (!drag || e.pointerId !== drag.id) return;
+            if (!drag.moved) {
+                if (Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) < 8) return;
+                drag.moved = true;
+            }
+            cfg.pos = { x: e.clientX - drag.dx, y: e.clientY - drag.dy };
+            applyPos();
+        });
+        const end = () => { if (!drag) return; drag = null; head.style.cursor = 'grab'; save(); };
+        head.addEventListener('pointerup', end);
+        head.addEventListener('pointercancel', end);
+
+        applyTheme(); refreshBtn(); applyMin(); applyEye();
+        if (typeof musMount === 'function') musMount(d);
     }
-    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
-    else init();
+    window.addEventListener('resize', () => { if (cfg.pos) applyPos(); }, { passive: true });
+
+    ['keydown', 'pointerdown', 'wheel', 'touchstart'].forEach(ev =>
+        window.addEventListener(ev, e => { if (e.isTrusted && !(e.target && e.target.closest && e.target.closest('#ink-auto-ui'))) lastUser = Date.now(); }, { capture: true, passive: true }));
+    window.addEventListener('keydown', e => {
+        if (!e.isTrusted || !e.altKey) return;
+        if (e.key === 'l' || e.key === 'L') { e.preventDefault(); if (location.pathname.startsWith('/ler/')) toggle(); }
+        else if (e.key === 'c' || e.key === 'C') { e.preventDefault(); if (location.pathname.startsWith('/ler/')) toggleEye(); }
+    });
+
+    let lastPath = location.pathname;
+    function route() {
+        const on = location.pathname.startsWith('/ler/');
+        if (location.pathname !== lastPath) { lastPath = location.pathname; cache.ctr = cache.pg = cache.pct = null; cache.t = 0; }
+        applyEye();
+        if (on) mount();
+        else {
+            const u = document.getElementById('ink-auto-ui'); if (u) u.remove();
+            stop('Parado.');
+        }
+    }
+    ['pushState', 'replaceState'].forEach(k => {
+        const o = history[k];
+        history[k] = function (...a) { const r = o.apply(this, a); setTimeout(route, 0); return r; };
+    });
+    window.addEventListener('popstate', route);
+    setInterval(route, 2500);
+    route();
+    window.lerAuto = {
+        meta: n => { if (n) cfg.metaGoal = n; if (!meta.on) metaToggle(); return cfg.metaGoal; },
+        metaStatus: () => ({ ...meta, seen: meta.seen.size, goal: cfg.metaGoal }),
+        start: () => { if (!running) loop(); },
+        stop: () => stop('Parado.'),
+        next: () => { const e = findNextEl(); console.log(e); return e; },
+        voices: () => ptVoices().map(v => v.name + ' (' + v.lang + ')'),
+        bin1: v => { cfg.bin1 = v !== false; save(); return cfg.bin1; },
+        bin: v => { cfg.bin = v !== false; save(); return cfg.bin; },
+        debug: v => { cfg.dbg = v !== false; save(); return cfg.dbg; },
+        counters: () => { scan(); cache.t = performance.now(); const s = readState(); return s; },
+        ocrTest: async () => { const t = await ocrView(); console.log('[Ink-Audio] texto:', t); return t; }
+    };
 })();
