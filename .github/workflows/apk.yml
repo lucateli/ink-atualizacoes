@@ -23,10 +23,12 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - uses: android-actions/setup-android@v3
-
-      - name: Instalar SDK do Android 34
-        run: sdkmanager --install "platforms;android-34" "build-tools;34.0.0"
+      - name: Preparar SDK do Android (já vem na máquina do GitHub)
+        run: |
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager --install "platforms;android-34" "build-tools;34.0.0"
+          ls "$ANDROID_HOME/platforms" "$ANDROID_HOME/build-tools"
 
       - uses: gradle/actions/setup-gradle@v4
         with:
@@ -427,4 +429,3 @@ jobs:
         with:
           name: ink-leitor-apk
           path: ink-leitor.apk
- 
