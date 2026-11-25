@@ -3,44 +3,108 @@
     window.__inkLeitorV2 = true;
 
     /* =====================================================================
-       PATCH ANDROID (DESTRUIR POPUPS E FORÇAR TOQUE)
+       PATCH ANDROID (DESTRUIR TELA PRETA E FORÇAR TOQUE)
        ===================================================================== */
     (function androidFixes() {
-        const KEY = 'serei sempre legal';
-        let _t = 0;
-        const matarPopup = () => {
-            _t = 0;
-            const body = document.body;
-            if (!body || !(body.textContent || '').toLowerCase().includes(KEY)) return;
-            const w = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
-            let n;
-            while ((n = w.nextNode())) {
-                if (!n.nodeValue || !n.nodeValue.toLowerCase().includes(KEY)) continue;
-                let modal = n.parentElement;
-                for (let i = 0; i < 10 && modal && modal.parentElement && modal.parentElement.tagName !== 'BODY'; i++) modal = modal.parentElement;
-                if (modal && modal.remove) { modal.remove(); console.log('[Ink-Fix] Popup DESTRUÍDO!'); }
-                break;
+        // 1. Injeta CSS para forçar a liberação da tela e do toque
+        const style = document.createElement('style');
+        style.innerHTML = `
+            html, body {
+                overflow: auto !important;
+                pointer-events: auto !important;
+                touch-action: auto !important;
+                position: static !important;
             }
-        };
-        const agendar = () => { if (!_t) _t = setTimeout(matarPopup, 350); };
-        setInterval(() => { if (!document.hidden) agendar(); }, 3000);
-        const startObs = () => { if (document.body) new MutationObserver(agendar).observe(document.body, { childList: true, subtree: true }); };
-        if (document.body) startObs(); else document.addEventListener('DOMContentLoaded', startObs, { once: true });
-        agendar();
+            .reader-container, .comic-image, canvas {
+                pointer-events: auto !important;
+            }
+        `;
+        if (document.head) document.head.appendChild(style);
+        else document.addEventListener('DOMContentLoaded', () => document.head.appendChild(style));
 
-        const originalAddEventListener = EventTarget.prototype.addEventListener;
-        const TOUCH_TYPES = { touchstart: 1, touchmove: 1, pointerdown: 1, pointermove: 1 };
-        EventTarget.prototype.addEventListener = function (type, listener, options) {
-            try {
-                if (TOUCH_TYPES[type] && location.pathname.startsWith('/ler/')) {
-                    if (options && typeof options === 'object') options = Object.assign({}, options, { passive: false });
-                    else if (typeof options === 'boolean') options = { capture: options, passive: false };
-                    else options = { passive: false };
+        const KEY = 'serei sempre legal';
+
+        const destruirBloqueios = () => {
+            if (!document.body) return;
+
+            // 2. Destrói o popup procurando pelo texto exato
+            if ((document.body.textContent || '').toLowerCase().includes(KEY)) {
+                const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+                let node;
+                while ((node = walker.nextNode())) {
+                    if (node.nodeValue && node.nodeValue.toLowerCase().includes(KEY)) {
+                        let el = node.parentElement;
+                        for (let i = 0; i < 10 && el && el !== document.body; i++) {
+                            if (el.tagName === 'DIV' || el.tagName === 'SECTION' || el.getAttribute('role') === 'dialog') {
+                                el.remove();
+                                break;
+                            }
+                            el = el.parentElement;
+                        }
+                    }
                 }
-            } catch (_) { }
-            return originalAddEventListener.call(this, type, listener, options);
+            }
+
+            // 3. Força bruta: Remove a TELA PRETA (Overlays) que bloqueiam o quadrinho
+            document.querySelectorAll('div, section, dialog, overlay, [class*="modal"], [class*="popup"]').forEach(el => {
+                if (el === document.body || el === document.documentElement) return;
+                
+                const cs = window.getComputedStyle(el);
+                const zIndex = parseInt(cs.zIndex || '0', 10);
+                
+                const isFullScreen = (cs.position === 'fixed' || cs.position === 'absolute') && 
+                                     (cs.inset === '0px' || (cs.width === '100%' && cs.height === '100%') || zIndex > 50);
+
+                const isPreto = cs.backgroundColor.includes('0, 0, 0') || 
+                                cs.backgroundColor === 'black' || 
+                                cs.backgroundColor.includes('rgba(0, 0, 0');
+
+                if (isFullScreen && isPreto) {
+                    // Não remove se for o quadrinho em si
+                    if (!el.querySelector('.comic-page') && !el.querySelector('canvas')) {
+                        el.remove();
+                    }
+                }
+            });
+
+            // 4. Desbloqueia o body e html
+            document.documentElement.style.setProperty('overflow', 'auto', 'important');
+            document.documentElement.style.setProperty('pointer-events', 'auto', 'important');
+            document.documentElement.style.setProperty('touch-action', 'auto', 'important');
+            
+            document.body.style.setProperty('overflow', 'auto', 'important');
+            document.body.style.setProperty('pointer-events', 'auto', 'important');
+            document.body.style.setProperty('touch-action', 'auto', 'important');
+            document.body.style.setProperty('position', 'static', 'important');
+            
+            document.body.className = document.body.className.replace(/(modal-open|no-scroll|locked|overflow-hidden|blur)/gi, '').trim();
         };
-        console.log('[Ink-Fix] Patches Android aplicados.');
+
+        // Executa assim que a página carregar
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', destruirBloqueios);
+        } else {
+            destruirBloqueios();
+        }
+
+        // Vigia a página (se o site recriar a tela preta, ele apaga na hora)
+        const observer = new MutationObserver(() => {
+            destruirBloqueios();
+        });
+        observer.observe(document.documentElement, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['style', 'class']
+        });
+
+        // Backup de segurança
+        let tentativas = 0;
+        const interval = setInterval(() => {
+            destruirBloqueios();
+            tentativas++;
+            if (tentativas > 15) clearInterval(interval);
+        }, 1000);
     })();
 
     /* =====================================================================
