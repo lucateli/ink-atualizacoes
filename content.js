@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ink Leitor
 // @namespace    ink-leitor
-// @version      4.9.1
+// @version      4.9.2
 // @description  Leitor automático, OCR, TTS, música, ordenador de capítulos, auto-arrumar bolhas, timer de sono, estatísticas e mais
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
@@ -78,7 +78,7 @@
         const iv = setInterval(tick, 1500);
     })();
 
-    const VERSION = '4.9.1';
+    const VERSION = '4.9.2';
     const IS_MOBILE = (() => {
         try { return matchMedia('(pointer:coarse)').matches || innerWidth < 700; }
         catch (e) { return innerWidth < 700; }
@@ -592,8 +592,10 @@
                 const tr = (modal || document).querySelector('.bz-order__track');
                 if (tr) t = [...tr.children];
             }
-            const only = t.filter(k => /bolha/i.test(k.getAttribute('aria-label') || ''));
-            return only.length >= 2 ? only : t.filter(k => k.querySelector('.bz-order__thumb'));
+            // o quadrado "+" (adicionar) não tem miniatura e não pode contar como bolha
+            const comThumb = t.filter(k => k.querySelector('.bz-order__thumb'));
+            if (comThumb.length) return comThumb;
+            return t.filter(k => /bolha/i.test(k.getAttribute('aria-label') || ''));
         }
 
         // plano A: posição da bolha na página (frações 0..1), lida do recorte da miniatura
@@ -2195,6 +2197,9 @@
      * ================================================================== */
     /*CL_START*/
     const CHANGELOG = [
+        { "v": "4.9.2", "d": "2026-11-26", "t": [
+            "Auto Mangá/HQ: o quadrado + não é mais contado como bolha, o que causava o erro de não ler a posição das bolhas"
+        ] },
         { "v": "4.9.1", "d": "2026-11-26", "t": [
             "Auto Mangá/HQ corrigido: quando as miniaturas das bolhas não permitem calcular a posição, o painel agora lê pelas caixas numeradas desenhadas sobre a página",
             "A mensagem de erro agora diz o que tentou, para facilitar achar o problema"
