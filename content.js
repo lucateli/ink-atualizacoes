@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ink Leitor
 // @namespace    ink-leitor
-// @version      4.10.0
+// @version      4.11.0
 // @description  Leitor automático, OCR, TTS, música, ordenador de capítulos, auto-arrumar bolhas, timer de sono, estatísticas e mais
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
@@ -78,7 +78,7 @@
         const iv = setInterval(tick, 1500);
     })();
 
-    const VERSION = '4.10.0';
+    const VERSION = '4.11.0';
     const IS_MOBILE = (() => {
         try { return matchMedia('(pointer:coarse)').matches || innerWidth < 700; }
         catch (e) { return innerWidth < 700; }
@@ -762,7 +762,7 @@
 
         async function run(mode, say, preview) {
             const tiles = getTiles();
-            if (tiles.length < 2) { say(tiles.length ? '⚠ Só 1 balão, nada pra ordenar' : '⚠ Não achei os balões nesta tela'); return; }
+            if (tiles.length < 2) { say(tiles.length ? '⚠ Só 1 balão, nada pra ordenar' : '⚠ Não achei os balões nesta tela'); return tiles.length === 1; }
 
             // plano A: recorte da miniatura
             let pts = [], failA = '';
@@ -785,13 +785,14 @@
             if (preview) { showPreview(sorted, say); return; }
             const lbl = e => (e.getAttribute('aria-label') || '?').replace(/\D+/g, '');
             console.info('[Ink] ordem atual:', curOrder().map(lbl).join(','), '→ alvo:', sorted.map(lbl).join(','));
-            if (curOrder().every((e, i) => e === sorted[i])) { say(`✓ Já estava na ordem certa (${mode === 'manga' ? 'mangá' : 'HQ'})`); return; }
+            if (curOrder().every((e, i) => e === sorted[i])) { say(`✓ Já estava na ordem certa (${mode === 'manga' ? 'mangá' : 'HQ'})`); return true; }
             say('⏳ Arrumando…');
             undoOrder = curOrder();
             const ok = await reorder(sorted, (n, t) => say(`⏳ Posição ${n} de ${t}…`));
             if (stopAsked) say('⏹ Parado. Toque em Desfazer para voltar à ordem anterior.');
             else if (ok) say(`✓ ${tiles.length} balões arrumados (${mode === 'manga' ? 'mangá' : 'HQ'}). Confira e toque em Salvar.`);
             else say('⚠ Não consegui arrastar tudo. Confira os números antes de Salvar.');
+            return ok && !stopAsked;
         }
 
         // mostra, ao lado de cada número atual, o número que a bolha vai receber (não move nada)
@@ -882,7 +883,185 @@
             }, isPerf() ? 1200 : 700);
         }
 
-        return { start, get isOpen() { return isOpen; } };
+        // usado pelo modo "Preparar capítulo"
+        async function arrange(mode, say) {
+            if (working) return false;
+            working = true; stopAsked = false; clearPreview();
+            try { return await run(mode, say) === true; }
+            finally { working = false; }
+        }
+        const halt = () => { if (working) stopAsked = true; };
+
+        return { start, findModal, getTiles, arrange, halt, get isOpen() { return isOpen; } };
+    })();
+
+    /* ================================================================== *
+     *  6b. PREPARAR CAPÍTULO: arruma e salva as bolhas página por página
+     * ================================================================== */
+    const Prep = (() => {
+        let on = false;
+        const RX = /^(?:(\d+)\s*\/\s*(\d+)\s*[·•|-]\s*)?(\d+)\s*\/\s*(\d+)$/;
+        const STOP = new Error('parado');
+        const check = () => { if (!on) throw STOP; };
+        const visible = e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+        const mine = e => e.closest('#ink-panel,#ink-news,#ink-auto-row');
+
+        // contador do site, lido na hora: "4/24" ou "1/6 · 4/24"
+        let ctrEl = null;
+        function counter() {
+            const read = e => { const m = e && e.isConnected && RX.exec(txt(e)); return m && +m[3] >= 1 && +m[3] <= +m[4] ? { b: m[1] ? +m[1] : null, bt: m[2] ? +m[2] : null, p: +m[3], pt: +m[4] } : null; };
+            const c = read(ctrEl);
+            if (c && visible(ctrEl)) return c;
+            ctrEl = $$('body *').find(e => e.childElementCount <= 3 && !mine(e) && read(e) && visible(e)) || null;
+            return read(ctrEl);
+        }
+        async function waitFor(fn, ms) {
+            const t0 = Date.now();
+            for (;;) {
+                check();
+                while (document.hidden) { await sleep(500); check(); }
+                const v = fn();
+                if (v) return v;
+                if (Date.now() - t0 >= ms) return null;
+                await sleep(120);
+            }
+        }
+
+        const zoomBtn = () => $$('button,[role=button]').find(b => !mine(b) && /bubble\s*zoom/i.test(`${b.getAttribute('aria-label') || ''} ${b.title || ''}`));
+        const zoomIsOn = () => { const b = zoomBtn(); return !!b && /desligar/i.test(`${b.getAttribute('aria-label') || ''} ${b.title || ''}`); };
+        async function setZoom(want) {
+            if (zoomIsOn() === want) return;
+            const b = zoomBtn();
+            if (!b) throw new Error('não achei o botão do Bubble Zoom (mostre os controles da leitura)');
+            b.click();
+            if (!await waitFor(() => zoomIsOn() === want, 3000)) throw new Error('o Bubble Zoom não respondeu');
+        }
+
+        // a engrenagem fica na mesma barra do "4×", depois do − e do +
+        function gearBtn() {
+            const named = $$('button').find(b => !mine(b) && visible(b) && /arrumar.*bolha|ajustar.*bolha|editar.*bolha/i.test(`${b.getAttribute('aria-label') || ''} ${b.title || ''}`));
+            if (named) return named;
+            for (const z of $$('body *')) {
+                if (z.childElementCount || mine(z) || !/^\d+(?:[.,]\d+)?\s*[×x]$/.test(txt(z)) || !visible(z)) continue;
+                let box = z.parentElement;
+                for (let i = 0; i < 3 && box; i++, box = box.parentElement) {
+                    const bs = $$('button', box).filter(visible);
+                    if (bs.length >= 3 && bs.length <= 4) return bs[bs.length - 1];
+                }
+            }
+            return null;
+        }
+
+        // anda UMA página (dir = 1 próxima, -1 anterior), com o zoom desligado
+        let learned = {};
+        async function step(dir) {
+            await setZoom(false);
+            const from = await waitFor(counter, 4000);
+            if (!from) throw new Error('não li o número da página');
+            const fwd = cfg.manga ? MANGA : WEST, bwd = cfg.manga ? WEST : MANGA;
+            const list = [...(dir > 0 ? fwd : bwd), 'PageDown', 'botao'].filter(n => dir > 0 || (n !== 'PageDown' && n !== 'botao'));
+            if (learned[dir]) list.unshift(learned[dir]);
+            for (const name of list) {
+                check();
+                try { if (!METHODS[name]()) continue; } catch (e) { continue; }
+                const now = await waitFor(() => { const c = counter(); return c && c.p !== from.p ? c : null; }, 1200);
+                if (!now) continue;
+                if (now.p === from.p + dir) { learned[dir] = name; await sleep(350); return; }
+                throw new Error(`a página pulou de ${from.p} para ${now.p}`);
+            }
+            throw new Error(`não consegui sair da página ${from.p}`);
+        }
+        async function goTo(target, say) {
+            for (let n = 0; n < 600; n++) {
+                const c = await waitFor(counter, 4000);
+                if (!c) throw new Error('não li o número da página');
+                if (c.p === target) return;
+                say(`↩ Voltando: página ${c.p} → ${target}`);
+                await step(c.p < target ? 1 : -1);
+            }
+            throw new Error('não cheguei na página ' + target);
+        }
+
+        const modalBtn = (m, rx) => $$('button', m).find(b => rx.test(txt(b)));
+        async function closeModal(rx) {
+            const m = BubbleSorter.findModal();
+            if (!m) return;
+            const b = modalBtn(m, rx);
+            if (!b) throw new Error('não achei o botão para fechar as bolhas');
+            b.click();
+            if (!await waitFor(() => !BubbleSorter.findModal(), 8000)) throw new Error('a tela das bolhas não fechou');
+        }
+
+        // devolve 'ok', 'vazia' (sem balões) ou 'falhou'
+        async function doPage(page, say) {
+            await setZoom(true);
+            const c = await waitFor(() => { const x = counter(); return x && x.p === page && x.b != null ? x : null; }, 7000);
+            if (!c) return 'vazia';
+            const gear = await waitFor(gearBtn, 3000);
+            if (!gear) throw new Error('não achei a engrenagem das bolhas');
+            gear.click();
+            if (!await waitFor(() => BubbleSorter.findModal(), 5000)) throw new Error('a engrenagem não abriu Arrumar as bolhas');
+            // espera as bolhas terminarem de carregar (mesma quantidade por um tempinho)
+            let last = -1, since = 0;
+            await waitFor(() => {
+                const n = BubbleSorter.getTiles().length;
+                if (n !== last) { last = n; since = Date.now(); }
+                return n > 0 && Date.now() - since > 900;
+            }, 8000);
+            const ok = await BubbleSorter.arrange(cfg.manga ? 'manga' : 'hq', m => say(`Pág ${page}: ${m}`));
+            check();
+            if (!ok) { await closeModal(/^cancelar$/i); return 'falhou'; }
+            await closeModal(/^salvar$/i);
+            await sleep(700);
+            return 'ok';
+        }
+
+        function paint() {
+            const b = $('ink-prep');
+            if (b) b.textContent = on ? '⏹ Parar preparo' : '🧰 Preparar capítulo';
+        }
+        function report(t) {
+            setStatus(t);
+            const e = $('ink-prep-st'); if (e) e.textContent = t;
+        }
+        async function start() {
+            if (on) { on = false; BubbleSorter.halt(); report('⏹ Parando…'); return; }
+            if (!location.pathname.startsWith('/ler/')) { report('⚠ Abra um capítulo primeiro'); return; }
+            if (BubbleSorter.findModal()) { report('⚠ Feche Arrumar as bolhas antes de começar'); return; }
+            if (running) stop('Leitura parada para preparar o capítulo');
+            on = true; learned = {}; ctrEl = null; paint();
+            const path = location.pathname;
+            const saved = [], empty = [], failed = [];
+            let total = 0, page = 0, end = '';
+            try {
+                if (!await waitFor(counter, 5000)) throw new Error('não achei o contador de páginas (mostre os controles da leitura)');
+                await setZoom(false);
+                await goTo(1, report);
+                total = counter().pt;
+                for (page = 1; page <= total; page++) {
+                    if (location.pathname !== path) throw new Error('o capítulo mudou');
+                    report(`🧰 Página ${page} de ${total} (${Math.round((page - 1) / total * 100)}%) · ${cfg.manga ? 'mangá' : 'HQ'}`);
+                    const r = await doPage(page, report);
+                    (r === 'ok' ? saved : r === 'vazia' ? empty : failed).push(page);
+                    if (page < total) await step(1);
+                }
+                await setZoom(false);
+                await goTo(1, report);
+                await setZoom(true);
+                end = failed.length ? '⚠ Preparo terminou com pendências' : '✓ Preparo terminou';
+            } catch (e) {
+                end = e === STOP ? `⏹ Parado na página ${page || '?'}` : `⚠ Parei${page ? ' na página ' + page : ''}: ${e.message || e}`;
+                if (e !== STOP) console.warn('[Ink] preparo:', e);
+            }
+            on = false; paint();
+            report(`${end}. Salvas: ${saved.length}${total ? ' de ' + total : ''}`
+                + (empty.length ? ` · sem balões detectados: ${empty.join(', ')}` : '')
+                + (failed.length ? ` · revisar: ${failed.join(', ')}` : ''));
+        }
+        // Esc também para o preparo
+        document.addEventListener('keydown', e => { if (on && e.key === 'Escape') { on = false; BubbleSorter.halt(); } }, true);
+
+        return { start, get on() { return on; } };
     })();
 
     /* ================================================================== *
@@ -2335,6 +2514,10 @@
      * ================================================================== */
     /*CL_START*/
     const CHANGELOG = [
+        { "v": "4.11.0", "d": "2026-11-26", "t": [
+            "Novo botão Preparar capítulo: arruma e salva as bolhas página por página e volta para a página 1",
+            "Páginas que não derem certo não são salvas e aparecem na lista para revisar"
+        ] },
         { "v": "4.10.0", "d": "2026-11-26", "t": [
             "Arrumar as bolhas: novos botões Prévia, Desfazer e Parar, e andamento durante o arraste",
             "Dicionário de pronúncia e botão para repetir a última fala",
@@ -2674,6 +2857,8 @@ padding:8px;border:1px solid var(--ib-line);border-radius:16px;background:var(--
   <div class="ia-pane" data-pane="read">
     <button class="ia-cont" id="ink-cont" hidden><span></span></button>
     <button class="ia-go" id="ink-go">${ICO.play}<span>Ler sozinho</span></button>
+    <div class="ia-row"><button class="ia-chip" id="ink-prep" title="Arruma e salva as bolhas de todas as páginas">🧰 Preparar capítulo</button></div>
+    <div id="ink-prep-st" style="font-size:.85em;line-height:1.35"></div>
     <div class="ia-row ia-step">
       <button class="ia-chip" id="ink-spd-" aria-label="Diminuir">−</button>
       <span class="ia-val" id="ink-spd">1.5×</span>
@@ -2843,8 +3028,9 @@ Alt+Shift+ponto / vírgula: mais / menos velocidade</div>
         (document.body || document.documentElement).appendChild(u);
 
         // ---- Handlers ----
-        $('ink-go').onclick = () => { if (running) stop('Parado.'); else mainLoop(); };
+        $('ink-go').onclick = () => { if (Prep.on) setStatus('⚠ Espere o preparo terminar ou pare-o'); else if (running) stop('Parado.'); else mainLoop(); };
         $('ink-mini-go').onclick = $('ink-go').onclick;
+        $('ink-prep').onclick = () => Prep.start();
         $('ink-upd-chk').onclick = () => checkUpdate(true);
         $('ink-news-btn').onclick = () => openNews();
         $('ink-min').onclick = () => { cfg.min = !cfg.min; saveCfg(); applyMin(); };
