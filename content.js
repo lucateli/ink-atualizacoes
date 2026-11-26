@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ink Leitor
 // @namespace    ink-leitor
-// @version      4.12.0
+// @version      4.13.0
 // @description  Leitor automático, OCR, TTS, música, ordenador de capítulos, auto-arrumar bolhas, timer de sono, estatísticas e mais
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
@@ -78,7 +78,7 @@
         const iv = setInterval(tick, 1500);
     })();
 
-    const VERSION = '4.12.0';
+    const VERSION = '4.13.0';
     const IS_MOBILE = (() => {
         try { return matchMedia('(pointer:coarse)').matches || innerWidth < 700; }
         catch (e) { return innerWidth < 700; }
@@ -1052,13 +1052,17 @@
             on = true; learned = {}; ctrEl = null; paint();
             const path = location.pathname;
             const saved = from ? [...from.saved] : [], empty = from ? [...from.empty] : [], failed = from ? [...from.failed] : [];
-            const manga = from ? from.manga : !!cfg.manga;
-            if (cfg.manga !== manga) { cfg.manga = manga; saveCfg(); refreshPanel(); }
+            let manga = from ? from.manga : !!cfg.manga;
             let total = 0, page = 0, end = '';
             const keep = next => { cfg.prep = { path, next, total, manga, saved: [...saved], empty: [...empty], failed: [...failed] }; saveCfg(); };
             try {
                 if (!await waitFor(counter, 5000)) throw new Error('não achei o contador de páginas (mostre os controles da leitura)');
                 await setZoom(false);
+                // com o zoom desligado o botão MANGÁ do site aparece: usa ele
+                const found = await waitFor(siteMode, 2000);
+                if (from && found && (found === 'manga') !== from.manga) throw new Error(`o site está em ${found === 'manga' ? 'mangá' : 'HQ'}, mas o preparo salvo usou ${from.manga ? 'mangá' : 'HQ'}; use Recomeçar do zero`);
+                if (!from && found) manga = found === 'manga';
+                setMode(manga ? 'manga' : 'hq');
                 const first = from ? from.next : 1;
                 total = counter().pt;
                 if (from && from.total !== total) { cfg.prep = null; throw new Error('o total de páginas mudou; comece de novo'); }
@@ -2234,6 +2238,55 @@
         e.preventDefault(); e.stopPropagation(); f();
     }
 
+    /* ---- Mangá automático: segue o botão MANGÁ do próprio leitor do Ink ---- */
+    const SITE = { sig: '', noBtn: 0 };
+    const siteShown = e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0 && !e.closest('#ink-panel,#ink-news,#ink-auto-row,#ink-order-bar,.bz-order'); };
+    const siteLabel = b => `${b.getAttribute('aria-label') || ''} ${b.title || ''}`;
+    function siteBtnOn(b) {
+        for (const a of ['aria-pressed', 'aria-checked', 'aria-selected']) { const v = b.getAttribute(a); if (v === 'true') return true; if (v === 'false') return false; }
+        if (/(^|\s|--|__)(is-)?(active|on|selected|ativo)(\s|$)/i.test(b.getAttribute('class') || '')) return true;
+        // sem marcação: o botão aceso tem fundo; compara com os vizinhos
+        const fundo = e => { const m = /rgba?\(([^)]+)\)/.exec(getComputedStyle(e).backgroundColor); if (!m) return 0; const v = m[1].split(/[,\s/]+/).filter(Boolean); return v.length > 3 ? parseFloat(v[3]) : 1; };
+        const eu = fundo(b), outros = [...b.parentElement.children].filter(x => x !== b).map(fundo);
+        if (outros.length) {
+            if (eu > Math.min(...outros) + 0.03) return true;
+            if (eu + 0.03 < Math.max(...outros)) return false;
+        }
+        return null;
+    }
+    // 'manga', 'hq' ou null (não dá pra saber agora, ex.: controles escondidos)
+    function siteMode() {
+        if (!location.pathname.startsWith('/ler/')) return null;
+        const btns = $$('button,[role=button],[role=radio],[role=tab]').filter(siteShown);
+        const mb = btns.find(b => /^[^\p{L}]*mang[aá][^\p{L}]*$/iu.test(txt(b)) || /(modo|leitura|dire[cç][aã]o)[^|]{0,20}mang[aá]/i.test(siteLabel(b)));
+        if (mb) { const on = siteBtnOn(mb); return on === false ? 'hq' : 'manga'; }
+        // sem botão MANGÁ: só conclui que é HQ se a barra de modos de página estiver na tela
+        const zoom = btns.find(b => /ligar\s*bubble\s*zoom/i.test(siteLabel(b)) && !/desligar/i.test(siteLabel(b)));
+        const group = zoom && zoom.parentElement, next = group && group.nextElementSibling;
+        return next && $$('button', next).filter(siteShown).length >= 2 ? 'hq' : null;
+    }
+    function setMode(m) {
+        const manga = m === 'manga';
+        if (cfg.manga === manga) return;
+        cfg.manga = manga; saveCfg(); workSave();
+        try { OrderBar.sync(); } catch (e) { }
+        refreshPanel();
+        setStatus(manga ? '📖 Mangá ativado automaticamente' : '📚 HQ ativado automaticamente');
+    }
+    // só age quando o site muda, para o botão do painel continuar valendo se você trocar na mão
+    function siteTick() {
+        if (Prep.on) return;
+        const m = siteMode();
+        if (!m) { SITE.noBtn = 0; return; }
+        // a barra pode aparecer aos poucos: HQ só vale depois de confirmado duas vezes
+        if (m === 'hq' && ++SITE.noBtn < 2) return;
+        if (m === 'manga') SITE.noBtn = 0;
+        const sig = location.pathname + '|' + m;
+        if (sig === SITE.sig) return;
+        SITE.sig = sig;
+        setMode(m);
+    }
+
     /* ---- Por obra ---- */
     const WORK = { path: '', key: '' };
     function applyWork(k) {
@@ -2546,6 +2599,10 @@
      * ================================================================== */
     /*CL_START*/
     const CHANGELOG = [
+        { "v": "4.13.0", "d": "2026-11-26", "t": [
+            "Mangá automático: o painel segue o botão MANGÁ do leitor do Ink",
+            "Preparar capítulo confere o modo do site antes de começar"
+        ] },
         { "v": "4.12.0", "d": "2026-11-26", "t": [
             "Novo botão Continuar: o preparo volta da página onde parou",
             "Recomeçar do zero agora pede um segundo toque, para evitar toque por engano"
@@ -3641,7 +3698,7 @@ Alt+Shift+ponto / vírgula: mais / menos velocidade</div>
         setTimeout(() => checkUpdate(false), 4000);
         setInterval(() => checkUpdate(false), 6 * 3600 * 1000);
         // o site é SPA: reavalia a barra de capítulos, o filtro de olho, a obra atual e o "continuar" ao navegar
-        setInterval(() => { try { workTick(); eyeAutoTick(); if (document.hidden) return; OrderBar.build(); applyEye(); contPaint(); } catch (e) { } }, 1500);
+        setInterval(() => { try { workTick(); eyeAutoTick(); if (document.hidden) return; siteTick(); OrderBar.build(); applyEye(); contPaint(); } catch (e) { } }, 1500);
         // grava onde você está lendo (mais espaçado no modo leve)
         setInterval(() => { try { trackRead(); } catch (e) { } }, isPerf() ? 4000 : 2500);
         eyeAutoTick();
