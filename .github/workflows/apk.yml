@@ -1,5 +1,6 @@
 # Gera o APK do Ink Leitor (app com WebView + content.js + OCR) direto no GitHub.
-# Como usar: Actions > "Gerar APK" > Run workflow. Quando terminar, o APK fica em Releases ("apk-latest").
+# Roda sozinho quando você dá push no content.js (ou manualmente: Actions > "Gerar APK" > Run workflow).
+# Quando terminar, o APK fica em Releases ("apk-latest").
 name: Gerar APK
 
 on:
@@ -7,9 +8,14 @@ on:
   push:
     paths:
       - '.github/workflows/apk.yml'
+      - 'content.js'
 
 permissions:
   contents: write
+
+concurrency:
+  group: gerar-apk
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -38,6 +44,7 @@ jobs:
         env:
           REPO: ${{ github.repository }}
           BRANCH: ${{ github.event.repository.default_branch }}
+          RUN_NUM: ${{ github.run_number }}
         run: |
           set -euo pipefail
           P=app-proj
@@ -116,11 +123,19 @@ jobs:
             window.__inkCapDone = function (id, data, err) {
               window.postMessage({ inkCapRes: id, data: data, err: err }, '*');
             };
+            window.__inkUpdDone = function (id, ok, err) {
+              window.postMessage({ inkUpdRes: id, data: ok ? { ok: true, src: 'app' } : null, err: ok ? null : (err || 'falhou') }, '*');
+            };
             window.addEventListener('message', function (e) {
               var d = e.data;
-              if (e.source !== window || !d || !d.inkCap) return;
-              try { InkNative.capture(String(d.inkCap)); }
-              catch (x) { window.__inkCapDone(d.inkCap, null, String(x)); }
+              if (e.source !== window || !d) return;
+              if (d.inkCap) {
+                try { InkNative.capture(String(d.inkCap)); }
+                catch (x) { window.__inkCapDone(d.inkCap, null, String(x)); }
+              } else if (d.inkUpd) {
+                try { InkNative.update(String(d.inkUpd)); }
+                catch (x) { window.__inkUpdDone(d.inkUpd, false, String(x)); }
+              }
             });
           })();
           EOF_SHIM
@@ -172,6 +187,7 @@ jobs:
               static final String UPDATE_URL = "@UPDATE_URL@";   // trocado pelo workflow
               private WebView web;
               private volatile Thread updater;
+              private long lastCheck = 0;
               private final Handler ui = new Handler(Looper.getMainLooper());
 
               @Override
@@ -206,24 +222,36 @@ jobs:
               }
 
               /* ---------- atualização do content.js (GitHub) ---------- */
+              // baixa o content.js novo e guarda no armazenamento do app. true = gravou.
+              private synchronized boolean fetchUpdate() {
+                  try {
+                      HttpURLConnection c = (HttpURLConnection) new URL(UPDATE_URL + "?t=" + System.currentTimeMillis()).openConnection();
+                      c.setConnectTimeout(5000);
+                      c.setReadTimeout(8000);
+                      c.setUseCaches(false);
+                      if (c.getResponseCode() != 200) return false;
+                      String t;
+                      try (InputStream in = c.getInputStream()) { t = readAll(in); }
+                      if (t.length() > 20000 && t.contains("const VERSION")) {
+                          File tmp = new File(getFilesDir(), "content.js.tmp");
+                          try (FileOutputStream f = new FileOutputStream(tmp)) { f.write(t.getBytes(StandardCharsets.UTF_8)); }
+                          return tmp.renameTo(new File(getFilesDir(), "content.js"));
+                      }
+                  } catch (Exception ignored) { }
+                  return false;
+              }
+
               private void startUpdater() {
-                  updater = new Thread(() -> {
-                      try {
-                          HttpURLConnection c = (HttpURLConnection) new URL(UPDATE_URL + "?t=" + System.currentTimeMillis()).openConnection();
-                          c.setConnectTimeout(5000);
-                          c.setReadTimeout(8000);
-                          c.setUseCaches(false);
-                          if (c.getResponseCode() != 200) return;
-                          String t;
-                          try (InputStream in = c.getInputStream()) { t = readAll(in); }
-                          if (t.length() > 20000 && t.contains("const VERSION")) {
-                              File tmp = new File(getFilesDir(), "content.js.tmp");
-                              try (FileOutputStream f = new FileOutputStream(tmp)) { f.write(t.getBytes(StandardCharsets.UTF_8)); }
-                              tmp.renameTo(new File(getFilesDir(), "content.js"));
-                          }
-                      } catch (Exception ignored) { }
-                  });
+                  lastCheck = System.currentTimeMillis();
+                  updater = new Thread(this::fetchUpdate);
                   updater.start();
+              }
+
+              // ao voltar pro app (depois de >30 min fora), baixa de novo; vale na próxima vez que a página carregar
+              @Override
+              protected void onResume() {
+                  super.onResume();
+                  if (web != null && System.currentTimeMillis() - lastCheck > 30 * 60 * 1000L) startUpdater();
               }
 
               private static String readAll(InputStream in) throws IOException {
@@ -315,12 +343,27 @@ jobs:
                   }
               }
 
-              /* ---------- captura de tela (o que a extensão fazia com captureVisibleTab) ---------- */
               class Bridge {
+                  /* captura de tela (o que a extensão fazia com captureVisibleTab) */
                   @JavascriptInterface
                   public void capture(final String id) {
                       if (id == null || !id.matches("\\d{1,9}")) return;
                       ui.post(() -> shoot(id));
+                  }
+
+                  /* botão "Atualizar" do content.js: baixa o script novo e recarrega a página já com ele */
+                  @JavascriptInterface
+                  public void update(final String id) {
+                      if (id == null || !id.matches("\\d{1,9}")) return;
+                      new Thread(() -> {
+                          final boolean ok = fetchUpdate();
+                          final String js = "window.__inkUpdDone(" + id + "," + ok + ","
+                                  + (ok ? "null" : org.json.JSONObject.quote("sem conexão com o GitHub")) + ")";
+                          ui.post(() -> {
+                              web.evaluateJavascript(js, null);
+                              if (ok) ui.postDelayed(() -> web.reload(), 1500);
+                          });
+                      }).start();
                   }
               }
 
@@ -368,6 +411,7 @@ jobs:
           }
           EOF_JAVA
           sed -i "s#@UPDATE_URL@#https://raw.githubusercontent.com/${REPO}/${BRANCH}/content.js#" $M/java/br/inkleitor/MainActivity.java
+          sed -i "s#versionCode 1#versionCode ${RUN_NUM}#" $P/app/build.gradle
           cat > $RUNNER_TEMP/icon.py <<'EOF_ICON'
           import zlib, struct, math, sys
           S = 192
