@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ink Leitor
 // @namespace    ink-leitor
-// @version      4.5.0
+// @version      4.5.1
 // @description  Leitor automático, OCR, TTS, música, ordenador de capítulos, auto-arrumar bolhas, timer de sono, estatísticas e mais
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
@@ -25,7 +25,7 @@
     if (window.__ink) return;
     window.__ink = true;
 
-    const VERSION = '4.5.0';
+    const VERSION = '4.5.1';
     const IS_MOBILE = (() => {
         try { return matchMedia('(pointer:coarse)').matches || innerWidth < 700; }
         catch (e) { return innerWidth < 700; }
@@ -1951,7 +1951,6 @@
 box-sizing:border-box;padding:8px;border:2px solid var(--ib-line);border-radius:20px;background:var(--ib-bg);color:var(--ib-txt);max-height:calc(100dvh - 24px);overflow-y:auto;overflow-x:hidden;
 --ib-bg:rgba(255,240,245,.96);--ib-card:rgba(255,182,193,.42);--ib-card2:rgba(255,105,180,.55);--ib-line:rgba(255,192,203,.85);--ib-txt:#5c4a4a;--ib-dim:#a88b8b;--ib-ac:#ff69b4;
 box-shadow:0 8px 24px rgba(255,105,180,.28),inset 0 1px 0 rgba(255,255,255,.5);-webkit-backdrop-filter:blur(14px) saturate(1.3);backdrop-filter:blur(14px) saturate(1.3);}
-#ink-panel.mob{background:rgba(255,240,245,.99)}
 #ink-panel.boy{--ib-bg:rgba(16,16,20,.9);--ib-card:rgba(255,255,255,.06);--ib-card2:rgba(255,255,255,.14);--ib-line:rgba(255,255,255,.1);--ib-txt:#f4f2ef;--ib-dim:#a19eac;--ib-ac:#e8573f;border-radius:16px}
 #ink-panel.skin-lobo{--ib-bg:rgba(28,34,48,.95);--ib-card:rgba(150,170,205,.16);--ib-card2:rgba(150,170,205,.3);--ib-line:rgba(170,190,225,.32);--ib-txt:#e9eef7;--ib-dim:#8f9bb5;--ib-ac:#5f8fd0}
 #ink-panel *{box-sizing:border-box}
@@ -2016,6 +2015,31 @@ box-shadow:0 8px 24px rgba(255,105,180,.28),inset 0 1px 0 rgba(255,255,255,.5);-
 #ink-panel .ia-trk.on{background:var(--ib-ac);color:#fff}
 #ink-panel .ia-trk-t{flex:1;justify-content:flex-start;text-align:left;padding:3px 5px;border-radius:4px;color:inherit;font-size:11px}
 #ink-panel .ia-music-list{max-height:100px;overflow:auto;margin-top:4px;padding:2px;background:var(--ib-card);border-radius:8px;border:1px solid var(--ib-line);font-size:11px;color:var(--ib-dim)}
+
+/* ---------- interface mobile (4.5.1): escura, opaca e com toque grande ---------- */
+#ink-panel.mob{width:min(330px,calc(100vw - 16px));padding:10px;border-radius:22px;-webkit-backdrop-filter:none;backdrop-filter:none;font-size:13.5px;
+--ib-bg:#2a1622;--ib-card:rgba(255,130,180,.15);--ib-card2:rgba(255,130,180,.32);--ib-line:rgba(255,150,195,.38);--ib-txt:#ffeef5;--ib-dim:#e2b0c7;--ib-ac:#ff4f9a;
+background:var(--ib-bg);border:1.5px solid var(--ib-line);box-shadow:0 10px 30px rgba(0,0,0,.55)}
+#ink-panel.mob.skin-lobo{--ib-bg:#161c2a;--ib-card:rgba(150,170,205,.16);--ib-card2:rgba(150,170,205,.32);--ib-line:rgba(170,190,225,.34);--ib-txt:#eef2fa;--ib-dim:#a3afc8;--ib-ac:#5f8fd0}
+#ink-panel.mob.boy{--ib-bg:#121216;--ib-card:rgba(255,255,255,.08);--ib-card2:rgba(255,255,255,.16);--ib-line:rgba(255,255,255,.16);--ib-txt:#f4f2ef;--ib-dim:#b0adba;--ib-ac:#e8573f}
+#ink-panel.mob .ia-title{font-size:14px}
+#ink-panel.mob .ia-tab{min-height:40px;border-radius:12px;font-size:13.5px}
+#ink-panel.mob .ia-go{height:52px;border-radius:15px;font-size:15px;background:linear-gradient(135deg,var(--ib-ac),color-mix(in srgb,var(--ib-ac) 60%,#000));box-shadow:0 4px 14px rgba(0,0,0,.4)}
+#ink-panel.mob.run .ia-go{background:var(--ib-card2)}
+#ink-panel.mob .ia-chip{min-height:56px;border-radius:14px;font-size:12px;gap:3px}
+#ink-panel.mob .ia-chip svg{width:18px;height:18px}
+#ink-panel.mob .ia-row>.ia-chip{min-height:46px;font-size:13.5px}
+#ink-panel.mob .ia-val{font-size:13.5px;min-width:44px}
+#ink-panel.mob .ia-grid{gap:6px}
+#ink-panel.mob .ia-row{gap:6px}
+#ink-panel.mob .ia-skin{min-height:40px;border-radius:12px;font-size:13px}
+#ink-panel.mob .ia-sec{font-size:11px;margin:12px 2px 5px}
+#ink-panel.mob .ia-inp{font-size:13px;padding:9px 10px;border-radius:11px}
+#ink-panel.mob .ia-status{font-size:12.5px;padding:8px 10px;border-radius:11px}
+#ink-panel.mob .ia-cont{min-height:44px;font-size:12.5px;border-radius:13px}
+#ink-panel.mob .ia-statbox{font-size:12.5px}
+#ink-panel.mob .ia-music-list,#ink-panel.mob .ia-trk,#ink-panel.mob .ia-trk-t{font-size:12.5px}
+#ink-panel.mob.min{width:auto;padding:7px;border-radius:16px}
 
 #ink-order{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:10px 0 4px;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
 #ink-order .io-pill{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:600;color:#f1efec;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.12);border-radius:11px;padding:8px 12px;cursor:pointer;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
