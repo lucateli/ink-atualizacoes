@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ink Leitor
 // @namespace    ink-leitor
-// @version      4.5.1
+// @version      4.6.0
 // @description  Leitor automático, OCR, TTS, música, ordenador de capítulos, auto-arrumar bolhas, timer de sono, estatísticas e mais
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
@@ -25,7 +25,7 @@
     if (window.__ink) return;
     window.__ink = true;
 
-    const VERSION = '4.5.1';
+    const VERSION = '4.6.0';
     const IS_MOBILE = (() => {
         try { return matchMedia('(pointer:coarse)').matches || innerWidth < 700; }
         catch (e) { return innerWidth < 700; }
@@ -64,6 +64,7 @@
         ocrLang: 'por',
         stats: { days: {} },
         full: false,
+        seenVer: '',                      // última versão cujas novidades você já viu
     };
     const cfg = { ...DEFAULTS };
     try { Object.assign(cfg, JSON.parse(localStorage.getItem(CFG_KEY) || '{}')); } catch (e) { }
@@ -112,7 +113,7 @@
     (() => {
         const KEY = 'serei sempre legal';
         const LOCKS = new Set(['modal-open', 'no-scroll', 'locked', 'overflow-hidden', 'is-locked', 'scroll-lock', 'blur']);
-        const MINE = '#ink-panel,#ink-eye-el,#ink-order,#ink-dbg,#ink-auto-row';
+        const MINE = '#ink-panel,#ink-news,#ink-eye-el,#ink-order,#ink-dbg,#ink-auto-row';
         let popupAt = 0, timer = 0, lastRun = 0;
 
         const isMine = el => !!(el && el.closest && el.closest(MINE));
@@ -1857,7 +1858,7 @@
      *  Sem nenhum dos dois (Tampermonkey): baixa o arquivo como fallback.
      * ================================================================== */
     const UPD_URL = 'https://raw.githubusercontent.com/lucateli/ink-atualizacoes/main/content.js';
-    const UPD = { text: '', ver: '' };
+    const UPD = { text: '', ver: '', log: null };
     const vnum = v => String(v).split('.').map(n => parseInt(n, 10) || 0);
     const vGt = (a, b) => {
         const x = vnum(a), y = vnum(b);
@@ -1903,7 +1904,7 @@
     function showUpd() {
         const b = $('ink-upd'); if (!b) return;
         b.textContent = '';
-        const s = document.createElement('span'); s.textContent = `⬆ Nova versão ${UPD.ver}`;
+        const s = document.createElement('span'); s.textContent = `⬆ Nova versão ${UPD.ver} · ver novidades`; s.style.cursor = 'pointer'; s.onclick = () => openNews();
         const dl = document.createElement('button'); dl.className = 'ia-upd-b'; dl.textContent = 'Atualizar';
         dl.onclick = applyUpdate;
         const x = document.createElement('button'); x.className = 'ia-upd-b'; x.textContent = '✕'; x.title = 'Ignorar esta versão';
@@ -1919,7 +1920,8 @@
             const t = await r.text();
             const m = /const VERSION = '([\d.]+)'/.exec(t);
             if (!m) throw new Error('versão não encontrada no arquivo');
-            UPD.text = t; UPD.ver = m[1];
+            UPD.text = t; UPD.ver = m[1]; UPD.log = parseCL(t);
+            newsDot(); if ($('ink-news')) renderNews();
             if (vGt(m[1], VERSION)) {
                 if (manual || cfg.updSkip !== m[1]) showUpd();
                 if (manual) setStatus(`⬆ Nova versão ${m[1]} disponível`);
@@ -1928,6 +1930,120 @@
                 if (manual) setStatus(`✓ Já está na versão mais recente (${VERSION})`);
             }
         } catch (e) { if (manual) setStatus('⚠ Não consegui verificar: ' + (e.message || e)); }
+    }
+
+
+    /* ================================================================== *
+     * 12b. NOVIDADES (o que veio de novo)
+     *  A lista abaixo é lida também do arquivo NOVO no GitHub, então o painel
+     *  mostra as novidades ANTES de você atualizar.
+     *  REGRA: ao subir a versão, adicione uma entrada NO TOPO e mantenha JSON válido
+     *  (aspas duplas, sem vírgula sobrando) entre os marcadores CL_START e CL_END.
+     * ================================================================== */
+    /*CL_START*/
+    const CHANGELOG = [
+        { "v": "4.6.0", "d": "2026-11-25", "t": [
+            "Painel de novidades: toque no botão 🆕 do topo para ver o que mudou",
+            "Mostra as novidades da versão nova antes de você atualizar, com botão Atualizar agora",
+            "Abre sozinho uma vez depois que o app atualiza; bolinha vermelha avisa quando há novidade"
+        ] },
+        { "v": "4.5.1", "d": "2026-11-25", "t": [
+            "Interface mobile nova: escura, opaca e com botões maiores",
+            "Corrigido o painel claro demais no modo menina (texto sumia nos botões)",
+            "A versão do APK agora é sempre igual à do content.js"
+        ] },
+        { "v": "4.5.0", "d": "", "t": [
+            "Continuar de onde parou, com botão no painel",
+            "Velocidade e direção lembradas por obra",
+            "Timer de sono por minutos ou capítulos",
+            "Filtro de olho automático por horário",
+            "Controles na tela de bloqueio e opção de pular balões sem sentido",
+            "OCR em português, inglês e japonês",
+            "Estatísticas de leitura, tela cheia, backup e compartilhar"
+        ] }
+    ];
+    /*CL_END*/
+
+    function parseCL(text) {
+        try {
+            const m = /\/\*CL_START\*\/\s*const CHANGELOG = (\[[\s\S]*?\]);?\s*\/\*CL_END\*\//.exec(text);
+            if (!m) return null;
+            const a = JSON.parse(m[1]);
+            return Array.isArray(a) ? a : null;
+        } catch (e) { return null; }
+    }
+    function newsEntries() {
+        const map = new Map();
+        (UPD.log || []).forEach(e => { if (e && e.v) map.set(e.v, e); });
+        CHANGELOG.forEach(e => map.set(e.v, e));
+        return [...map.values()].sort((a, b) => (vGt(a.v, b.v) ? -1 : vGt(b.v, a.v) ? 1 : 0));
+    }
+    const hasNewer = () => !!(UPD.ver && vGt(UPD.ver, VERSION));
+    function newsDot() {
+        const d = $('ink-news-dot'); if (!d) return;
+        d.hidden = !(cfg.seenVer !== VERSION || hasNewer());
+    }
+    function newsTheme() {
+        const n = $('ink-news'); if (!n) return;
+        n.classList.toggle('boy', !cfg.girl);
+        SKINS.forEach(k => n.classList.toggle('skin-' + k.id, cfg.girl && curSkin().id === k.id));
+    }
+    function closeNews() {
+        const n = $('ink-news'); if (n) n.remove();
+        document.removeEventListener('keydown', newsKey, true);
+    }
+    function newsKey(e) { if (e.key === 'Escape') closeNews(); }
+    function renderNews() {
+        const box = $('ink-news-body'); if (!box) return;
+        box.textContent = '';
+        const el = (tag, cls, text) => { const x = document.createElement(tag); if (cls) x.className = cls; if (text != null) x.textContent = text; return x; };
+
+        const ban = el('div', 'nw-ban' + (hasNewer() ? ' up' : ''));
+        if (hasNewer()) {
+            ban.append(el('div', 'nw-ban-t', `⬆ Nova versão ${UPD.ver} disponível`), el('div', 'nw-ban-s', `Você está na ${VERSION}.`));
+            const b = el('button', 'nw-btn', 'Atualizar agora');
+            b.onclick = async () => { b.disabled = true; b.textContent = '⏳ Atualizando…'; await applyUpdate(); b.textContent = '✓ Pedido enviado'; };
+            ban.append(b);
+        } else {
+            ban.append(el('div', 'nw-ban-t', `✓ Versão ${VERSION} (mais recente conhecida)`));
+            const b = el('button', 'nw-btn', 'Verificar agora');
+            b.onclick = async () => { b.disabled = true; b.textContent = '🔄 Verificando…'; await checkUpdate(true); if ($('ink-news')) renderNews(); };
+            ban.append(b);
+        }
+        box.append(ban);
+
+        if (hasNewer() && !newsEntries().some(e => e.v === UPD.ver)) {
+            box.append(el('div', 'nw-card new', 'Esta versão ainda não tem notas de novidades.'));
+        }
+        newsEntries().forEach(e => {
+            const isNew = vGt(e.v, VERSION), cur = e.v === VERSION;
+            const c = el('div', 'nw-card' + (isNew ? ' new' : ''));
+            const h = el('div', 'nw-ch');
+            h.append(el('span', 'nw-v', 'v' + e.v));
+            if (isNew) h.append(el('span', 'nw-tag', 'NOVA'));
+            else if (cur) h.append(el('span', 'nw-tag cur', 'INSTALADA'));
+            if (e.d) h.append(el('span', 'nw-d', e.d.split('-').reverse().join('/')));
+            c.append(h);
+            const ul = el('ul');
+            (Array.isArray(e.t) ? e.t : []).forEach(x => ul.append(el('li', null, String(x))));
+            c.append(ul);
+            box.append(c);
+        });
+    }
+    function openNews() {
+        if ($('ink-news')) { closeNews(); return; }
+        const n = document.createElement('div');
+        n.id = 'ink-news';
+        n.innerHTML = `<div class="nw-box" role="dialog" aria-label="Novidades">
+  <div class="nw-head"><div class="nw-title">🆕 O que há de novo</div><button class="nw-x" id="ink-news-x" aria-label="Fechar">✕</button></div>
+  <div class="nw-body" id="ink-news-body"></div></div>`;
+        n.addEventListener('click', e => { if (e.target === n) closeNews(); });
+        document.body.appendChild(n);
+        $('ink-news-x').onclick = closeNews;
+        document.addEventListener('keydown', newsKey, true);
+        newsTheme(); renderNews();
+        cfg.seenVer = VERSION; saveCfg(); newsDot();
+        if (!UPD.ver) checkUpdate(false).then(() => { if ($('ink-news')) renderNews(); });
     }
 
     /* ================================================================== *
@@ -1998,7 +2114,7 @@ box-shadow:0 8px 24px rgba(255,105,180,.28),inset 0 1px 0 rgba(255,255,255,.5);-
 #ink-panel .ia-bars{display:flex;align-items:flex-end;gap:3px;height:30px;margin-top:5px}
 #ink-panel .ia-bars span{flex:1;background:var(--ib-ac);border-radius:3px 3px 0 0;opacity:.85}
 #ink-panel.min{width:auto;padding:6px;border-radius:14px;overflow:visible}
-#ink-panel.min .ia-title,#ink-panel.min #ink-upd-chk{display:none}
+#ink-panel.min .ia-title,#ink-panel.min #ink-upd-chk,#ink-panel.min #ink-news-btn{display:none}
 #ink-panel #ink-upd{display:flex;align-items:center;gap:6px;margin-bottom:6px;padding:5px 8px;border-radius:10px;background:var(--ib-ac);color:#fff;font-size:11.5px;font-weight:700}
 #ink-panel #ink-upd[hidden]{display:none}
 #ink-panel #ink-upd span{flex:1}
@@ -2016,7 +2132,7 @@ box-shadow:0 8px 24px rgba(255,105,180,.28),inset 0 1px 0 rgba(255,255,255,.5);-
 #ink-panel .ia-trk-t{flex:1;justify-content:flex-start;text-align:left;padding:3px 5px;border-radius:4px;color:inherit;font-size:11px}
 #ink-panel .ia-music-list{max-height:100px;overflow:auto;margin-top:4px;padding:2px;background:var(--ib-card);border-radius:8px;border:1px solid var(--ib-line);font-size:11px;color:var(--ib-dim)}
 
-/* ---------- interface mobile (4.5.1): escura, opaca e com toque grande ---------- */
+/* ---------- interface mobile (4.5.1+): escura, opaca e com toque grande ---------- */
 #ink-panel.mob{width:min(330px,calc(100vw - 16px));padding:10px;border-radius:22px;-webkit-backdrop-filter:none;backdrop-filter:none;font-size:13.5px;
 --ib-bg:#2a1622;--ib-card:rgba(255,130,180,.15);--ib-card2:rgba(255,130,180,.32);--ib-line:rgba(255,150,195,.38);--ib-txt:#ffeef5;--ib-dim:#e2b0c7;--ib-ac:#ff4f9a;
 background:var(--ib-bg);border:1.5px solid var(--ib-line);box-shadow:0 10px 30px rgba(0,0,0,.55)}
@@ -2040,6 +2156,37 @@ background:var(--ib-bg);border:1.5px solid var(--ib-line);box-shadow:0 10px 30px
 #ink-panel.mob .ia-statbox{font-size:12.5px}
 #ink-panel.mob .ia-music-list,#ink-panel.mob .ia-trk,#ink-panel.mob .ia-trk-t{font-size:12.5px}
 #ink-panel.mob.min{width:auto;padding:7px;border-radius:16px}
+
+/* ---------- painel de novidades ---------- */
+#ink-panel .ia-ib{position:relative}
+#ink-panel .ia-dot{position:absolute;top:2px;right:2px;width:9px;height:9px;border-radius:50%;background:#ff3b3b;border:1.5px solid var(--ib-bg);display:block}
+#ink-panel .ia-dot[hidden]{display:none}
+#ink-news{position:fixed;inset:0;z-index:2147483200;display:flex;align-items:flex-end;justify-content:center;background:rgba(0,0,0,.6);font:14px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+--n-bg:#2a1622;--n-card:rgba(255,130,180,.14);--n-line:rgba(255,150,195,.38);--n-txt:#ffeef5;--n-dim:#e2b0c7;--n-ac:#ff4f9a}
+#ink-news.skin-lobo{--n-bg:#161c2a;--n-card:rgba(150,170,205,.16);--n-line:rgba(170,190,225,.34);--n-txt:#eef2fa;--n-dim:#a3afc8;--n-ac:#5f8fd0}
+#ink-news.boy{--n-bg:#121216;--n-card:rgba(255,255,255,.08);--n-line:rgba(255,255,255,.16);--n-txt:#f4f2ef;--n-dim:#b0adba;--n-ac:#e8573f}
+#ink-news *{box-sizing:border-box}
+#ink-news .nw-box{width:min(480px,100%);max-height:84dvh;display:flex;flex-direction:column;background:var(--n-bg);color:var(--n-txt);border:1.5px solid var(--n-line);border-bottom:0;border-radius:22px 22px 0 0;box-shadow:0 -10px 40px rgba(0,0,0,.5)}
+@media (min-width:700px){#ink-news{align-items:center}#ink-news .nw-box{border-bottom:1.5px solid var(--n-line);border-radius:22px}}
+#ink-news .nw-head{display:flex;align-items:center;gap:8px;padding:14px 16px 8px}
+#ink-news .nw-title{flex:1;font-weight:800;font-size:18px;color:var(--n-ac)}
+#ink-news .nw-x{width:38px;height:38px;border-radius:12px;border:1px solid var(--n-line);background:var(--n-card);color:var(--n-txt);font:inherit;font-size:16px;cursor:pointer;touch-action:manipulation}
+#ink-news .nw-body{overflow-y:auto;overscroll-behavior:contain;padding:4px 16px max(18px,env(safe-area-inset-bottom))}
+#ink-news .nw-ban{padding:12px;border-radius:14px;background:var(--n-card);border:1px solid var(--n-line)}
+#ink-news .nw-ban.up{border-color:var(--n-ac)}
+#ink-news .nw-ban-t{font-weight:800}
+#ink-news .nw-ban-s{color:var(--n-dim);font-size:12.5px;margin-top:2px}
+#ink-news .nw-btn{display:block;width:100%;min-height:44px;margin-top:10px;border:0;border-radius:12px;background:var(--n-ac);color:#fff;font:inherit;font-weight:800;cursor:pointer;touch-action:manipulation}
+#ink-news .nw-btn:disabled{opacity:.6}
+#ink-news .nw-card{margin-top:10px;padding:10px 12px;border-radius:14px;background:var(--n-card);border:1px solid var(--n-line)}
+#ink-news .nw-card.new{border-color:var(--n-ac)}
+#ink-news .nw-ch{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+#ink-news .nw-v{font-weight:800;font-size:15px}
+#ink-news .nw-tag{padding:2px 8px;border-radius:99px;background:var(--n-ac);color:#fff;font-size:10.5px;font-weight:800;letter-spacing:.5px}
+#ink-news .nw-tag.cur{background:transparent;border:1px solid var(--n-ac);color:var(--n-ac)}
+#ink-news .nw-d{margin-left:auto;color:var(--n-dim);font-size:12px}
+#ink-news ul{margin:7px 0 0;padding-left:18px}
+#ink-news li{margin:4px 0}
 
 #ink-order{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:10px 0 4px;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
 #ink-order .io-pill{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:600;color:#f1efec;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.12);border-radius:11px;padding:8px 12px;cursor:pointer;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
@@ -2077,6 +2224,7 @@ background:var(--ib-bg);border:1.5px solid var(--ib-line);box-shadow:0 10px 30px
         u.innerHTML = `
 <div class="ia-head" id="ink-head">
   <div class="ia-title" id="ink-title">Ink ${VERSION}</div>
+  <button class="ia-ib" id="ink-news-btn" title="Novidades">🆕<i class="ia-dot" id="ink-news-dot" hidden></i></button>
   <button class="ia-ib" id="ink-upd-chk" title="Verificar atualização">🔄</button>
   <button class="ia-ib" id="ink-mini-go" title="Ler">${ICO.play}</button>
   <button class="ia-ib" id="ink-min" title="minimizar">${ICO.min}</button>
@@ -2224,6 +2372,7 @@ background:var(--ib-bg);border:1.5px solid var(--ib-line);box-shadow:0 10px 30px
         $('ink-go').onclick = () => { if (running) stop('Parado.'); else mainLoop(); };
         $('ink-mini-go').onclick = $('ink-go').onclick;
         $('ink-upd-chk').onclick = () => checkUpdate(true);
+        $('ink-news-btn').onclick = () => openNews();
         $('ink-min').onclick = () => { cfg.min = !cfg.min; saveCfg(); applyMin(); };
         $$('[data-tab]', u).forEach(b => b.onclick = () => { cfg.tab = b.dataset.tab; saveCfg(); applyTab(); });
         $('ink-cont').onclick = goContinue;
@@ -2672,6 +2821,7 @@ background:var(--ib-bg);border:1.5px solid var(--ib-line);box-shadow:0 10px 30px
         }
         const g = $('ink-girl');
         if (g) g.classList.toggle('on', cfg.girl);
+        newsTheme();
     }
     function applyEye() {
         let o = $('ink-eye-el');
@@ -2766,6 +2916,10 @@ background:var(--ib-bg);border:1.5px solid var(--ib-line);box-shadow:0 10px 30px
             const rs = JSON.parse(sessionStorage.getItem('ink_resume') || 'null');
             if (rs) { sessionStorage.removeItem('ink_resume'); setTimeout(() => setStatus('↩ Você parou em: ' + rs.label), 1800); }
         } catch (e) { }
+        // novidades: na 1ª instalação só marca como vista; depois de atualizar, abre sozinho uma vez
+        if (!cfg.seenVer) { cfg.seenVer = VERSION; saveCfg(); }
+        else if (cfg.seenVer !== VERSION) setTimeout(() => { if (!$('ink-news')) openNews(); }, 2500);
+        newsDot();
         setTimeout(() => checkUpdate(false), 4000);
         setInterval(() => checkUpdate(false), 6 * 3600 * 1000);
         // o site é SPA: reavalia a barra de capítulos, o filtro de olho, a obra atual e o "continuar" ao navegar
