@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ink Leitor
 // @namespace    ink-leitor
-// @version      4.11.0
+// @version      4.12.0
 // @description  Leitor automático, OCR, TTS, música, ordenador de capítulos, auto-arrumar bolhas, timer de sono, estatísticas e mais
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
@@ -78,7 +78,7 @@
         const iv = setInterval(tick, 1500);
     })();
 
-    const VERSION = '4.11.0';
+    const VERSION = '4.12.0';
     const IS_MOBILE = (() => {
         try { return matchMedia('(pointer:coarse)').matches || innerWidth < 700; }
         catch (e) { return innerWidth < 700; }
@@ -100,7 +100,7 @@
     const CFG_KEY = 'ink_cfg_v4';
     const DEFAULTS = {
         speed: 1.5, auto: true, voice: false, vrate: 1, vname: '',
-        dict: '', favs: [],               // 4.10.0: pronúncia e favoritos
+        dict: '', favs: [], prep: null,               // 4.10.0: pronúncia e favoritos
         manga: false, method: '', methodM: '',
         girl: true, skin: 'gato',
         eye: false, eyeLvl: 0.25,
@@ -1016,43 +1016,74 @@
             return 'ok';
         }
 
+        // progresso salvo deste capítulo (continua valendo mesmo recarregando a página)
+        const pending = () => cfg.prep && cfg.prep.path === location.pathname ? cfg.prep : null;
+        let confirmUntil = 0;
         function paint() {
-            const b = $('ink-prep');
-            if (b) b.textContent = on ? '⏹ Parar preparo' : '🧰 Preparar capítulo';
+            const b = $('ink-prep'), r = $('ink-prep-go');
+            const s = on ? null : pending();
+            const label = on ? '⏹ Parar preparo' : (s ? (Date.now() < confirmUntil ? '⚠ Toque de novo pra recomeçar' : '↺ Recomeçar do zero') : '🧰 Preparar capítulo');
+            if (b && b.textContent !== label) b.textContent = label;
+            if (!r) return;
+            if (r.parentElement.hidden !== !s) r.parentElement.hidden = !s;
+            if (!s) return;
+            const go = s.next > s.total ? '▶ Terminar: voltar à página 1' : `▶ Continuar da página ${s.next} de ${s.total}`;
+            if (r.textContent !== go) r.textContent = go;
         }
         function report(t) {
             setStatus(t);
             const e = $('ink-prep-st'); if (e) e.textContent = t;
         }
-        async function start() {
+        async function start(resume) {
             if (on) { on = false; BubbleSorter.halt(); report('⏹ Parando…'); return; }
             if (!location.pathname.startsWith('/ler/')) { report('⚠ Abra um capítulo primeiro'); return; }
             if (BubbleSorter.findModal()) { report('⚠ Feche Arrumar as bolhas antes de começar'); return; }
+            const from = resume ? pending() : null;
+            if (resume && !from) { paint(); return; }
+            // recomeçar com progresso salvo pede um segundo toque
+            if (!resume && pending()) {
+                const wait = confirmUntil - Date.now();
+                if (wait <= 0) { confirmUntil = Date.now() + 4000; paint(); setTimeout(paint, 4100); return; }
+                if (wait > 3400) return;      // toque duplo sem querer não conta
+            }
+            confirmUntil = 0;
+            if (!from) cfg.prep = null;
             if (running) stop('Leitura parada para preparar o capítulo');
             on = true; learned = {}; ctrEl = null; paint();
             const path = location.pathname;
-            const saved = [], empty = [], failed = [];
+            const saved = from ? [...from.saved] : [], empty = from ? [...from.empty] : [], failed = from ? [...from.failed] : [];
+            const manga = from ? from.manga : !!cfg.manga;
+            if (cfg.manga !== manga) { cfg.manga = manga; saveCfg(); refreshPanel(); }
             let total = 0, page = 0, end = '';
+            const keep = next => { cfg.prep = { path, next, total, manga, saved: [...saved], empty: [...empty], failed: [...failed] }; saveCfg(); };
             try {
                 if (!await waitFor(counter, 5000)) throw new Error('não achei o contador de páginas (mostre os controles da leitura)');
                 await setZoom(false);
-                await goTo(1, report);
+                const first = from ? from.next : 1;
                 total = counter().pt;
-                for (page = 1; page <= total; page++) {
+                if (from && from.total !== total) { cfg.prep = null; throw new Error('o total de páginas mudou; comece de novo'); }
+                if (first <= total) await goTo(first, report);
+                keep(first);
+                for (page = first; page <= total; page++) {
                     if (location.pathname !== path) throw new Error('o capítulo mudou');
                     report(`🧰 Página ${page} de ${total} (${Math.round((page - 1) / total * 100)}%) · ${cfg.manga ? 'mangá' : 'HQ'}`);
                     const r = await doPage(page, report);
                     (r === 'ok' ? saved : r === 'vazia' ? empty : failed).push(page);
+                    keep(page + 1);
                     if (page < total) await step(1);
                 }
                 await setZoom(false);
                 await goTo(1, report);
                 await setZoom(true);
+                cfg.prep = null; saveCfg();
                 end = failed.length ? '⚠ Preparo terminou com pendências' : '✓ Preparo terminou';
             } catch (e) {
                 end = e === STOP ? `⏹ Parado na página ${page || '?'}` : `⚠ Parei${page ? ' na página ' + page : ''}: ${e.message || e}`;
                 if (e !== STOP) console.warn('[Ink] preparo:', e);
             }
+            // se parou com a tela das bolhas aberta, fecha sem salvar a página incompleta
+            const m = cfg.prep && BubbleSorter.findModal();
+            if (m) { const c = modalBtn(m, /^cancelar$/i); if (c) c.click(); }
             on = false; paint();
             report(`${end}. Salvas: ${saved.length}${total ? ' de ' + total : ''}`
                 + (empty.length ? ` · sem balões detectados: ${empty.join(', ')}` : '')
@@ -1061,7 +1092,7 @@
         // Esc também para o preparo
         document.addEventListener('keydown', e => { if (on && e.key === 'Escape') { on = false; BubbleSorter.halt(); } }, true);
 
-        return { start, get on() { return on; } };
+        return { start, paint, get on() { return on; } };
     })();
 
     /* ================================================================== *
@@ -2144,6 +2175,7 @@
         saveCfg(); contPaint();
     }
     function contPaint() {
+        Prep.paint();
         const b = $('ink-cont'); if (!b) return;
         const l = cfg.last;
         const here = location.pathname + location.search;
@@ -2514,6 +2546,10 @@
      * ================================================================== */
     /*CL_START*/
     const CHANGELOG = [
+        { "v": "4.12.0", "d": "2026-11-26", "t": [
+            "Novo botão Continuar: o preparo volta da página onde parou",
+            "Recomeçar do zero agora pede um segundo toque, para evitar toque por engano"
+        ] },
         { "v": "4.11.0", "d": "2026-11-26", "t": [
             "Novo botão Preparar capítulo: arruma e salva as bolhas página por página e volta para a página 1",
             "Páginas que não derem certo não são salvas e aparecem na lista para revisar"
@@ -2858,6 +2894,7 @@ padding:8px;border:1px solid var(--ib-line);border-radius:16px;background:var(--
     <button class="ia-cont" id="ink-cont" hidden><span></span></button>
     <button class="ia-go" id="ink-go">${ICO.play}<span>Ler sozinho</span></button>
     <div class="ia-row"><button class="ia-chip" id="ink-prep" title="Arruma e salva as bolhas de todas as páginas">🧰 Preparar capítulo</button></div>
+    <div class="ia-row" hidden><button class="ia-chip" id="ink-prep-go">▶ Continuar</button></div>
     <div id="ink-prep-st" style="font-size:.85em;line-height:1.35"></div>
     <div class="ia-row ia-step">
       <button class="ia-chip" id="ink-spd-" aria-label="Diminuir">−</button>
@@ -3031,6 +3068,7 @@ Alt+Shift+ponto / vírgula: mais / menos velocidade</div>
         $('ink-go').onclick = () => { if (Prep.on) setStatus('⚠ Espere o preparo terminar ou pare-o'); else if (running) stop('Parado.'); else mainLoop(); };
         $('ink-mini-go').onclick = $('ink-go').onclick;
         $('ink-prep').onclick = () => Prep.start();
+        $('ink-prep-go').onclick = () => Prep.start(true);
         $('ink-upd-chk').onclick = () => checkUpdate(true);
         $('ink-news-btn').onclick = () => openNews();
         $('ink-min').onclick = () => { cfg.min = !cfg.min; saveCfg(); applyMin(); };
