@@ -447,7 +447,14 @@ jobs:
           }
           EOF_JAVA
           sed -i "s#@UPDATE_URL@#https://raw.githubusercontent.com/${REPO}/${BRANCH}/content.js#" $M/java/br/inkleitor/MainActivity.java
-          sed -i "s#versionCode 1#versionCode ${RUN_NUM}#" $P/app/build.gradle
+          # versão do APK = versão do content.js (const VERSION = 'X.Y.Z'), sempre juntas
+          VER=$(grep -oP "const VERSION = '\K[0-9]+\.[0-9]+\.[0-9]+" content.js | head -1)
+          test -n "$VER" || { echo "ERRO: não achei const VERSION no content.js"; exit 1; }
+          IFS=. read -r V1 V2 V3 <<< "$VER"
+          VCODE=$(( V1 * 10000 + V2 * 100 + V3 ))
+          echo "content.js $VER -> versionName $VER, versionCode $VCODE"
+          sed -i "s#versionCode 1#versionCode ${VCODE}#; s#versionName '1.0'#versionName '${VER}'#" $P/app/build.gradle
+          grep -n "version" $P/app/build.gradle
           cat > $RUNNER_TEMP/icon.py <<'EOF_ICON'
           import zlib, struct, math, sys
           S = 192
@@ -506,7 +513,7 @@ jobs:
         with:
           tag_name: apk-latest
           name: Ink Leitor (APK)
-          body: "APK gerado automaticamente. Baixe o ink-leitor.apk abaixo e instale."
+          body: "APK gerado automaticamente (versão igual à do content.js). Baixe o ink-leitor.apk abaixo e instale."
           files: ink-leitor.apk
 
       - uses: actions/upload-artifact@v4
