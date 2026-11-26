@@ -155,6 +155,7 @@ jobs:
           import android.os.Looper;
           import android.util.Base64;
           import android.view.PixelCopy;
+          import android.view.View;
           import android.view.WindowManager;
           import android.webkit.CookieManager;
           import android.webkit.JavascriptInterface;
@@ -188,6 +189,7 @@ jobs:
               private WebView web;
               private volatile Thread updater;
               private long lastCheck = 0;
+          private boolean full = false;
               private final Handler ui = new Handler(Looper.getMainLooper());
 
               @Override
@@ -213,6 +215,20 @@ jobs:
                   web.setWebViewClient(new Client());
                   startUpdater();
                   web.loadUrl(HOME);
+              }
+
+              private void applyFull() {
+                  int f = full
+                      ? (View.SYSTEM_UI_FLAG_LAYOUT_STABLE | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                          | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY)
+                      : View.SYSTEM_UI_FLAG_VISIBLE;
+                  getWindow().getDecorView().setSystemUiVisibility(f);
+              }
+
+              @Override
+              public void onWindowFocusChanged(boolean hasFocus) {
+                  super.onWindowFocusChanged(hasFocus);
+                  if (hasFocus && full) applyFull();
               }
 
               @Override
@@ -365,6 +381,26 @@ jobs:
                           });
                       }).start();
                   }
+
+                  /* tela cheia (esconde barra de status e de navegação) */
+                  @JavascriptInterface
+                  public void fullscreen(final boolean on) {
+                      ui.post(() -> { full = on; applyFull(); });
+                  }
+
+                  /* menu "Compartilhar" do Android (WhatsApp, Keep, etc.) */
+                  @JavascriptInterface
+                  public void share(final String text) {
+                      if (text == null || text.isEmpty()) return;
+                      ui.post(() -> {
+                          try {
+                              Intent i = new Intent(Intent.ACTION_SEND);
+                              i.setType("text/plain");
+                              i.putExtra(Intent.EXTRA_TEXT, text);
+                              startActivity(Intent.createChooser(i, "Compartilhar"));
+                          } catch (Exception ignored) { }
+                      });
+                  }
               }
 
               private void shoot(final String id) {
@@ -452,6 +488,10 @@ jobs:
           cp node_modules/tesseract.js-core/*.wasm "$A/" 2>/dev/null || true
           curl -fsSL -o por.traineddata https://github.com/tesseract-ocr/tessdata_fast/raw/main/por.traineddata
           gzip -9 -c por.traineddata > "$A/por.traineddata.gz"
+          for L in eng jpn; do
+            curl -fsSL -o "$L.traineddata" "https://github.com/tesseract-ocr/tessdata_fast/raw/main/$L.traineddata"
+            gzip -9 -c "$L.traineddata" > "$A/$L.traineddata.gz"
+          done
           ls -la "$A"
 
       - name: Compilar APK
