@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ink Leitor
 // @namespace    ink-leitor
-// @version      4.9.2
+// @version      4.9.3
 // @description  Leitor automático, OCR, TTS, música, ordenador de capítulos, auto-arrumar bolhas, timer de sono, estatísticas e mais
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
@@ -78,7 +78,7 @@
         const iv = setInterval(tick, 1500);
     })();
 
-    const VERSION = '4.9.2';
+    const VERSION = '4.9.3';
     const IS_MOBILE = (() => {
         try { return matchMedia('(pointer:coarse)').matches || innerWidth < 700; }
         catch (e) { return innerWidth < 700; }
@@ -676,7 +676,17 @@
                 rows.push({ t: it.bx.t, b: it.bx.b, items: [it] });
             }
             const cx = p => (p.bx.l + p.bx.r) / 2;
-            return rows.flatMap(r => r.items.sort((a, b) => mode === 'manga' ? cx(b) - cx(a) : cx(a) - cx(b))).map(p => p.el);
+            const dir = (a, b) => mode === 'manga' ? cx(b) - cx(a) : cx(a) - cx(b);
+            // bolhas empilhadas (uma em cima da outra) formam uma coluna: lê a de cima primeiro
+            const empilhadas = (a, b) => Math.min(a.bx.r, b.bx.r) - Math.max(a.bx.l, b.bx.l) > Math.min(a.bx.r - a.bx.l, b.bx.r - b.bx.l) * 0.5;
+            return rows.flatMap(r => {
+                const cols = [];
+                for (const it of r.items.sort(dir)) {
+                    const col = cols.find(c => c.some(o => empilhadas(o, it)));
+                    if (col) col.push(it); else cols.push([it]);
+                }
+                return cols.flatMap(c => c.sort((a, b) => a.bx.t - b.bx.t));
+            }).map(p => p.el);
         }
 
         const curOrder = () => getTiles().slice().sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left);
@@ -689,19 +699,40 @@
             buttons: type === 'pointerup' ? 0 : 1
         });
 
-        async function dragBy(el, dx) {
+        async function dragBy(el, dx, hold) {
             const r = el.getBoundingClientRect();
             const x0 = r.left + r.width / 2, y = r.top + r.height / 2;
-            el.dispatchEvent(pev('pointerdown', x0, y));
-            await sleep(50);
+            // o toque real cai no elemento de dentro (miniatura); o evento sobe até o quadrado
+            const hit = document.elementFromPoint(x0, y);
+            const t = hit && el.contains(hit) ? hit : el;
+            t.dispatchEvent(pev('pointerdown', x0, y));
+            await sleep(hold);
             const steps = 14;
             for (let i = 1; i <= steps; i++) {
-                el.dispatchEvent(pev('pointermove', x0 + dx * i / steps, y));
+                t.dispatchEvent(pev('pointermove', x0 + dx * i / steps, y));
                 await sleep(16);
             }
             await sleep(70);
-            el.dispatchEvent(pev('pointerup', x0 + dx, y));
+            t.dispatchEvent(pev('pointerup', x0 + dx, y));
             await sleep(200);
+        }
+
+        // troca a bolha com a vizinha da esquerda, com as duas visíveis na fileira
+        async function stepLeft(el) {
+            const from = curOrder().indexOf(el);
+            for (let tryN = 0; tryN < 3; tryN++) {
+                el.scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'instant' });
+                await sleep(60);
+                const prev = curOrder()[from - 1];
+                const target = prev.getBoundingClientRect(), me = el.getBoundingClientRect();
+                const dx = (target.left + target.width / 2) - (me.left + me.width / 2) - (6 + tryN * 16);
+                await dragBy(el, dx, tryN ? 450 : 60); // nas novas tentativas, segura antes de arrastar
+                const now = curOrder().indexOf(el);
+                if (now === from - 1) return true;
+                if (now !== from) { console.warn('[Ink] arraste foi pra posição', now + 1, 'em vez de', from); return false; }
+            }
+            console.warn('[Ink] a bolha na posição', from + 1, 'não se mexeu');
+            return false;
         }
 
         async function reorder(sorted) {
@@ -711,18 +742,10 @@
             Element.prototype.releasePointerCapture = function (id) { try { return oRel.call(this, id); } catch (e) { } };
             try {
                 for (let i = 0; i < sorted.length; i++) {
-                    let cur = curOrder();
-                    if (cur[i] === sorted[i]) continue;
                     const el = sorted[i];
-                    for (let tryN = 0; tryN < 2; tryN++) {
-                        const target = cur[i].getBoundingClientRect(), me = el.getBoundingClientRect();
-                        let dx = (target.left + target.width / 2) - (me.left + me.width / 2);
-                        dx += Math.sign(dx) * (6 + tryN * 22);
-                        await dragBy(el, dx);
-                        cur = curOrder();
-                        if (cur[i] === el) break;
+                    while (curOrder().indexOf(el) > i) {
+                        if (!await stepLeft(el)) return false;
                     }
-                    if (curOrder()[i] !== el) return false;
                 }
                 return curOrder().every((e, i) => e === sorted[i]);
             } finally {
@@ -2197,6 +2220,10 @@
      * ================================================================== */
     /*CL_START*/
     const CHANGELOG = [
+        { "v": "4.9.3", "d": "2026-11-26", "t": [
+            "Arraste das bolhas ajustado: move uma posição por vez, rolando a fileira para a bolha ficar visível",
+            "Bolhas empilhadas agora são lidas de cima para baixo"
+        ] },
         { "v": "4.9.2", "d": "2026-11-26", "t": [
             "Auto Mangá/HQ: o quadrado + não é mais contado como bolha, o que causava o erro de não ler a posição das bolhas"
         ] },
