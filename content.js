@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ink Leitor
 // @namespace    ink-leitor
-// @version      4.13.0
+// @version      4.13.1
 // @description  Leitor automático, OCR, TTS, música, ordenador de capítulos, auto-arrumar bolhas, timer de sono, estatísticas e mais
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
@@ -78,7 +78,7 @@
         const iv = setInterval(tick, 1500);
     })();
 
-    const VERSION = '4.13.0';
+    const VERSION = '4.13.1';
     const IS_MOBILE = (() => {
         try { return matchMedia('(pointer:coarse)').matches || innerWidth < 700; }
         catch (e) { return innerWidth < 700; }
@@ -2539,6 +2539,8 @@
         setStatus('Baixado como content.js. Troque o arquivo e recarregue.');
     }
     async function applyUpdate() {
+        // programa de PC: quem baixa é o próprio .exe, ao abrir; aqui não baixa arquivo nenhum
+        if (window.__INK_PC__) { setStatus('💻 Feche todas as janelas do InkLeitor e abra de novo para atualizar.'); return; }
         setStatus('⏳ Atualizando…');
         try {
             const r = await extSync();
@@ -2599,6 +2601,9 @@
      * ================================================================== */
     /*CL_START*/
     const CHANGELOG = [
+        { "v": "4.13.1", "d": "2026-11-26", "t": [
+            "No programa de PC, o botão Atualizar não baixa mais arquivos: avisa para fechar e abrir"
+        ] },
         { "v": "4.13.0", "d": "2026-11-26", "t": [
             "Mangá automático: o painel segue o botão MANGÁ do leitor do Ink",
             "Preparar capítulo confere o modo do site antes de começar"
@@ -2719,7 +2724,7 @@
         if (hasNewer()) {
             ban.append(el('div', 'nw-ban-t', `⬆ Nova versão ${UPD.ver} disponível`), el('div', 'nw-ban-s', `Você está na ${VERSION}.`));
             const b = el('button', 'nw-btn', 'Atualizar agora');
-            b.onclick = async () => { b.disabled = true; b.textContent = '⏳ Atualizando…'; await applyUpdate(); b.textContent = '✓ Pedido enviado'; };
+            b.onclick = async () => { b.disabled = true; b.textContent = '⏳ Atualizando…'; await applyUpdate(); b.textContent = window.__INK_PC__ ? 'Feche e abra' : '✓ Pedido enviado'; };
             ban.append(b);
         } else {
             ban.append(el('div', 'nw-ban-t', `✓ Versão ${VERSION} (mais recente conhecida)`));
