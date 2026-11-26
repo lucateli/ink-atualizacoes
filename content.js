@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ink Leitor
 // @namespace    ink-leitor
-// @version      4.6.0
+// @version      4.7.0
 // @description  Leitor automático, OCR, TTS, música, ordenador de capítulos, auto-arrumar bolhas, timer de sono, estatísticas e mais
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
@@ -25,7 +25,7 @@
     if (window.__ink) return;
     window.__ink = true;
 
-    const VERSION = '4.6.0';
+    const VERSION = '4.7.0';
     const IS_MOBILE = (() => {
         try { return matchMedia('(pointer:coarse)').matches || innerWidth < 700; }
         catch (e) { return innerWidth < 700; }
@@ -1942,6 +1942,11 @@
      * ================================================================== */
     /*CL_START*/
     const CHANGELOG = [
+        { "v": "4.7.0", "d": "2026-11-25", "t": [
+            "Painel bem menor e compacto, escuro em todos os temas (inclusive no PC)",
+            "Nova aba Ajustes: voz, filtro de olho, skins e missão saíram da aba Ler",
+            "A aba Ler agora cabe sem rolar: só o botão de ler, velocidade e os atalhos"
+        ] },
         { "v": "4.6.0", "d": "2026-11-25", "t": [
             "Painel de novidades: toque no botão 🆕 do topo para ver o que mudou",
             "Mostra as novidades da versão nova antes de você atualizar, com botão Atualizar agora",
@@ -2132,16 +2137,39 @@ box-shadow:0 8px 24px rgba(255,105,180,.28),inset 0 1px 0 rgba(255,255,255,.5);-
 #ink-panel .ia-trk-t{flex:1;justify-content:flex-start;text-align:left;padding:3px 5px;border-radius:4px;color:inherit;font-size:11px}
 #ink-panel .ia-music-list{max-height:100px;overflow:auto;margin-top:4px;padding:2px;background:var(--ib-card);border-radius:8px;border:1px solid var(--ib-line);font-size:11px;color:var(--ib-dim)}
 
-/* ---------- interface mobile (4.5.1+): escura, opaca e com toque grande ---------- */
-#ink-panel.mob{width:min(330px,calc(100vw - 16px));padding:10px;border-radius:22px;-webkit-backdrop-filter:none;backdrop-filter:none;font-size:13.5px;
---ib-bg:#2a1622;--ib-card:rgba(255,130,180,.15);--ib-card2:rgba(255,130,180,.32);--ib-line:rgba(255,150,195,.38);--ib-txt:#ffeef5;--ib-dim:#e2b0c7;--ib-ac:#ff4f9a;
-background:var(--ib-bg);border:1.5px solid var(--ib-line);box-shadow:0 10px 30px rgba(0,0,0,.55)}
-#ink-panel.mob.skin-lobo{--ib-bg:#161c2a;--ib-card:rgba(150,170,205,.16);--ib-card2:rgba(150,170,205,.32);--ib-line:rgba(170,190,225,.34);--ib-txt:#eef2fa;--ib-dim:#a3afc8;--ib-ac:#5f8fd0}
-#ink-panel.mob.boy{--ib-bg:#121216;--ib-card:rgba(255,255,255,.08);--ib-card2:rgba(255,255,255,.16);--ib-line:rgba(255,255,255,.16);--ib-txt:#f4f2ef;--ib-dim:#b0adba;--ib-ac:#e8573f}
+/* ---------- interface nova (4.7.0): escura em todos os temas · .cmp = compacto (PC) · .mob = celular ---------- */
+#ink-panel{--ib-bg:#2a1622;--ib-card:rgba(255,130,180,.15);--ib-card2:rgba(255,130,180,.32);--ib-line:rgba(255,150,195,.38);--ib-txt:#ffeef5;--ib-dim:#e2b0c7;--ib-ac:#ff4f9a;
+background:var(--ib-bg);border:1.5px solid var(--ib-line);-webkit-backdrop-filter:none;backdrop-filter:none;box-shadow:0 10px 30px rgba(0,0,0,.55)}
+#ink-panel.skin-lobo{--ib-bg:#161c2a;--ib-card:rgba(150,170,205,.16);--ib-card2:rgba(150,170,205,.32);--ib-line:rgba(170,190,225,.34);--ib-txt:#eef2fa;--ib-dim:#a3afc8;--ib-ac:#5f8fd0}
+#ink-panel.boy{--ib-bg:#121216;--ib-card:rgba(255,255,255,.08);--ib-card2:rgba(255,255,255,.16);--ib-line:rgba(255,255,255,.16);--ib-txt:#f4f2ef;--ib-dim:#b0adba;--ib-ac:#e8573f}
+#ink-panel .ia-go{background:linear-gradient(135deg,var(--ib-ac),color-mix(in srgb,var(--ib-ac) 60%,#000));box-shadow:0 3px 10px rgba(0,0,0,.4)}
+#ink-panel.run .ia-go{background:var(--ib-card2)}
+#ink-panel .ia-tab{padding:0;min-width:0;overflow:hidden;white-space:nowrap}
+/* compacto (PC / tablet) */
+#ink-panel.cmp{width:214px;padding:7px;border-radius:16px;font-size:11.5px}
+#ink-panel.cmp .ia-head{padding-bottom:4px}
+#ink-panel.cmp .ia-title{font-size:12px}
+#ink-panel.cmp .ia-ib{width:24px;height:24px;border-radius:7px}
+#ink-panel.cmp .ia-tabs{gap:3px;margin-bottom:3px}
+#ink-panel.cmp .ia-tab{min-height:24px;border-radius:8px;font-size:10px}
+#ink-panel.cmp .ia-go{height:32px;border-radius:10px;font-size:12px;margin-top:3px}
+#ink-panel.cmp .ia-row{margin-top:4px;gap:3px}
+#ink-panel.cmp .ia-row>.ia-chip{min-height:28px;font-size:11.5px;border-radius:9px}
+#ink-panel.cmp .ia-val{min-width:34px;font-size:11.5px}
+#ink-panel.cmp .ia-grid{gap:3px;margin-top:4px}
+#ink-panel.cmp .ia-chip{min-height:34px;padding:2px;border-radius:9px;font-size:9px;gap:1px}
+#ink-panel.cmp .ia-chip svg{width:13px;height:13px}
+#ink-panel.cmp .ia-skin{min-height:26px;border-radius:8px;font-size:11px}
+#ink-panel.cmp .ia-sec{font-size:9px;margin:7px 2px 3px}
+#ink-panel.cmp .ia-inp{font-size:11px;padding:4px 6px;border-radius:8px}
+#ink-panel.cmp .ia-status{font-size:10.5px;padding:4px 7px;margin-top:4px;border-radius:8px}
+#ink-panel.cmp .ia-cont{min-height:28px;font-size:10.5px;border-radius:9px}
+#ink-panel.cmp.min{width:auto;padding:5px;border-radius:13px}
+/* celular */
+#ink-panel.mob{width:min(330px,calc(100vw - 16px));padding:10px;border-radius:22px;font-size:13.5px}
 #ink-panel.mob .ia-title{font-size:14px}
-#ink-panel.mob .ia-tab{min-height:40px;border-radius:12px;font-size:13.5px}
-#ink-panel.mob .ia-go{height:52px;border-radius:15px;font-size:15px;background:linear-gradient(135deg,var(--ib-ac),color-mix(in srgb,var(--ib-ac) 60%,#000));box-shadow:0 4px 14px rgba(0,0,0,.4)}
-#ink-panel.mob.run .ia-go{background:var(--ib-card2)}
+#ink-panel.mob .ia-tab{min-height:40px;border-radius:12px;font-size:12px}
+#ink-panel.mob .ia-go{height:52px;border-radius:15px;font-size:15px}
 #ink-panel.mob .ia-chip{min-height:56px;border-radius:14px;font-size:12px;gap:3px}
 #ink-panel.mob .ia-chip svg{width:18px;height:18px}
 #ink-panel.mob .ia-row>.ia-chip{min-height:46px;font-size:13.5px}
@@ -2219,7 +2247,7 @@ background:var(--ib-bg);border:1.5px solid var(--ib-line);box-shadow:0 10px 30px
         if ($('ink-panel')) return;
         const u = document.createElement('div');
         u.id = 'ink-panel';
-        if (IS_MOBILE) u.classList.add('mob');
+        u.classList.add(innerWidth < 700 ? 'mob' : 'cmp');   // mob = celular (toque grande) · cmp = PC/tablet (compacto)
         if (cfg.min) u.classList.add('min');
         u.innerHTML = `
 <div class="ia-head" id="ink-head">
@@ -2234,6 +2262,7 @@ background:var(--ib-bg);border:1.5px solid var(--ib-line);box-shadow:0 10px 30px
   <div class="ia-tabs">
     <button class="ia-tab" data-tab="read">📖 Ler</button>
     <button class="ia-tab" data-tab="music">🎵 Música</button>
+    <button class="ia-tab" data-tab="tune">🎚 Ajustes</button>
     <button class="ia-tab" data-tab="more">⚙ Mais</button>
   </div>
 
@@ -2256,7 +2285,10 @@ background:var(--ib-bg);border:1.5px solid var(--ib-line);box-shadow:0 10px 30px
       <button class="ia-chip" id="ink-full">⛶<span>Tela cheia</span></button>
       <button class="ia-chip" id="ink-sharec">🔗<span>Compartilhar</span></button>
     </div>
-    <div class="ia-sec">Voz do audiolivro</div>
+  </div>
+
+  <div class="ia-pane hide" data-pane="tune">
+    <div class="ia-sec" style="margin-top:2px">Voz do audiolivro</div>
     <select class="ia-inp" id="ink-vsel"></select>
     <div class="ia-row">
       <button class="ia-chip" id="ink-vr-">−</button>
@@ -2498,10 +2530,11 @@ background:var(--ib-bg);border:1.5px solid var(--ib-line);box-shadow:0 10px 30px
 
     function applyTab() {
         const u = $('ink-panel'); if (!u) return;
-        const t = cfg.tab === 'music' || cfg.tab === 'more' ? cfg.tab : 'read';
+        const t = ['music', 'tune', 'more'].includes(cfg.tab) ? cfg.tab : 'read';
         $$('[data-tab]', u).forEach(b => b.classList.toggle('on', b.dataset.tab === t));
-        const r = u.querySelector('[data-pane="read"]'), m = u.querySelector('[data-pane="music"]'), x = u.querySelector('[data-pane="more"]');
+        const r = u.querySelector('[data-pane="read"]'), m = u.querySelector('[data-pane="music"]'), x = u.querySelector('[data-pane="more"]'), tu = u.querySelector('[data-pane="tune"]');
         if (r) r.classList.toggle('hide', t !== 'read');
+        if (tu) tu.classList.toggle('hide', t !== 'tune');
         if (x) x.classList.toggle('hide', t !== 'more');
         if (m) m.classList.toggle('ghost', t !== 'music'); // fica fora da tela (não some) p/ o YouTube continuar tocando
         if (t === 'more') statsPaint();
