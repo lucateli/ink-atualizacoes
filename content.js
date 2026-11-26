@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ink Leitor
 // @namespace    ink-leitor
-// @version      4.9.3
+// @version      4.10.0
 // @description  Leitor automático, OCR, TTS, música, ordenador de capítulos, auto-arrumar bolhas, timer de sono, estatísticas e mais
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
@@ -78,7 +78,7 @@
         const iv = setInterval(tick, 1500);
     })();
 
-    const VERSION = '4.9.3';
+    const VERSION = '4.10.0';
     const IS_MOBILE = (() => {
         try { return matchMedia('(pointer:coarse)').matches || innerWidth < 700; }
         catch (e) { return innerWidth < 700; }
@@ -100,6 +100,7 @@
     const CFG_KEY = 'ink_cfg_v4';
     const DEFAULTS = {
         speed: 1.5, auto: true, voice: false, vrate: 1, vname: '',
+        dict: '', favs: [],               // 4.10.0: pronúncia e favoritos
         manga: false, method: '', methodM: '',
         girl: true, skin: 'gato',
         eye: false, eyeLvl: 0.25,
@@ -735,7 +736,10 @@
             return false;
         }
 
-        async function reorder(sorted) {
+        let stopAsked = false, working = false, undoOrder = null;
+        const clearPreview = () => $$('.ink-prev').forEach(e => e.remove());
+
+        async function reorder(sorted, onStep) {
             // pointer capture com ponteiro sintético dá erro; engole só durante o arraste
             const oSet = Element.prototype.setPointerCapture, oRel = Element.prototype.releasePointerCapture;
             Element.prototype.setPointerCapture = function (id) { try { return oSet.call(this, id); } catch (e) { } };
@@ -743,8 +747,10 @@
             try {
                 for (let i = 0; i < sorted.length; i++) {
                     const el = sorted[i];
+                    if (stopAsked) return false;
+                    if (onStep && curOrder().indexOf(el) > i) onStep(i + 1, sorted.length);
                     while (curOrder().indexOf(el) > i) {
-                        if (!await stepLeft(el)) return false;
+                        if (stopAsked || !await stepLeft(el)) return false;
                     }
                 }
                 return curOrder().every((e, i) => e === sorted[i]);
@@ -754,7 +760,7 @@
             }
         }
 
-        async function run(mode, say) {
+        async function run(mode, say, preview) {
             const tiles = getTiles();
             if (tiles.length < 2) { say(tiles.length ? '⚠ Só 1 balão, nada pra ordenar' : '⚠ Não achei os balões nesta tela'); return; }
 
@@ -776,13 +782,41 @@
             }
 
             const sorted = orderBoxes(pts, mode);
+            if (preview) { showPreview(sorted, say); return; }
             const lbl = e => (e.getAttribute('aria-label') || '?').replace(/\D+/g, '');
             console.info('[Ink] ordem atual:', curOrder().map(lbl).join(','), '→ alvo:', sorted.map(lbl).join(','));
             if (curOrder().every((e, i) => e === sorted[i])) { say(`✓ Já estava na ordem certa (${mode === 'manga' ? 'mangá' : 'HQ'})`); return; }
             say('⏳ Arrumando…');
-            const ok = await reorder(sorted);
-            if (ok) say(`✓ ${tiles.length} balões arrumados (${mode === 'manga' ? 'mangá' : 'HQ'}). Confira e toque em Salvar.`);
+            undoOrder = curOrder();
+            const ok = await reorder(sorted, (n, t) => say(`⏳ Posição ${n} de ${t}…`));
+            if (stopAsked) say('⏹ Parado. Toque em Desfazer para voltar à ordem anterior.');
+            else if (ok) say(`✓ ${tiles.length} balões arrumados (${mode === 'manga' ? 'mangá' : 'HQ'}). Confira e toque em Salvar.`);
             else say('⚠ Não consegui arrastar tudo. Confira os números antes de Salvar.');
+        }
+
+        // mostra, ao lado de cada número atual, o número que a bolha vai receber (não move nada)
+        function showPreview(sorted, say) {
+            const cur = curOrder(), ov = overlayBoxes(cur.length);
+            if (!ov) { say('⚠ Não achei os números na página para mostrar a prévia'); return; }
+            cur.forEach((el, i) => {
+                const b = ov[i + 1], d = document.createElement('div');
+                d.className = 'ink-prev';
+                d.textContent = '→' + (sorted.indexOf(el) + 1);
+                d.style.cssText = `position:fixed;left:${(b.l + b.r) / 2}px;top:${b.t}px;transform:translateX(-50%);z-index:2147483647;pointer-events:none;background:#1565c0;color:#fff;border-radius:8px;padding:1px 5px;font:700 12px sans-serif;`;
+                document.body.appendChild(d);
+            });
+            say('👁 Prévia em azul (nada foi movido). Toque em Prévia de novo para esconder.');
+        }
+
+        async function undo(say) {
+            const back = undoOrder;
+            if (!back) { say('Nada para desfazer'); return; }
+            const now = curOrder();
+            if (back.length !== now.length || !back.every(e => now.includes(e))) { undoOrder = null; say('⚠ As bolhas mudaram, não dá para desfazer. Use Cancelar.'); return; }
+            say('⏳ Desfazendo…');
+            const ok = await reorder(back, (n, t) => say(`⏳ Desfazendo: posição ${n} de ${t}…`));
+            if (ok) { undoOrder = null; say('↶ Ordem anterior de volta'); }
+            else say('⚠ Não terminei de desfazer. Toque de novo ou use Cancelar.');
         }
 
         function injectUI() {
@@ -805,16 +839,33 @@
             const paint = () => { btn.textContent = cfg.manga ? '↔ Auto Mangá (→ ←)' : '↔ Auto HQ (← →)'; btn.style.background = cfg.manga ? '#e8573f' : '#ff69b4'; };
             paint();
             tog.onclick = e => { e.preventDefault(); cfg.manga = !cfg.manga; saveCfg(); workSave(); paint(); refreshPanel(); };
-            btn.onclick = async e => {
-                e.preventDefault();
-                if (btn.dataset.busy) return;
-                btn.dataset.busy = '1';
-                btn.textContent = '⏳ Arrumando…';
-                try { await run(cfg.manga ? 'manga' : 'hq', say); } catch (err) { say('⚠ ' + (err.message || err)); }
-                delete btn.dataset.busy;
+            const mk = (label, title) => { const b = document.createElement('button'); b.type = 'button'; b.textContent = label; b.title = title; b.style.cssText = css + 'flex:1;background:rgba(255,255,255,.14);'; return b; };
+            const prev = mk('👁 Prévia', 'Mostra a nova ordem sem mover nada');
+            const und = mk('↶ Desfazer', 'Volta à ordem de antes do último Auto');
+            const halt = mk('⏹ Parar', 'Interrompe o arraste');
+            halt.hidden = true;
+            // só uma operação por vez
+            const job = async fn => {
+                if (working) return;
+                working = true; stopAsked = false; clearPreview();
+                [btn, tog, prev, und].forEach(b => b.disabled = true);
+                halt.hidden = false;
+                try { await fn(); } catch (err) { say('⚠ ' + (err.message || err)); }
+                working = false; stopAsked = false;
+                [btn, tog, prev, und].forEach(b => b.disabled = false);
+                halt.hidden = true;
                 paint();
             };
-            row.append(btn, tog, msg);
+            const mode = () => cfg.manga ? 'manga' : 'hq';
+            btn.onclick = e => { e.preventDefault(); job(() => { btn.textContent = '⏳ Arrumando…'; return run(mode(), say); }); };
+            prev.onclick = e => { e.preventDefault(); if ($$('.ink-prev').length) { clearPreview(); say(''); } else job(() => run(mode(), say, true)); };
+            und.onclick = e => { e.preventDefault(); job(() => undo(say)); };
+            halt.onclick = e => { e.preventDefault(); stopAsked = true; say('⏹ Parando…'); };
+            tog.addEventListener('click', clearPreview);
+            const extra = document.createElement('div');
+            extra.style.cssText = 'display:flex;gap:8px;flex:1 1 100%;';
+            extra.append(prev, und, halt);
+            row.append(btn, tog, extra, msg);
             const hint = $$('p,div,span', modal).find(e => e.childElementCount === 0 && /arraste pra mudar/i.test(e.textContent || ''));
             const re = $$('button', modal).find(b => /^reescanear$/i.test(txt(b)));
             if (hint) hint.insertAdjacentElement('afterend', row);
@@ -827,6 +878,7 @@
             setInterval(() => {
                 isOpen = !!findModal();
                 if (isOpen) injectUI();
+                else { clearPreview(); undoOrder = null; }
             }, isPerf() ? 1200 : 700);
         }
 
@@ -1395,9 +1447,29 @@
         if (cur) out.push(cur);
         return out;
     }
+    // dicionário de pronúncia: uma regra por linha, no formato palavra=como falar
+    function applyDict(text) {
+        const map = new Map();
+        for (const line of String(cfg.dict || '').split('\n')) {
+            const i = line.indexOf('=');
+            const k = line.slice(0, i).trim(), v = line.slice(i + 1).trim();
+            if (i > 0 && k && v) map.set(k.toLowerCase(), v);
+        }
+        if (!map.size) return text;
+        const alt = [...map.keys()].sort((a, b) => b.length - a.length).map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+        return text.replace(new RegExp(`(?<![\\p{L}\\p{N}])(?:${alt})(?![\\p{L}\\p{N}])`, 'giu'), m => map.get(m.toLowerCase()) || m);
+    }
+    let lastSpoken = '';
+    function repeatLine() {
+        if (!TTS || !lastSpoken) { setStatus('Ainda não há fala para repetir'); return; }
+        if (running) stop('🔁 Leitura pausada para repetir a fala');
+        cancelSpeech();
+        for (const p of chunk(applyDict(lastSpoken))) { try { TTS.speak(mkUtt(p)); } catch (e) { } }
+    }
     async function speak(text, id) {
         if (!TTS) return;
-        for (const p of chunk(text)) {
+        lastSpoken = text;
+        for (const p of chunk(applyDict(text))) {
             if (!alive(id)) break;
             await new Promise(res => {
                 let done = false, wd = 0;
@@ -1908,6 +1980,49 @@
         location.href = cfg.last.path;
     }
 
+    /* ---- Favoritos ---- */
+    function favAdd() {
+        if (!location.pathname.startsWith('/ler/')) { setStatus('⚠ Abra uma página de leitura para favoritar'); return; }
+        const path = location.pathname + location.search;
+        const page = stateLabel(readState());
+        let wt = ''; try { wt = sessionStorage.getItem('ink_work_title') || ''; } catch (e) { }
+        const inp = $('ink-fav-note'), note = inp ? inp.value.trim().slice(0, 80) : '';
+        const fav = { path, label: `${(wt || document.title || 'Ink').trim().slice(0, 40)} · ${page}`, note, t: Date.now() };
+        cfg.favs = [fav, ...(cfg.favs || []).filter(f => !(f.path === path && f.label === fav.label))].slice(0, 50);
+        if (inp) inp.value = '';
+        saveCfg(); favPaint(); setStatus('⭐ Favorito salvo');
+    }
+    function favPaint() {
+        const box = $('ink-fav-list'); if (!box) return;
+        box.textContent = '';
+        (cfg.favs || []).forEach(f => {
+            const row = document.createElement('div'); row.className = 'ia-row';
+            const go = document.createElement('button'), del = document.createElement('button');
+            go.className = del.className = 'ia-chip'; go.style.flex = '4';
+            go.textContent = f.label + (f.note ? ' — ' + f.note : ''); go.title = go.textContent;
+            del.textContent = '✕'; del.title = 'Apagar favorito';
+            go.onclick = () => { try { sessionStorage.setItem('ink_resume', JSON.stringify(f)); } catch (e) { } location.href = f.path; };
+            del.onclick = () => { cfg.favs = cfg.favs.filter(x => x !== f); saveCfg(); favPaint(); };
+            row.append(go, del); box.appendChild(row);
+        });
+    }
+
+    /* ---- Atalhos de teclado (Alt+Shift+tecla) ---- */
+    function hotkeys(e) {
+        if (!e.altKey || !e.shiftKey || e.ctrlKey || e.metaKey || e.repeat) return;
+        if (/^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName) || e.target.isContentEditable) return;
+        const f = {
+            KeyP: () => $('ink-go') && $('ink-go').click(),
+            KeyV: () => toggleVoice(),
+            KeyR: () => repeatLine(),
+            KeyS: () => favAdd(),
+            Period: () => setSpeed(1),
+            Comma: () => setSpeed(-1)
+        }[e.code];
+        if (!f) return;
+        e.preventDefault(); e.stopPropagation(); f();
+    }
+
     /* ---- Por obra ---- */
     const WORK = { path: '', key: '' };
     function applyWork(k) {
@@ -2220,6 +2335,12 @@
      * ================================================================== */
     /*CL_START*/
     const CHANGELOG = [
+        { "v": "4.10.0", "d": "2026-11-26", "t": [
+            "Arrumar as bolhas: novos botões Prévia, Desfazer e Parar, e andamento durante o arraste",
+            "Dicionário de pronúncia e botão para repetir a última fala",
+            "Páginas favoritas com anotação",
+            "Atalhos de teclado no PC com Alt+Shift"
+        ] },
         { "v": "4.9.3", "d": "2026-11-26", "t": [
             "Arraste das bolhas ajustado: move uma posição por vez, rolando a fileira para a bolha ficar visível",
             "Bolhas empilhadas agora são lidas de cima para baixo"
@@ -2691,6 +2812,25 @@ padding:8px;border:1px solid var(--ib-line);border-radius:16px;background:var(--
     </div>
     </details>
     <details class="ia-fold">
+      <summary>🔁 Pronúncia e fala</summary>
+    <div class="ia-row"><button class="ia-chip" id="ink-repeat">🔁 Repetir última fala</button></div>
+    <textarea class="ia-inp" id="ink-dict" spellcheck="false" placeholder="Uma por linha: Luffy=Lúfi"></textarea>
+    </details>
+    <details class="ia-fold">
+      <summary>⭐ Favoritos</summary>
+    <input class="ia-inp" id="ink-fav-note" maxlength="80" placeholder="Anotação (opcional)">
+    <div class="ia-row"><button class="ia-chip" id="ink-fav-add">⭐ Salvar esta página</button></div>
+    <div id="ink-fav-list"></div>
+    </details>
+    <details class="ia-fold">
+      <summary>⌨ Atalhos (PC)</summary>
+    <div style="white-space:pre-line">Alt+Shift+P: ler / pausar
+Alt+Shift+V: voz
+Alt+Shift+R: repetir fala
+Alt+Shift+S: salvar favorito
+Alt+Shift+ponto / vírgula: mais / menos velocidade</div>
+    </details>
+    <details class="ia-fold">
       <summary>💾 Backup</summary>
     <textarea class="ia-inp" id="ink-bk" spellcheck="false" placeholder="Exporte aqui, ou cole um backup e toque em Importar"></textarea>
     <div class="ia-row">
@@ -2787,6 +2927,12 @@ padding:8px;border:1px solid var(--ib-line);border-radius:16px;background:var(--
         $('ink-sharep').onclick = () => shareText(TICK.cur || '');
         $('ink-bk-ex').onclick = backupExport;
         $('ink-bk-im').onclick = backupImport;
+        $('ink-repeat').onclick = repeatLine;
+        $('ink-dict').value = cfg.dict || '';
+        $('ink-dict').oninput = e => { cfg.dict = e.target.value; saveCfg(); };
+        $('ink-fav-add').onclick = favAdd;
+        favPaint();
+        document.addEventListener('keydown', hotkeys, true);
 
         // campos de texto: não deixa as teclas vazarem pros atalhos do site
         ['keydown', 'keyup', 'keypress'].forEach(t => u.addEventListener(t, e => {
