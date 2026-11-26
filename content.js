@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ink Leitor
 // @namespace    ink-leitor
-// @version      4.7.0
+// @version      4.8.0
 // @description  Leitor automático, OCR, TTS, música, ordenador de capítulos, auto-arrumar bolhas, timer de sono, estatísticas e mais
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
@@ -25,7 +25,7 @@
     if (window.__ink) return;
     window.__ink = true;
 
-    const VERSION = '4.7.0';
+    const VERSION = '4.8.0';
     const IS_MOBILE = (() => {
         try { return matchMedia('(pointer:coarse)').matches || innerWidth < 700; }
         catch (e) { return innerWidth < 700; }
@@ -65,6 +65,7 @@
         stats: { days: {} },
         full: false,
         seenVer: '',                      // última versão cujas novidades você já viu
+        skipIntro: true,                  // fecha sozinho avisos/novidades que o site abre ao entrar
     };
     const cfg = { ...DEFAULTS };
     try { Object.assign(cfg, JSON.parse(localStorage.getItem(CFG_KEY) || '{}')); } catch (e) { }
@@ -110,7 +111,7 @@
     /* ================================================================== *
      *  3. ANDROID POPUP FIX
      * ================================================================== */
-    (() => {
+    const PopupFix = (() => {
         const KEY = 'serei sempre legal';
         const LOCKS = new Set(['modal-open', 'no-scroll', 'locked', 'overflow-hidden', 'is-locked', 'scroll-lock', 'blur']);
         const MINE = '#ink-panel,#ink-news,#ink-eye-el,#ink-order,#ink-dbg,#ink-auto-row';
@@ -220,6 +221,138 @@
         };
         if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
         else start();
+        // usado pelo "Pular telas iniciais": destrava a rolagem e tira cortinas que sobraram
+        return { boost: () => { popupAt = Date.now(); try { killBackdrops(); unlock(); } catch (e) { } } };
+    })();
+
+    /* ================================================================== *
+     *  3b. PULAR TELAS INICIAIS
+     *  Fecha os avisos / novidades / boas-vindas que o site abre sozinho
+     *  (ex.: "NOVIDADE — As Tirinhas chegaram na comunidade!").
+     *  - Botão ⏭ do painel: pula agora, mesmo que venha mais de uma tela seguida.
+     *  - Automático (cfg.skipIntro): só nos primeiros 25 s depois de abrir ou trocar
+     *    de página, e só em telas que apareceram SOZINHAS (nunca logo após um toque seu).
+     *  Só clica em botões de fechar / pular / "agora não"; nunca em "Ver agora",
+     *  "Aceitar" e afins. O leitor (imagens, canvas, ordenador de balões) é ignorado.
+     * ================================================================== */
+    const SkipIntro = (() => {
+        const MINE = '#ink-panel,#ink-news,#ink-eye-el,#ink-order,#ink-dbg,#ink-auto-row';
+        const RX_TXT = /^(fechar|close|dismiss|pular|skip|pular\s+tudo|pular\s+tutorial|agora\s+n[aã]o|n[aã]o\s+agora|depois|mais\s+tarde|talvez\s+depois|n[aã]o,?\s+obrigad[oa]|cancelar|entendi|x|×|✕|✖|╳)$/i;
+        const RX_ATTR = /(fechar|close|dismiss|pular|skip)/i;
+        const RX_NOT = /(compartilh|share|curti|like|play|voltar|back|menu|search|busca)/i;
+        const WINDOW_MS = 25000;
+        let tapAt = 0, bornAt = Date.now(), path = location.pathname, busy = false;
+        const tries = new WeakMap();
+
+        const mine = el => !!(el && el.closest && el.closest(MINE));
+        const vis = el => {
+            const r = el.getBoundingClientRect();
+            if (r.width < 2 || r.height < 2) return false;
+            let cs; try { cs = getComputedStyle(el); } catch (e) { return false; }
+            return cs.display !== 'none' && cs.visibility !== 'hidden' && parseFloat(cs.opacity || '1') > 0.05;
+        };
+        // conteúdo do app (leitor, lista grande, ordenador) não é "tela inicial"
+        const isApp = el => !!el.querySelector('canvas,video,.comic-page,.bz-order') || el.querySelectorAll('img').length > 3 || el.querySelectorAll('button,a').length > 12;
+
+        function overlays() {
+            const out = [], seen = new Set();
+            const add = el => { if (!seen.has(el)) { seen.add(el); out.push(el); } };
+            $$('dialog[open],[role="dialog"],[role="alertdialog"],[aria-modal="true"]').forEach(add);
+            $$('body > *, body > * > *, body > * > * > *').forEach(el => {
+                if (seen.has(el)) return;
+                let cs; try { cs = getComputedStyle(el); } catch (e) { return; }
+                if (cs.position !== 'fixed') return;
+                const r = el.getBoundingClientRect();
+                if (r.width >= innerWidth * 0.5 && r.height >= innerHeight * 0.2) add(el);
+            });
+            const panel = $('ink-panel');
+            return out.filter(el => !mine(el) && !(panel && el.contains(panel)) && vis(el) && !isApp(el));
+        }
+
+        function findClose(box) {
+            const cands = $$('button,[role="button"],a,[tabindex]', box).filter(b => !mine(b) && vis(b));
+            // 1) botão com texto/rótulo de fechar ou pular
+            for (const b of cands) {
+                const t = txt(b), at = ((b.getAttribute('aria-label') || '') + ' ' + (b.title || '')).trim();
+                if (t && RX_TXT.test(t)) return b;
+                if (at && RX_ATTR.test(at) && t.length < 25) return b;
+            }
+            // 2) só um ícone pequeno (o "X" redondo do canto) — escolhe o mais alto e mais à direita
+            if (cands.length > 4) return null;
+            const icons = cands.filter(b => {
+                if (txt(b).length > 1 || !b.querySelector('svg,img,i')) return false;
+                const r = b.getBoundingClientRect();
+                if (r.width > 64 || r.height > 64) return false;
+                return !RX_NOT.test((b.getAttribute('aria-label') || '') + ' ' + (b.title || ''));
+            });
+            icons.sort((a, b) => {
+                const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+                return (ra.top - rb.top) || (rb.right - ra.right);
+            });
+            return icons[0] || null;
+        }
+
+        // última opção do botão manual: esconde (sem apagar do DOM, p/ não quebrar o site)
+        function canHide(box) {
+            if (location.pathname.startsWith('/ler/')) return false;   // no leitor nunca esconde nada
+            const dlg = box.matches('dialog,[role="dialog"],[role="alertdialog"],[aria-modal="true"]');
+            if (dlg) return true;
+            return (box.textContent || '').trim().length >= 20 && box.querySelectorAll('button,a').length <= 4 && box.querySelectorAll('img').length <= 1;
+        }
+
+        async function dismiss(box, manual) {
+            const n = (tries.get(box) || 0) + 1; tries.set(box, n);
+            if (!manual && n > 3) return false;
+            const b = findClose(box);
+            if (b) {
+                try { b.click(); } catch (e) { }
+                for (let i = 0; i < 6; i++) { await sleep(120); if (!box.isConnected || !vis(box)) return true; }
+            }
+            if (manual && canHide(box)) { box.style.setProperty('display', 'none', 'important'); return true; }
+            return false;
+        }
+
+        async function run(manual) {
+            if (busy) return 0;
+            busy = true;
+            let n = 0;
+            try {
+                for (let pass = 0; pass < 5; pass++) {
+                    let did = false;
+                    for (const box of overlays()) { if (await dismiss(box, manual)) { n++; did = true; break; } }
+                    if (!did) break;
+                    await sleep(350);   // dá tempo da próxima tela (se houver) aparecer
+                }
+                if (n) PopupFix.boost();
+            } finally { busy = false; }
+            return n;
+        }
+
+        const msg = n => n === 1 ? '⏭ 1 tela pulada' : `⏭ ${n} telas puladas`;
+
+        function auto() {
+            if (!cfg.skipIntro || busy || document.hidden) return;
+            if (location.pathname !== path) { path = location.pathname; bornAt = Date.now(); }   // site é SPA
+            if (Date.now() - bornAt > WINDOW_MS) return;
+            if (Date.now() - tapAt < 1500) return;                                              // acabou de tocar: não mexe
+            run(false).then(n => { if (n) setStatus(msg(n)); }).catch(() => { });
+        }
+
+        async function now() {
+            setStatus('⏭ Procurando telas…');
+            const n = await run(true);
+            setStatus(n ? msg(n) : 'Nenhuma tela para pular');
+            return n;
+        }
+
+        function start() {
+            const tap = () => { tapAt = Date.now(); };
+            document.addEventListener('pointerdown', tap, true);
+            document.addEventListener('keydown', tap, true);
+            setTimeout(auto, 400);
+            setInterval(auto, 900);
+        }
+        return { now, start };
     })();
 
     /* ================================================================== *
@@ -1858,1111 +1991,4 @@
      *  Sem nenhum dos dois (Tampermonkey): baixa o arquivo como fallback.
      * ================================================================== */
     const UPD_URL = 'https://raw.githubusercontent.com/lucateli/ink-atualizacoes/main/content.js';
-    const UPD = { text: '', ver: '', log: null };
-    const vnum = v => String(v).split('.').map(n => parseInt(n, 10) || 0);
-    const vGt = (a, b) => {
-        const x = vnum(a), y = vnum(b);
-        for (let i = 0; i < Math.max(x.length, y.length); i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return d > 0; }
-        return false;
-    };
-
-    let updSeq = 0;
-    const updWait = new Map();
-    window.addEventListener('message', e => {
-        const d = e.data;
-        if (e.source !== window || !d || !d.inkUpdRes) return;
-        const f = updWait.get(d.inkUpdRes);
-        if (f) { updWait.delete(d.inkUpdRes); f(d); }
-    });
-    function extSync() {   // pede ao bg.js / app para baixar e registrar o script novo
-        return new Promise((res, rej) => {
-            const id = ++updSeq;
-            const t = setTimeout(() => { updWait.delete(id); rej(new Error('sem extensão')); }, 12000);
-            updWait.set(id, d => { clearTimeout(t); d.err ? rej(new Error(d.err)) : res(d.data); });
-            window.postMessage({ inkUpd: id }, '*');
-        });
-    }
-    function downloadNew() {
-        const url = URL.createObjectURL(new Blob([UPD.text], { type: 'text/javascript' }));
-        const a = document.createElement('a'); a.href = url; a.download = 'content.js';
-        document.body.appendChild(a); a.click(); a.remove();
-        setTimeout(() => URL.revokeObjectURL(url), 5000);
-        setStatus('Baixado como content.js. Troque o arquivo e recarregue.');
-    }
-    async function applyUpdate() {
-        setStatus('⏳ Atualizando…');
-        try {
-            const r = await extSync();
-            if (r && r.ok) setStatus(r.src === 'app' ? '✓ Atualizado! Recarregando…' : `✓ Atualizado (${r.src}). Aperte F5 para aplicar.`);
-            else setStatus('⚠ Ative "Permitir scripts de usuário" nos Detalhes da extensão e tente de novo.');
-        } catch (e) {
-            if (UPD.text && !window.InkNative) downloadNew(); else setStatus('⚠ ' + (e.message || e));
-        }
-    }
-
-    const hideUpd = () => { const b = $('ink-upd'); if (b) b.hidden = true; };
-    function showUpd() {
-        const b = $('ink-upd'); if (!b) return;
-        b.textContent = '';
-        const s = document.createElement('span'); s.textContent = `⬆ Nova versão ${UPD.ver} · ver novidades`; s.style.cursor = 'pointer'; s.onclick = () => openNews();
-        const dl = document.createElement('button'); dl.className = 'ia-upd-b'; dl.textContent = 'Atualizar';
-        dl.onclick = applyUpdate;
-        const x = document.createElement('button'); x.className = 'ia-upd-b'; x.textContent = '✕'; x.title = 'Ignorar esta versão';
-        x.onclick = () => { cfg.updSkip = UPD.ver; saveCfg(); hideUpd(); };
-        b.append(s, dl, x);
-        b.hidden = false;
-    }
-    async function checkUpdate(manual) {
-        try {
-            if (manual) setStatus('🔄 Verificando atualização…');
-            const r = await fetch(UPD_URL + '?t=' + Date.now(), { cache: 'no-store' });
-            if (!r.ok) throw new Error('HTTP ' + r.status);
-            const t = await r.text();
-            const m = /const VERSION = '([\d.]+)'/.exec(t);
-            if (!m) throw new Error('versão não encontrada no arquivo');
-            UPD.text = t; UPD.ver = m[1]; UPD.log = parseCL(t);
-            newsDot(); if ($('ink-news')) renderNews();
-            if (vGt(m[1], VERSION)) {
-                if (manual || cfg.updSkip !== m[1]) showUpd();
-                if (manual) setStatus(`⬆ Nova versão ${m[1]} disponível`);
-            } else {
-                hideUpd();
-                if (manual) setStatus(`✓ Já está na versão mais recente (${VERSION})`);
-            }
-        } catch (e) { if (manual) setStatus('⚠ Não consegui verificar: ' + (e.message || e)); }
-    }
-
-
-    /* ================================================================== *
-     * 12b. NOVIDADES (o que veio de novo)
-     *  A lista abaixo é lida também do arquivo NOVO no GitHub, então o painel
-     *  mostra as novidades ANTES de você atualizar.
-     *  REGRA: ao subir a versão, adicione uma entrada NO TOPO e mantenha JSON válido
-     *  (aspas duplas, sem vírgula sobrando) entre os marcadores CL_START e CL_END.
-     * ================================================================== */
-    /*CL_START*/
-    const CHANGELOG = [
-        { "v": "4.7.0", "d": "2026-11-25", "t": [
-            "Painel bem menor e compacto, escuro em todos os temas (inclusive no PC)",
-            "Nova aba Ajustes: voz, filtro de olho, skins e missão saíram da aba Ler",
-            "A aba Ler agora cabe sem rolar: só o botão de ler, velocidade e os atalhos"
-        ] },
-        { "v": "4.6.0", "d": "2026-11-25", "t": [
-            "Painel de novidades: toque no botão 🆕 do topo para ver o que mudou",
-            "Mostra as novidades da versão nova antes de você atualizar, com botão Atualizar agora",
-            "Abre sozinho uma vez depois que o app atualiza; bolinha vermelha avisa quando há novidade"
-        ] },
-        { "v": "4.5.1", "d": "2026-11-25", "t": [
-            "Interface mobile nova: escura, opaca e com botões maiores",
-            "Corrigido o painel claro demais no modo menina (texto sumia nos botões)",
-            "A versão do APK agora é sempre igual à do content.js"
-        ] },
-        { "v": "4.5.0", "d": "", "t": [
-            "Continuar de onde parou, com botão no painel",
-            "Velocidade e direção lembradas por obra",
-            "Timer de sono por minutos ou capítulos",
-            "Filtro de olho automático por horário",
-            "Controles na tela de bloqueio e opção de pular balões sem sentido",
-            "OCR em português, inglês e japonês",
-            "Estatísticas de leitura, tela cheia, backup e compartilhar"
-        ] }
-    ];
-    /*CL_END*/
-
-    function parseCL(text) {
-        try {
-            const m = /\/\*CL_START\*\/\s*const CHANGELOG = (\[[\s\S]*?\]);?\s*\/\*CL_END\*\//.exec(text);
-            if (!m) return null;
-            const a = JSON.parse(m[1]);
-            return Array.isArray(a) ? a : null;
-        } catch (e) { return null; }
-    }
-    function newsEntries() {
-        const map = new Map();
-        (UPD.log || []).forEach(e => { if (e && e.v) map.set(e.v, e); });
-        CHANGELOG.forEach(e => map.set(e.v, e));
-        return [...map.values()].sort((a, b) => (vGt(a.v, b.v) ? -1 : vGt(b.v, a.v) ? 1 : 0));
-    }
-    const hasNewer = () => !!(UPD.ver && vGt(UPD.ver, VERSION));
-    function newsDot() {
-        const d = $('ink-news-dot'); if (!d) return;
-        d.hidden = !(cfg.seenVer !== VERSION || hasNewer());
-    }
-    function newsTheme() {
-        const n = $('ink-news'); if (!n) return;
-        n.classList.toggle('boy', !cfg.girl);
-        SKINS.forEach(k => n.classList.toggle('skin-' + k.id, cfg.girl && curSkin().id === k.id));
-    }
-    function closeNews() {
-        const n = $('ink-news'); if (n) n.remove();
-        document.removeEventListener('keydown', newsKey, true);
-    }
-    function newsKey(e) { if (e.key === 'Escape') closeNews(); }
-    function renderNews() {
-        const box = $('ink-news-body'); if (!box) return;
-        box.textContent = '';
-        const el = (tag, cls, text) => { const x = document.createElement(tag); if (cls) x.className = cls; if (text != null) x.textContent = text; return x; };
-
-        const ban = el('div', 'nw-ban' + (hasNewer() ? ' up' : ''));
-        if (hasNewer()) {
-            ban.append(el('div', 'nw-ban-t', `⬆ Nova versão ${UPD.ver} disponível`), el('div', 'nw-ban-s', `Você está na ${VERSION}.`));
-            const b = el('button', 'nw-btn', 'Atualizar agora');
-            b.onclick = async () => { b.disabled = true; b.textContent = '⏳ Atualizando…'; await applyUpdate(); b.textContent = '✓ Pedido enviado'; };
-            ban.append(b);
-        } else {
-            ban.append(el('div', 'nw-ban-t', `✓ Versão ${VERSION} (mais recente conhecida)`));
-            const b = el('button', 'nw-btn', 'Verificar agora');
-            b.onclick = async () => { b.disabled = true; b.textContent = '🔄 Verificando…'; await checkUpdate(true); if ($('ink-news')) renderNews(); };
-            ban.append(b);
-        }
-        box.append(ban);
-
-        if (hasNewer() && !newsEntries().some(e => e.v === UPD.ver)) {
-            box.append(el('div', 'nw-card new', 'Esta versão ainda não tem notas de novidades.'));
-        }
-        newsEntries().forEach(e => {
-            const isNew = vGt(e.v, VERSION), cur = e.v === VERSION;
-            const c = el('div', 'nw-card' + (isNew ? ' new' : ''));
-            const h = el('div', 'nw-ch');
-            h.append(el('span', 'nw-v', 'v' + e.v));
-            if (isNew) h.append(el('span', 'nw-tag', 'NOVA'));
-            else if (cur) h.append(el('span', 'nw-tag cur', 'INSTALADA'));
-            if (e.d) h.append(el('span', 'nw-d', e.d.split('-').reverse().join('/')));
-            c.append(h);
-            const ul = el('ul');
-            (Array.isArray(e.t) ? e.t : []).forEach(x => ul.append(el('li', null, String(x))));
-            c.append(ul);
-            box.append(c);
-        });
-    }
-    function openNews() {
-        if ($('ink-news')) { closeNews(); return; }
-        const n = document.createElement('div');
-        n.id = 'ink-news';
-        n.innerHTML = `<div class="nw-box" role="dialog" aria-label="Novidades">
-  <div class="nw-head"><div class="nw-title">🆕 O que há de novo</div><button class="nw-x" id="ink-news-x" aria-label="Fechar">✕</button></div>
-  <div class="nw-body" id="ink-news-body"></div></div>`;
-        n.addEventListener('click', e => { if (e.target === n) closeNews(); });
-        document.body.appendChild(n);
-        $('ink-news-x').onclick = closeNews;
-        document.addEventListener('keydown', newsKey, true);
-        newsTheme(); renderNews();
-        cfg.seenVer = VERSION; saveCfg(); newsDot();
-        if (!UPD.ver) checkUpdate(false).then(() => { if ($('ink-news')) renderNews(); });
-    }
-
-    /* ================================================================== *
-     * 13. ÍCONES + CSS
-     * ================================================================== */
-    const svg = (p, fill) => `<svg viewBox="0 0 24 24" width="16" height="16" ${fill ? 'fill="currentColor"' : 'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"'} aria-hidden="true">${p}</svg>`;
-    const ICO = {
-        play: svg('<path d="M8 5.5v13a1 1 0 0 0 1.5.86l10.5-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5z"/>', true),
-        pause: svg('<path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z"/>', true),
-        sort: svg('<path d="M7 4v16M7 4L3.5 7.5M7 4l3.5 3.5M17 20V4M17 20l-3.5-3.5M17 20l3.5-3.5"/>'),
-        clean: svg('<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M19 17v4M17 19h4"/>'),
-        reset: svg('<path d="M3 12a9 9 0 1 0 3-6.7M3 4v5h5"/>'),
-        book: svg('<path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v16H6.5A2.5 2.5 0 0 0 4 21.5z"/><path d="M4 5.5v16"/>'),
-        min: svg('<path d="M6 9l6 6 6-6"/>'),
-        max: svg('<path d="M6 15l6-6 6 6"/>'),
-        voice: svg('<path d="M11 5L6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/>'),
-    };
-
-    const CSS = `
-#ink-panel{position:fixed;bottom:12px;right:12px;z-index:2147483000;width:min(248px,calc(100vw - 16px));font:12.5px/1.3 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
-box-sizing:border-box;padding:8px;border:2px solid var(--ib-line);border-radius:20px;background:var(--ib-bg);color:var(--ib-txt);max-height:calc(100dvh - 24px);overflow-y:auto;overflow-x:hidden;
---ib-bg:rgba(255,240,245,.96);--ib-card:rgba(255,182,193,.42);--ib-card2:rgba(255,105,180,.55);--ib-line:rgba(255,192,203,.85);--ib-txt:#5c4a4a;--ib-dim:#a88b8b;--ib-ac:#ff69b4;
-box-shadow:0 8px 24px rgba(255,105,180,.28),inset 0 1px 0 rgba(255,255,255,.5);-webkit-backdrop-filter:blur(14px) saturate(1.3);backdrop-filter:blur(14px) saturate(1.3);}
-#ink-panel.boy{--ib-bg:rgba(16,16,20,.9);--ib-card:rgba(255,255,255,.06);--ib-card2:rgba(255,255,255,.14);--ib-line:rgba(255,255,255,.1);--ib-txt:#f4f2ef;--ib-dim:#a19eac;--ib-ac:#e8573f;border-radius:16px}
-#ink-panel.skin-lobo{--ib-bg:rgba(28,34,48,.95);--ib-card:rgba(150,170,205,.16);--ib-card2:rgba(150,170,205,.3);--ib-line:rgba(170,190,225,.32);--ib-txt:#e9eef7;--ib-dim:#8f9bb5;--ib-ac:#5f8fd0}
-#ink-panel *{box-sizing:border-box}
-#ink-panel button{all:unset;box-sizing:border-box;cursor:pointer;user-select:none;touch-action:manipulation;-webkit-tap-highlight-color:transparent;display:inline-flex;align-items:center;justify-content:center;gap:5px}
-#ink-panel .ia-head{display:flex;align-items:center;gap:6px;cursor:grab;touch-action:none;padding-bottom:6px}
-#ink-panel .ia-title{flex:1;font-weight:800;font-size:13px;color:var(--ib-ac);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-#ink-panel .ia-title{min-width:0}
-#ink-panel .ia-title.tick{position:relative;overflow:hidden;text-overflow:clip;font-weight:700;font-size:12px;-webkit-mask-image:linear-gradient(90deg,transparent,#000 7%,#000 93%,transparent);mask-image:linear-gradient(90deg,transparent,#000 7%,#000 93%,transparent)}
-#ink-panel .ia-tick-in{display:inline-block;padding-left:100%;white-space:nowrap;will-change:transform}
-@keyframes ink-tick{from{transform:translateX(0)}to{transform:translateX(-100%)}}
-#ink-panel .ia-ib{width:26px;height:26px;border-radius:8px;background:var(--ib-card);color:var(--ib-txt);flex:none}
-#ink-panel.mob .ia-ib{width:36px;height:36px;border-radius:11px}
-#ink-panel .ia-tabs{display:flex;gap:4px;margin-bottom:4px}
-#ink-panel .ia-tab{flex:1;min-height:28px;border-radius:9px;background:var(--ib-card);border:1px solid var(--ib-line);color:var(--ib-txt);font-size:11.5px;font-weight:700}
-#ink-panel .ia-tab.on{background:var(--ib-ac);color:#fff;border-color:var(--ib-ac)}
-#ink-panel .ia-pane.hide{display:none}
-#ink-panel .ia-pane.ghost{position:absolute;left:-9999px;top:0;width:230px}
-#ink-panel .ia-go{width:100%;height:38px;border-radius:12px;font-weight:800;font-size:13px;color:#fff;background:linear-gradient(135deg,var(--ib-ac),#ffb6c1);box-shadow:0 4px 12px rgba(255,105,180,.4);margin-top:4px}
-#ink-panel.mob .ia-go{height:46px}
-#ink-panel.run .ia-go{background:var(--ib-card2);box-shadow:none;color:var(--ib-txt)}
-#ink-panel .ia-cont{display:flex;width:100%;min-height:32px;margin-top:4px;padding:4px 9px;border-radius:11px;background:var(--ib-card);border:1px solid var(--ib-ac);color:var(--ib-txt);font-size:11.5px;font-weight:700;justify-content:flex-start}
-#ink-panel .ia-cont[hidden]{display:none}
-#ink-panel .ia-cont span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-#ink-panel.mob .ia-cont{min-height:40px}
-#ink-panel .ia-row{display:flex;gap:4px;margin-top:6px;align-items:stretch}
-#ink-panel .ia-row>.ia-chip{flex:1;min-height:34px;flex-direction:row;font-size:12px;white-space:nowrap}
-#ink-panel.mob .ia-row>.ia-chip{min-height:42px}
-#ink-panel .ia-val{min-width:38px;flex:none;text-align:center;font-weight:600;font-size:12px;align-self:center;color:var(--ib-txt)}
-#ink-panel .ia-val.wide{flex:1;min-width:0}
-#ink-panel .ia-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;margin-top:6px}
-#ink-panel .ia-chip{flex-direction:column;min-height:42px;padding:4px;border-radius:11px;background:var(--ib-card);border:1px solid var(--ib-line);color:var(--ib-txt);font-size:9.5px;font-weight:600;gap:2px;text-align:center}
-#ink-panel.mob .ia-chip{min-height:50px}
-#ink-panel .ia-chip.on{background:var(--ib-ac);color:#fff;border-color:var(--ib-ac)}
-#ink-panel .ia-chip svg{width:15px;height:15px}
-#ink-panel .ia-inp{display:block;width:100%;margin-top:4px;padding:6px 8px;border-radius:9px;border:1px solid var(--ib-line);background:var(--ib-card);color:var(--ib-txt);font:inherit;font-size:11.5px;outline:none}
-#ink-panel .ia-inp::placeholder{color:var(--ib-dim)}
-#ink-panel textarea.ia-inp{min-height:54px;resize:none;font-size:10.5px}
-#ink-panel .ia-status{margin-top:6px;padding:5px 8px;border-radius:9px;background:var(--ib-card);color:var(--ib-txt);font-size:11.5px;line-height:1.3;word-break:break-word;min-height:20px;border:1px solid var(--ib-line)}
-#ink-panel.run .ia-status{border-color:var(--ib-ac)}
-#ink-panel .ia-sec{margin:8px 2px 4px;font-size:9.5px;letter-spacing:.9px;text-transform:uppercase;color:var(--ib-dim);font-weight:700}
-#ink-panel .ia-skins{display:flex;gap:4px}
-#ink-panel .ia-skin{flex:1;min-height:30px;border-radius:10px;background:var(--ib-card);border:1px solid var(--ib-line);color:var(--ib-txt);font-size:11.5px;font-weight:600}
-#ink-panel .ia-skin.on{background:var(--ib-ac);color:#fff;border-color:var(--ib-ac)}
-#ink-panel .ia-statbox{padding:6px 9px;border-radius:9px;background:var(--ib-card);border:1px solid var(--ib-line);font-size:11.5px;line-height:1.55}
-#ink-panel .ia-bars{display:flex;align-items:flex-end;gap:3px;height:30px;margin-top:5px}
-#ink-panel .ia-bars span{flex:1;background:var(--ib-ac);border-radius:3px 3px 0 0;opacity:.85}
-#ink-panel.min{width:auto;padding:6px;border-radius:14px;overflow:visible}
-#ink-panel.min .ia-title,#ink-panel.min #ink-upd-chk,#ink-panel.min #ink-news-btn{display:none}
-#ink-panel #ink-upd{display:flex;align-items:center;gap:6px;margin-bottom:6px;padding:5px 8px;border-radius:10px;background:var(--ib-ac);color:#fff;font-size:11.5px;font-weight:700}
-#ink-panel #ink-upd[hidden]{display:none}
-#ink-panel #ink-upd span{flex:1}
-#ink-panel .ia-upd-b{padding:3px 8px;border-radius:7px;background:rgba(255,255,255,.28);color:#fff;font-size:11px;font-weight:700}
-#ink-panel.min #ink-body{position:absolute;left:-9999px;top:0;width:232px}
-#ink-panel #ink-mini-go{display:none;width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,var(--ib-ac),#ffb6c1);color:#fff}
-#ink-panel.min #ink-mini-go{display:inline-flex}
-#ink-panel #ink-yt-box{margin-top:6px;border-radius:10px;overflow:hidden;aspect-ratio:16/9;background:#000}
-#ink-panel #ink-yt-box:empty{display:none}
-#ink-panel #ink-yt-box.off{position:absolute;left:-9999px;top:0;width:200px;height:113px;margin:0}
-#ink-panel #ink-yt-box iframe{width:100%;height:100%;border:0;display:block}
-#ink-panel .ia-mstat{margin-top:6px;font-size:11px;color:var(--ib-dim);word-break:break-word;min-height:14px}
-#ink-panel .ia-trk{display:flex;align-items:center;padding:4px;border-radius:6px;font-size:11px;color:var(--ib-dim)}
-#ink-panel .ia-trk.on{background:var(--ib-ac);color:#fff}
-#ink-panel .ia-trk-t{flex:1;justify-content:flex-start;text-align:left;padding:3px 5px;border-radius:4px;color:inherit;font-size:11px}
-#ink-panel .ia-music-list{max-height:100px;overflow:auto;margin-top:4px;padding:2px;background:var(--ib-card);border-radius:8px;border:1px solid var(--ib-line);font-size:11px;color:var(--ib-dim)}
-
-/* ---------- interface nova (4.7.0): escura em todos os temas · .cmp = compacto (PC) · .mob = celular ---------- */
-#ink-panel{--ib-bg:#2a1622;--ib-card:rgba(255,130,180,.15);--ib-card2:rgba(255,130,180,.32);--ib-line:rgba(255,150,195,.38);--ib-txt:#ffeef5;--ib-dim:#e2b0c7;--ib-ac:#ff4f9a;
-background:var(--ib-bg);border:1.5px solid var(--ib-line);-webkit-backdrop-filter:none;backdrop-filter:none;box-shadow:0 10px 30px rgba(0,0,0,.55)}
-#ink-panel.skin-lobo{--ib-bg:#161c2a;--ib-card:rgba(150,170,205,.16);--ib-card2:rgba(150,170,205,.32);--ib-line:rgba(170,190,225,.34);--ib-txt:#eef2fa;--ib-dim:#a3afc8;--ib-ac:#5f8fd0}
-#ink-panel.boy{--ib-bg:#121216;--ib-card:rgba(255,255,255,.08);--ib-card2:rgba(255,255,255,.16);--ib-line:rgba(255,255,255,.16);--ib-txt:#f4f2ef;--ib-dim:#b0adba;--ib-ac:#e8573f}
-#ink-panel .ia-go{background:linear-gradient(135deg,var(--ib-ac),color-mix(in srgb,var(--ib-ac) 60%,#000));box-shadow:0 3px 10px rgba(0,0,0,.4)}
-#ink-panel.run .ia-go{background:var(--ib-card2)}
-#ink-panel .ia-tab{padding:0;min-width:0;overflow:hidden;white-space:nowrap}
-/* compacto (PC / tablet) */
-#ink-panel.cmp{width:214px;padding:7px;border-radius:16px;font-size:11.5px}
-#ink-panel.cmp .ia-head{padding-bottom:4px}
-#ink-panel.cmp .ia-title{font-size:12px}
-#ink-panel.cmp .ia-ib{width:24px;height:24px;border-radius:7px}
-#ink-panel.cmp .ia-tabs{gap:3px;margin-bottom:3px}
-#ink-panel.cmp .ia-tab{min-height:24px;border-radius:8px;font-size:10px}
-#ink-panel.cmp .ia-go{height:32px;border-radius:10px;font-size:12px;margin-top:3px}
-#ink-panel.cmp .ia-row{margin-top:4px;gap:3px}
-#ink-panel.cmp .ia-row>.ia-chip{min-height:28px;font-size:11.5px;border-radius:9px}
-#ink-panel.cmp .ia-val{min-width:34px;font-size:11.5px}
-#ink-panel.cmp .ia-grid{gap:3px;margin-top:4px}
-#ink-panel.cmp .ia-chip{min-height:34px;padding:2px;border-radius:9px;font-size:9px;gap:1px}
-#ink-panel.cmp .ia-chip svg{width:13px;height:13px}
-#ink-panel.cmp .ia-skin{min-height:26px;border-radius:8px;font-size:11px}
-#ink-panel.cmp .ia-sec{font-size:9px;margin:7px 2px 3px}
-#ink-panel.cmp .ia-inp{font-size:11px;padding:4px 6px;border-radius:8px}
-#ink-panel.cmp .ia-status{font-size:10.5px;padding:4px 7px;margin-top:4px;border-radius:8px}
-#ink-panel.cmp .ia-cont{min-height:28px;font-size:10.5px;border-radius:9px}
-#ink-panel.cmp.min{width:auto;padding:5px;border-radius:13px}
-/* celular */
-#ink-panel.mob{width:min(330px,calc(100vw - 16px));padding:10px;border-radius:22px;font-size:13.5px}
-#ink-panel.mob .ia-title{font-size:14px}
-#ink-panel.mob .ia-tab{min-height:40px;border-radius:12px;font-size:12px}
-#ink-panel.mob .ia-go{height:52px;border-radius:15px;font-size:15px}
-#ink-panel.mob .ia-chip{min-height:56px;border-radius:14px;font-size:12px;gap:3px}
-#ink-panel.mob .ia-chip svg{width:18px;height:18px}
-#ink-panel.mob .ia-row>.ia-chip{min-height:46px;font-size:13.5px}
-#ink-panel.mob .ia-val{font-size:13.5px;min-width:44px}
-#ink-panel.mob .ia-grid{gap:6px}
-#ink-panel.mob .ia-row{gap:6px}
-#ink-panel.mob .ia-skin{min-height:40px;border-radius:12px;font-size:13px}
-#ink-panel.mob .ia-sec{font-size:11px;margin:12px 2px 5px}
-#ink-panel.mob .ia-inp{font-size:13px;padding:9px 10px;border-radius:11px}
-#ink-panel.mob .ia-status{font-size:12.5px;padding:8px 10px;border-radius:11px}
-#ink-panel.mob .ia-cont{min-height:44px;font-size:12.5px;border-radius:13px}
-#ink-panel.mob .ia-statbox{font-size:12.5px}
-#ink-panel.mob .ia-music-list,#ink-panel.mob .ia-trk,#ink-panel.mob .ia-trk-t{font-size:12.5px}
-#ink-panel.mob.min{width:auto;padding:7px;border-radius:16px}
-
-/* ---------- painel de novidades ---------- */
-#ink-panel .ia-ib{position:relative}
-#ink-panel .ia-dot{position:absolute;top:2px;right:2px;width:9px;height:9px;border-radius:50%;background:#ff3b3b;border:1.5px solid var(--ib-bg);display:block}
-#ink-panel .ia-dot[hidden]{display:none}
-#ink-news{position:fixed;inset:0;z-index:2147483200;display:flex;align-items:flex-end;justify-content:center;background:rgba(0,0,0,.6);font:14px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
---n-bg:#2a1622;--n-card:rgba(255,130,180,.14);--n-line:rgba(255,150,195,.38);--n-txt:#ffeef5;--n-dim:#e2b0c7;--n-ac:#ff4f9a}
-#ink-news.skin-lobo{--n-bg:#161c2a;--n-card:rgba(150,170,205,.16);--n-line:rgba(170,190,225,.34);--n-txt:#eef2fa;--n-dim:#a3afc8;--n-ac:#5f8fd0}
-#ink-news.boy{--n-bg:#121216;--n-card:rgba(255,255,255,.08);--n-line:rgba(255,255,255,.16);--n-txt:#f4f2ef;--n-dim:#b0adba;--n-ac:#e8573f}
-#ink-news *{box-sizing:border-box}
-#ink-news .nw-box{width:min(480px,100%);max-height:84dvh;display:flex;flex-direction:column;background:var(--n-bg);color:var(--n-txt);border:1.5px solid var(--n-line);border-bottom:0;border-radius:22px 22px 0 0;box-shadow:0 -10px 40px rgba(0,0,0,.5)}
-@media (min-width:700px){#ink-news{align-items:center}#ink-news .nw-box{border-bottom:1.5px solid var(--n-line);border-radius:22px}}
-#ink-news .nw-head{display:flex;align-items:center;gap:8px;padding:14px 16px 8px}
-#ink-news .nw-title{flex:1;font-weight:800;font-size:18px;color:var(--n-ac)}
-#ink-news .nw-x{width:38px;height:38px;border-radius:12px;border:1px solid var(--n-line);background:var(--n-card);color:var(--n-txt);font:inherit;font-size:16px;cursor:pointer;touch-action:manipulation}
-#ink-news .nw-body{overflow-y:auto;overscroll-behavior:contain;padding:4px 16px max(18px,env(safe-area-inset-bottom))}
-#ink-news .nw-ban{padding:12px;border-radius:14px;background:var(--n-card);border:1px solid var(--n-line)}
-#ink-news .nw-ban.up{border-color:var(--n-ac)}
-#ink-news .nw-ban-t{font-weight:800}
-#ink-news .nw-ban-s{color:var(--n-dim);font-size:12.5px;margin-top:2px}
-#ink-news .nw-btn{display:block;width:100%;min-height:44px;margin-top:10px;border:0;border-radius:12px;background:var(--n-ac);color:#fff;font:inherit;font-weight:800;cursor:pointer;touch-action:manipulation}
-#ink-news .nw-btn:disabled{opacity:.6}
-#ink-news .nw-card{margin-top:10px;padding:10px 12px;border-radius:14px;background:var(--n-card);border:1px solid var(--n-line)}
-#ink-news .nw-card.new{border-color:var(--n-ac)}
-#ink-news .nw-ch{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-#ink-news .nw-v{font-weight:800;font-size:15px}
-#ink-news .nw-tag{padding:2px 8px;border-radius:99px;background:var(--n-ac);color:#fff;font-size:10.5px;font-weight:800;letter-spacing:.5px}
-#ink-news .nw-tag.cur{background:transparent;border:1px solid var(--n-ac);color:var(--n-ac)}
-#ink-news .nw-d{margin-left:auto;color:var(--n-dim);font-size:12px}
-#ink-news ul{margin:7px 0 0;padding-left:18px}
-#ink-news li{margin:4px 0}
-
-#ink-order{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:10px 0 4px;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
-#ink-order .io-pill{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:600;color:#f1efec;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.12);border-radius:11px;padding:8px 12px;cursor:pointer;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
-#ink-order .io-pill:hover{background:rgba(255,255,255,.14)}
-#ink-order .io-seg{display:flex;gap:2px;margin-left:auto;padding:3px;background:rgba(0,0,0,.3);border:1px solid rgba(255,255,255,.1);border-radius:13px}
-#ink-order .io-seg button{font-size:12.5px;font-weight:600;border:0;border-radius:10px;padding:7px 12px;cursor:pointer;color:#bdbac6;background:transparent;touch-action:manipulation}
-#ink-order .io-seg button.on{color:#fff;background:linear-gradient(135deg,#e8573f,#ff8a4c)}
-#ink-order-status{font:12.5px/1.4 system-ui,-apple-system,sans-serif;padding:8px 11px;margin:6px 0 2px;border-radius:10px;background:rgba(90,170,255,.1);border:1px solid rgba(90,170,255,.22);color:#a9d2ff}
-#ink-order-status:empty{display:none}
-@media (pointer:coarse),(max-width:700px){
-#ink-order{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
-#ink-order .io-pill{justify-content:center;min-height:48px;font-size:13.5px}
-#ink-order .io-seg{grid-column:1/-1;margin:0;width:100%}
-#ink-order .io-seg button{flex:1;min-height:44px;font-size:14px}
-}
-`;
-
-    function injectCSS() {
-        if ($('ink-css') && $('ink-css').dataset.v === VERSION) return;
-        const old = $('ink-css'); if (old) old.remove();
-        const s = document.createElement('style');
-        s.id = 'ink-css'; s.dataset.v = VERSION; s.textContent = CSS;
-        (document.head || document.documentElement).appendChild(s);
-    }
-
-    /* ================================================================== *
-     * 14. PAINEL
-     * ================================================================== */
-    function buildPanel() {
-        if ($('ink-panel')) return;
-        const u = document.createElement('div');
-        u.id = 'ink-panel';
-        u.classList.add(innerWidth < 700 ? 'mob' : 'cmp');   // mob = celular (toque grande) · cmp = PC/tablet (compacto)
-        if (cfg.min) u.classList.add('min');
-        u.innerHTML = `
-<div class="ia-head" id="ink-head">
-  <div class="ia-title" id="ink-title">Ink ${VERSION}</div>
-  <button class="ia-ib" id="ink-news-btn" title="Novidades">🆕<i class="ia-dot" id="ink-news-dot" hidden></i></button>
-  <button class="ia-ib" id="ink-upd-chk" title="Verificar atualização">🔄</button>
-  <button class="ia-ib" id="ink-mini-go" title="Ler">${ICO.play}</button>
-  <button class="ia-ib" id="ink-min" title="minimizar">${ICO.min}</button>
-</div>
-<div id="ink-body">
-  <div id="ink-upd" hidden></div>
-  <div class="ia-tabs">
-    <button class="ia-tab" data-tab="read">📖 Ler</button>
-    <button class="ia-tab" data-tab="music">🎵 Música</button>
-    <button class="ia-tab" data-tab="tune">🎚 Ajustes</button>
-    <button class="ia-tab" data-tab="more">⚙ Mais</button>
-  </div>
-
-  <div class="ia-pane" data-pane="read">
-    <button class="ia-cont" id="ink-cont" hidden><span></span></button>
-    <button class="ia-go" id="ink-go">${ICO.play}<span>Ler sozinho</span></button>
-    <div class="ia-row">
-      <button class="ia-chip" id="ink-spd-">−</button>
-      <span class="ia-val" id="ink-spd">1.5×</span>
-      <button class="ia-chip" id="ink-spd+">+</button>
-    </div>
-    <div class="ia-grid">
-      <button class="ia-chip" id="ink-manga">${ICO.book}<span>Mangá</span></button>
-      <button class="ia-chip" id="ink-auto">✓<span>Auto-próx</span></button>
-      <button class="ia-chip" id="ink-voice">${ICO.voice}<span>Voz</span></button>
-      <button class="ia-chip" id="ink-eye">🌙<span>Olho</span></button>
-      <button class="ia-chip" id="ink-girl">👧<span>Menina</span></button>
-      <button class="ia-chip" id="ink-perf">⚡<span>Leve</span></button>
-      <button class="ia-chip" id="ink-anx">😬<span id="ink-anx-l">Ansiedade</span></button>
-      <button class="ia-chip" id="ink-full">⛶<span>Tela cheia</span></button>
-      <button class="ia-chip" id="ink-sharec">🔗<span>Compartilhar</span></button>
-    </div>
-  </div>
-
-  <div class="ia-pane hide" data-pane="tune">
-    <div class="ia-sec" style="margin-top:2px">Voz do audiolivro</div>
-    <select class="ia-inp" id="ink-vsel"></select>
-    <div class="ia-row">
-      <button class="ia-chip" id="ink-vr-">−</button>
-      <span class="ia-val" id="ink-vr">1×</span>
-      <button class="ia-chip" id="ink-vr+">+</button>
-    </div>
-    <div class="ia-sec">Filtro de olho</div>
-    <div class="ia-row">
-      <button class="ia-chip" id="ink-eyel-">−</button>
-      <span class="ia-val" id="ink-eyel">25%</span>
-      <button class="ia-chip" id="ink-eyel+">+</button>
-    </div>
-    <div class="ia-sec">Skins</div>
-    <div class="ia-skins">
-      ${SKINS.map(k => `<button class="ia-skin" data-skin="${k.id}">${k.emo} ${k.nome}</button>`).join('')}
-    </div>
-    <div class="ia-sec">Missão</div>
-    <div class="ia-row">
-      <button class="ia-chip" id="ink-meta-btn" style="flex:3">🎯 <span id="ink-meta-lbl">Ligar meta</span></button>
-      <button class="ia-chip" id="ink-meta-">−</button>
-      <span class="ia-val" id="ink-meta-val">10</span>
-      <button class="ia-chip" id="ink-meta+">+</button>
-    </div>
-  </div>
-
-  <div class="ia-pane" data-pane="music">
-    <div class="ia-sec">YouTube</div>
-    <input class="ia-inp" id="ink-yt-url" type="text" inputmode="url" autocomplete="off" placeholder="Cole o link (vídeo ou playlist)">
-    <div class="ia-row">
-      <button class="ia-chip" id="ink-yt-go" style="flex:2">▶ Tocar link</button>
-      <button class="ia-chip" id="ink-yt-show" title="Mostrar/ocultar vídeo">🎬</button>
-      <button class="ia-chip" id="ink-yt-x" title="Fechar player">✖</button>
-    </div>
-    <div id="ink-yt-box"></div>
-    <div class="ia-sec">Controles</div>
-    <div class="ia-row">
-      <button class="ia-chip" id="ink-music-prev">⏮</button>
-      <button class="ia-chip" id="ink-music-play">▶</button>
-      <button class="ia-chip" id="ink-music-next">⏭</button>
-    </div>
-    <div class="ia-row">
-      <button class="ia-chip" id="ink-music-vol-">🔉 −</button>
-      <span class="ia-val" id="ink-music-vol">60%</span>
-      <button class="ia-chip" id="ink-music-vol+">🔊 +</button>
-    </div>
-    <div class="ia-row">
-      <button class="ia-chip" id="ink-duck">🎧 Baixar volume na fala</button>
-    </div>
-    <div class="ia-mstat" id="ink-music-status"></div>
-    <div class="ia-sec">Drive (opcional)</div>
-    <input class="ia-inp" id="ink-mus-url" type="text" autocomplete="off" placeholder="URL do app da web (Apps Script)">
-    <input class="ia-inp" id="ink-mus-key" type="password" autocomplete="off" placeholder="Chave">
-    <div class="ia-row">
-      <button class="ia-chip" id="ink-mus-sync">☁ Sincronizar</button>
-      <button class="ia-chip" id="ink-mus-shuf">🔀</button>
-    </div>
-    <div class="ia-music-list" id="ink-music-list"></div>
-  </div>
-
-  <div class="ia-pane hide" data-pane="more">
-    <div class="ia-sec">Estatísticas</div>
-    <div class="ia-statbox" id="ink-stats"></div>
-    <div class="ia-sec">Timer de sono</div>
-    <div class="ia-row">
-      <button class="ia-chip" id="ink-slm-">−</button>
-      <span class="ia-val wide" id="ink-slm">Desligado</span>
-      <button class="ia-chip" id="ink-slm+">+</button>
-    </div>
-    <div class="ia-row">
-      <button class="ia-chip" id="ink-slc-">−</button>
-      <span class="ia-val wide" id="ink-slc">Sem limite de cap.</span>
-      <button class="ia-chip" id="ink-slc+">+</button>
-    </div>
-    <div class="ia-mstat" id="ink-sl-st"></div>
-    <div class="ia-sec">Filtro de olho automático</div>
-    <div class="ia-row">
-      <button class="ia-chip" id="ink-eyeauto">🌙 Auto por horário</button>
-    </div>
-    <div class="ia-row">
-      <button class="ia-chip" id="ink-eyef-">−</button>
-      <span class="ia-val wide" id="ink-eyef">das 20h</span>
-      <button class="ia-chip" id="ink-eyef+">+</button>
-      <button class="ia-chip" id="ink-eyet-">−</button>
-      <span class="ia-val wide" id="ink-eyet">às 7h</span>
-      <button class="ia-chip" id="ink-eyet+">+</button>
-    </div>
-    <div class="ia-sec">Leitura</div>
-    <div class="ia-grid">
-      <button class="ia-chip" id="ink-perwork">📌<span>Por obra</span></button>
-      <button class="ia-chip" id="ink-skip">🧹<span>Pular lixo</span></button>
-      <button class="ia-chip" id="ink-media">🔒<span>Tela bloq.</span></button>
-    </div>
-    <div class="ia-sec">Idioma do OCR / voz</div>
-    <select class="ia-inp" id="ink-ocrl"></select>
-    <div class="ia-sec">Cantada</div>
-    <div class="ia-row">
-      <button class="ia-chip" id="ink-cp">📋 Copiar</button>
-      <button class="ia-chip" id="ink-sharep">💬 Enviar</button>
-    </div>
-    <div class="ia-sec">Backup</div>
-    <textarea class="ia-inp" id="ink-bk" spellcheck="false" placeholder="Exporte aqui, ou cole um backup e toque em Importar"></textarea>
-    <div class="ia-row">
-      <button class="ia-chip" id="ink-bk-ex">💾 Exportar</button>
-      <button class="ia-chip" id="ink-bk-im">📥 Importar</button>
-    </div>
-  </div>
-
-  <div class="ia-status" id="ink-status"></div>
-</div>`;
-        (document.body || document.documentElement).appendChild(u);
-
-        // ---- Handlers ----
-        $('ink-go').onclick = () => { if (running) stop('Parado.'); else mainLoop(); };
-        $('ink-mini-go').onclick = $('ink-go').onclick;
-        $('ink-upd-chk').onclick = () => checkUpdate(true);
-        $('ink-news-btn').onclick = () => openNews();
-        $('ink-min').onclick = () => { cfg.min = !cfg.min; saveCfg(); applyMin(); };
-        $$('[data-tab]', u).forEach(b => b.onclick = () => { cfg.tab = b.dataset.tab; saveCfg(); applyTab(); });
-        $('ink-cont').onclick = goContinue;
-        $('ink-spd-').onclick = () => setSpeed(-1);
-        $('ink-spd+').onclick = () => setSpeed(1);
-        $('ink-manga').onclick = () => { cfg.manga = !cfg.manga; saveCfg(); workSave(); OrderBar.sync(); refreshPanel(); };
-        $('ink-auto').onclick = () => { cfg.auto = !cfg.auto; saveCfg(); refreshPanel(); };
-        $('ink-voice').onclick = toggleVoice;
-        $('ink-eye').onclick = toggleEye;
-        $('ink-girl').onclick = () => { cfg.girl = !cfg.girl; saveCfg(); applyTheme(); };
-        $('ink-perf').onclick = () => { cfg.perf = !isPerf(); saveCfg(); refreshPanel(); };
-        $('ink-anx').onclick = () => { cfg.anx = ((cfg.anx | 0) + 1) % 3; saveCfg(); refreshPanel(); };
-        $('ink-full').onclick = toggleFull;
-        $('ink-sharec').onclick = shareChapter;
-        $$('[data-skin]', u).forEach(b => b.onclick = () => { cfg.skin = b.dataset.skin; saveCfg(); applyTheme(); });
-        $('ink-meta-btn').onclick = metaToggle;
-        $('ink-meta-').onclick = () => { cfg.metaGoal = Math.max(1, cfg.metaGoal - 1); saveCfg(); metaPaint(); refreshPanel(); };
-        $('ink-meta+').onclick = () => { cfg.metaGoal = Math.min(300, cfg.metaGoal + 1); saveCfg(); metaPaint(); refreshPanel(); };
-
-        // voz
-        $('ink-vsel').onchange = e => { cfg.vname = e.target.value; saveCfg(); };
-        const stepRate = d => {
-            let i = 0, best = 1e9;
-            VRATES.forEach((v, k) => { const dd = Math.abs(v - cfg.vrate); if (dd < best) { best = dd; i = k; } });
-            cfg.vrate = VRATES[Math.min(VRATES.length - 1, Math.max(0, i + d))];
-            saveCfg(); refreshPanel();
-        };
-        $('ink-vr-').onclick = () => stepRate(-1);
-        $('ink-vr+').onclick = () => stepRate(1);
-
-        // olho
-        const stepEye = d => { cfg.eyeLvl = Math.min(0.6, Math.max(0.05, Math.round((cfg.eyeLvl + d) * 100) / 100)); saveCfg(); applyEye(); refreshPanel(); };
-        $('ink-eyel-').onclick = () => stepEye(-0.05);
-        $('ink-eyel+').onclick = () => stepEye(0.05);
-
-        // música
-        $('ink-yt-url').value = cfg.ytUrl || '';
-        $('ink-yt-url').addEventListener('keydown', e => { if (e.key === 'Enter') ytLoad(); });
-        $('ink-yt-go').onclick = ytLoad;
-        $('ink-yt-x').onclick = () => { ytStop(); musStatus('Player fechado'); };
-        $('ink-yt-show').onclick = () => { cfg.ytShow = !cfg.ytShow; saveCfg(); refreshPanel(); };
-        $('ink-music-play').onclick = musToggle;
-        $('ink-music-prev').onclick = () => musNext(-1);
-        $('ink-music-next').onclick = () => musNext(1);
-        $('ink-music-vol-').onclick = () => musVolStep(-0.1);
-        $('ink-music-vol+').onclick = () => musVolStep(0.1);
-        $('ink-duck').onclick = () => { cfg.duck = cfg.duck === false; saveCfg(); if (cfg.duck === false) musDuck(false); refreshPanel(); };
-        $('ink-mus-url').value = cfg.musicUrl || '';
-        $('ink-mus-key').value = cfg.musicKey || '';
-        $('ink-mus-url').onchange = e => { cfg.musicUrl = e.target.value.trim(); saveCfg(); };
-        $('ink-mus-key').onchange = e => { cfg.musicKey = e.target.value.trim(); saveCfg(); };
-        $('ink-mus-sync').onclick = musSync;
-        $('ink-mus-shuf').onclick = () => { MUS.shuffle = !MUS.shuffle; $('ink-mus-shuf').classList.toggle('on', MUS.shuffle); };
-
-        // mais
-        $('ink-slm-').onclick = () => { cfg.sleepMin = stepIn(SLEEP_MIN, cfg.sleepMin | 0, -1); saveCfg(); refreshPanel(); if (running) sleepArm(); };
-        $('ink-slm+').onclick = () => { cfg.sleepMin = stepIn(SLEEP_MIN, cfg.sleepMin | 0, 1); saveCfg(); refreshPanel(); if (running) sleepArm(); };
-        $('ink-slc-').onclick = () => { cfg.sleepCaps = stepIn(SLEEP_CAP, cfg.sleepCaps | 0, -1); saveCfg(); refreshPanel(); if (running) sleepArm(); };
-        $('ink-slc+').onclick = () => { cfg.sleepCaps = stepIn(SLEEP_CAP, cfg.sleepCaps | 0, 1); saveCfg(); refreshPanel(); if (running) sleepArm(); };
-        $('ink-eyeauto').onclick = () => { cfg.eyeAuto = !cfg.eyeAuto; EYEA.last = null; saveCfg(); eyeAutoTick(); refreshPanel(); };
-        const hr = (k, d) => { cfg[k] = ((cfg[k] | 0) + d + 24) % 24; EYEA.last = null; saveCfg(); eyeAutoTick(); refreshPanel(); };
-        $('ink-eyef-').onclick = () => hr('eyeFrom', -1);
-        $('ink-eyef+').onclick = () => hr('eyeFrom', 1);
-        $('ink-eyet-').onclick = () => hr('eyeTo', -1);
-        $('ink-eyet+').onclick = () => hr('eyeTo', 1);
-        $('ink-perwork').onclick = () => { cfg.perWork = !cfg.perWork; saveCfg(); if (cfg.perWork) workSave(); refreshPanel(); };
-        $('ink-skip').onclick = () => { cfg.skipJunk = !cfg.skipJunk; saveCfg(); refreshPanel(); };
-        $('ink-media').onclick = () => { cfg.media = cfg.media === false; saveCfg(); if (cfg.media === false) kaStop(); else if (running) kaStart(); refreshPanel(); };
-        const sel = $('ink-ocrl');
-        OCR_LANGS.forEach(l => { const o = document.createElement('option'); o.value = l.id; o.textContent = l.nome; sel.appendChild(o); });
-        sel.onchange = e => {
-            cfg.ocrLang = e.target.value; cfg.vname = ''; saveCfg(); fillVoices(); refreshPanel();
-            if (cfg.voice) ocrWorker().catch(x => setStatus('⚠ OCR: ' + (x.message || x)));
-        };
-        $('ink-cp').onclick = copyCantada;
-        $('ink-sharep').onclick = () => shareText(TICK.cur || '');
-        $('ink-bk-ex').onclick = backupExport;
-        $('ink-bk-im').onclick = backupImport;
-
-        // campos de texto: não deixa as teclas vazarem pros atalhos do site
-        ['keydown', 'keyup', 'keypress'].forEach(t => u.addEventListener(t, e => {
-            if (/^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)) e.stopPropagation();
-        }));
-
-        // Drag (e toque no título = copiar a cantada)
-        const head = $('ink-head');
-        let drag = null;
-        const onDown = e => {
-            if (e.target.closest('button')) return;
-            const p = e.touches ? e.touches[0] : e;
-            const r = u.getBoundingClientRect();
-            drag = { ox: p.clientX - r.left, oy: p.clientY - r.top, sx: p.clientX, sy: p.clientY, moved: false, title: !!e.target.closest('#ink-title') };
-            e.preventDefault();
-        };
-        const onMove = e => {
-            if (!drag) return;
-            const p = e.touches ? e.touches[0] : e;
-            if (!drag.moved) { if (Math.hypot(p.clientX - drag.sx, p.clientY - drag.sy) < 6) return; drag.moved = true; }
-            const x = Math.max(0, Math.min(innerWidth - u.offsetWidth, p.clientX - drag.ox));
-            const y = Math.max(0, Math.min(innerHeight - u.offsetHeight, p.clientY - drag.oy));
-            u.style.left = x + 'px'; u.style.top = y + 'px'; u.style.bottom = 'auto'; u.style.right = 'auto';
-            cfg.pos = { x, y };
-        };
-        const onUp = () => {
-            if (!drag) return;
-            const d = drag; drag = null;
-            if (d.moved) saveCfg();
-            else if (d.title) copyCantada();
-        };
-        head.addEventListener('mousedown', onDown);
-        head.addEventListener('touchstart', onDown, { passive: false });
-        document.addEventListener('mousemove', onMove);
-        document.addEventListener('touchmove', onMove, { passive: false });
-        document.addEventListener('mouseup', onUp);
-        document.addEventListener('touchend', onUp);
-
-        u.addEventListener('pointerdown', () => { lastUser = Date.now(); });
-        document.addEventListener('keydown', () => { lastUser = Date.now(); });
-
-        fillVoices(); musPaintList(); musPaintBtn();
-        refreshPanel(); applyTheme(); applyTab(); applyMin(); applyEye(); metaPaint(); contPaint(); statsPaint();
-    }
-
-    function applyTab() {
-        const u = $('ink-panel'); if (!u) return;
-        const t = ['music', 'tune', 'more'].includes(cfg.tab) ? cfg.tab : 'read';
-        $$('[data-tab]', u).forEach(b => b.classList.toggle('on', b.dataset.tab === t));
-        const r = u.querySelector('[data-pane="read"]'), m = u.querySelector('[data-pane="music"]'), x = u.querySelector('[data-pane="more"]'), tu = u.querySelector('[data-pane="tune"]');
-        if (r) r.classList.toggle('hide', t !== 'read');
-        if (tu) tu.classList.toggle('hide', t !== 'tune');
-        if (x) x.classList.toggle('hide', t !== 'more');
-        if (m) m.classList.toggle('ghost', t !== 'music'); // fica fora da tela (não some) p/ o YouTube continuar tocando
-        if (t === 'more') statsPaint();
-        applyPos();
-    }
-    function applyMin() {
-        const u = $('ink-panel'); if (!u) return;
-        u.classList.toggle('min', !!cfg.min);
-        const b = $('ink-min');
-        if (b) b.innerHTML = cfg.min ? ICO.max : ICO.min;
-        applyPos();
-    }
-    function applyPos() {
-        const u = $('ink-panel'); if (!u || !cfg.pos) return;
-        const r = u.getBoundingClientRect();
-        const x = Math.min(Math.max(0, cfg.pos.x), Math.max(0, innerWidth - r.width));
-        const y = Math.min(Math.max(0, cfg.pos.y), Math.max(0, innerHeight - r.height));
-        u.style.left = x + 'px'; u.style.top = y + 'px'; u.style.bottom = 'auto'; u.style.right = 'auto';
-    }
-    /* ---- Modo menina: cantadas rolando no lugar do título/versão ---- */
-    const CANTADAS = [
-        "Você tem um mapa? Porque eu me perdi no brilho dos seus olhos.",
-        "Você não é pescoço, mas mexeu com a minha cabeça.",
-        "Se você fosse um sanduíche, seu nome seria x-princesa!",
-        "Me chama de espírito obsessor e me deixa te possuir.",
-        "Eu perdi meu número de telefone, me empresta o seu?",
-        "Você não usa calcinha, você usa um porta-joias",
-        "Havia dois ursos o Beijaeu e o Mebeija, então, o Beijaeu morreu. Quem sobrou?",
-        "Seu nome é Tamara, né? Por que você TAMARAvilhosa.",
-        "Estou fazendo uma campanha de doação de órgãos! Então, não quer doar seu coração pra mim?",
-        "Você é o ovo que faltava na minha marmita.",
-        "Você não foi feita com velas, fitinhas vermelhas, mel e rosas, mas é uma simpatia!",
-        "Eu vou te dar um beijo. Se você não gostar, me devolve, tá?",
-        "Não me formei em cardiologia, mas quero cuidar do seu coração.",
-        "Você achou a minha chave, porque só ela abre o cadeado do seu coração.",
-        "Se te fizer sorrir e com o olhar te conquistar, não a deixa partir, chegou a hora de amar.",
-        "Nos detalhes da vida, você é o arco-íris que sempre enfeita o meu céu.",
-        "Fazer Enem, só se for pra entrar no seu coração.",
-        "No Whatsapp é ruim, deixa eu falar no seu ouvidinho.",
-        "Se nada é para sempre, então, vem ser meu nada.",
-        "Você é linda, mas está um pouco pálida: talvez seja cansaço de estar sempre passando no meu pensamento.",
-        "Se beleza brotasse em ovos você seria dona da granja inteira!",
-        "Você é o doce de leite que falta no meu churros.",
-        "Seu pai é dono da Tam? — Não, por quê? — Porque queria saber como é que faz pra ter um avião desse em casa!",
-        "Papo de urubu, pena de galinha, se você quer um beijinho dê uma risadinha.",
-        "Eu não sou o Luciano Huck, mas eu quero você no meu lar doce lar, sua linda!",
-        "Em cima da colina passa boi passa boiada, só saio da sua frente quando for minha namorada.",
-        "Você não é piso molhado, mas eu já tô pronto, pra te passar o rodo, sua linda!",
-        "Gata, eu rezo 1/3, para achar 1/2 De te levar pra 1/4!",
-        "Me chama de previsão do tempo e diz que tá rolando um clima.",
-        "Não sou traficante, mas eu quero a sua boca.",
-        "Meu nome é Arnaldo, mas pode me chamar de Naldo, pois quando eu te vi perdi o ar.",
-        "Seu pai é mecânico? Porque você é uma graxinha!",
-        "Meu nome é muito grande. Melhor você me chamar de “Amor”.",
-        "Você acredita em amor à primeira vista ou devo passar por aqui mais uma vez?",
-        "Gata, você não é semáforo, mas é de parar o trânsito.",
-        "Não sou o Papai Noel, mas eu poderia te proporcionar uma noite feliz.",
-        "Você não é GPS quebrado, mas me deixa sem rumo.",
-        "Você não é colesterol, mas afetou meu coração.",
-        "Fica comigo que eu faço esquecer o João. — Que João? — Viu só, já está esquecendo…",
-        "A pressa é sua inimiga? Porque eu ouvi dizer que a pressa é inimiga da perfeição.",
-        "Pode até ter muita gente interessada, mas só consigo achar você interessante.",
-        "Com você, parei de entender matemática. Sinto que somos sempre 1, apesar de sermos 2.",
-        "Você é tão desejada quanto uma sexta-feira!",
-        "Me perdi dentro de mim mesmo. E, quando me encontrei, foi com saudades de você.",
-        "Aquele chocolate que faz declaração: Serenata de Amor.",
-        "Black Friday do meu beijo: pede um e leva dois.",
-        "Pessoas tentam agradar pessoas com coisas de valores. Eu tento te agradar com tudo que sou. Tem algo mais valioso do que isso?",
-        "Você é poesia personificada.",
-        "Agora, eu entendo qual a razão de chamarem de borboletas no estômago.",
-        "Não existe amor à primeira vista. O que existe é a pessoa certa, no momento certo. Você por acaso estava lá!",
-        "Casando comigo você nunca vai pegar na enxada! Só vai ter que fazer amor desde a manhã até a madrugada!",
-        "Primeiramente, você é tão linda que não caga, lança bombom!",
-        "Eu não sou plano de saúde, mas, se você quiser, eu acabo com a sua carência, sua linda.",
-        "“Pulei na água até o umbigo, então, quer ficar comigo?”",
-        "Gata, me pega no colo? É que minha mãe vem vindo e eu queria contar que andei de avião.",
-        "Será que desligaram o wi-fi da horta? Meu chuchuzinho não está online.",
-        "Tem certeza de que você não é um extraterrestre? Porque você abduziu o meu coração.",
-        "Gata, seu nome é Camila? — Sim, por quê? — Então, vem “camilamber”!",
-        "Você tem um band-aid? Porque ralei meu joelho caindo de amores por você.",
-        "Se você está aqui, quem está gerenciando o céu?",
-        "Você é tão gata que se eu te matar de amor ainda sobram mais 6 vidas.",
-        "A economia grega anda tão ruim assim? — Por quê? — Porque até uma deusa grega como você veio morar aqui!",
-        "Se felicidade fosse dinheiro, você seria o Banco Central e eu seria o maior investidor.",
-        "Me passa o seu Twitter? O meu pai disse que eu devo seguir o meu sonho.",
-        "Gata, você deve comer Photoshop no café da manhã! Pra ser tão linda assim!",
-        "Desculpe, eu não já fiquei com você antes? Não? Vamos dar um jeito nisso.",
-        "Não sou manteiga de cacau, mas adoraria amaciar seus lábios.",
-        "Gata, que roupa feia, tira isso agora, sua linda!",
-        "Sabe qual a diferença entre você e um milhão de reais? É que um milhão de reais eu tenho na minha casa.",
-        "Vamos viajar o mundo usando meus créditos de desconto no Airbnb?",
-        "Você é sempre gostosa assim ou hoje tá fantasiada de lasanha?",
-        "Gata, você é uma paçoca? Porque só de sentir o cheiro já dá vontade de comer, sua linda!",
-        "Você tem brigadeiro? — Não. — Então, me dá um beijinho.",
-        "Você gosta de Toddy? Se você quiser, eu posso ser Toddynho seu.",
-        "Você é como um bom café da manhã… Dá energia para um novo dia.",
-        "Me chama de demaquilante e me deixa tirar seu batom.",
-        "Gata, por você eu dou até um stop no jogo online, bebê.",
-        "Eu até ficaria comigo mesmo, mas vou deixar essa oportunidade para você.",
-        "Você não é Receita Federal, mas poderia se declarar pra mim.",
-        "É melhor você controlar sua língua. Guarde ela aqui, junto da minha.",
-        "Gata, queria saber se doeu quando você caiu do céu.",
-        "O Natal está chegando, e eu não acredito em Papai Noel, mas queria que ele me desse você de presente de fim de ano.",
-        "O único mal que eu quero para você, é que a sua mãe seja minha sogra.",
-        "Eu só posso estar com problema de visão, porque eu não vejo a hora de te dar uns pega.",
-        "Você não é horário de verão, mas eu gostaria de perder uma hora com você.",
-        "Você não é GPS, mas queria encontrar o caminho das curvas do seu corpo.",
-        "Nessa brincadeira de dizer que te amei, muitas vezes já fui campeão. Agora, me dê a recompensa e deixe eu entrar no teu coração.",
-        "Quer saber uma verdade constrangedora? Eu nunca fui beijado por um anjo. Então, quer ser a primeira?",
-        "Soube que você é a chave perfeita para abrir a porta do meu coração.",
-        "Alguém sabe me dizer se Cicatricure já está curando as feridas do coração?",
-        "Eu não sou o Yoshi, mas daria minha vida por você.",
-        "Você não é o Pikachu, mas é sempre a minha primeira escolha.",
-        "Meu amor é igual level no Tibia, infinito.",
-        "Gata, desliga esse firewall e me deixa entrar em você.",
-        "Você não é o Death Note, mas também causa ataque cardíaco.",
-        "Quando eu te vi até joguei fora o meu Memory Card, você é inesquecível.",
-        "Você vai receber a carta de Hogwarts, porque o que você faz com o meu coração só pode ser bruxaria.",
-        "Meu sonho era ser o Batman para que você me chamasse sempre que precisasse de alguém. Como não tenho bat-sinal, vem de zap!",
-        "Você conhece o Mario? Então, vem ser minha Peach!",
-        "Eu sei que não sou herói da DC, mas você, com certeza, é, porque olha… que Maravilha.",
-        "Não sou o Stephen King, mas meu coração fica iluminado quando você olha pra mim.",
-        "Você não é Tesseract, entretanto, é a única pessoa capaz de abrir as portas do meu coração.",
-        "Quando eu te vi deu tela azul…",
-        "Me chama de Ash Ketchum, que eu te mostro meu Pikachu.",
-        "Não sei sua composição corporal, mas chutaria lítio, neodímio, oxigênio e carbono. Sabe por quê? Porque você é Li-Nd-O-NA.",
-        "Nosso amor é de outro mundo, porque mesmo fora da gravidade da Terra, eu ainda ficaria caidinho por você.",
-        "Gata, entre Star Wars e Star Trek, eu queria mesmo era star com você.",
-        "Se você fosse um algoritmo, seria o mais eficiente em roubar meu coração",
-        "Gata, você é a senha do meu wi-fi, porque, sempre que te vejo, minha conexão fica mais forte.",
-        "Você não é o Google, mas tem tudo o que eu procuro, sua linda!",
-        "Desculpa, não te ouvi. Ah, você não falou nada? E não quer começar a falar comigo agora?",
-        "Sempre fui bom em língua portuguesa, mas depois que te conheci notei que o dicionário ainda não tem uma palavra que defina com exatidão a tua perfeição.",
-        "A previsão do meu horóscopo acertou em cheio. Ela dizia que hoje seria um dia de grandes emoções por causa da entrada de um novo amor na minha vida.",
-        "Vou guardar para sempre esse dia na memória, porque foi o dia que eu conheci você, o amor da minha vida.",
-        "Baixou a temperatura? Não? É que desde que você se aproximou de mim senti tantos arrepios.",
-        "Hoje escutei uma música que me lembrou a que vai tocar no nosso casamento.",
-        "Ei, o cupido te ligou? Ele queria pedir para você devolver o meu coração.",
-        "Eu não sou dinheiro, mas posso te fazer feliz!",
-        "Meu amor por você é igual à obra do governo: nunca acaba.",
-        "Você é muito fofo(a), mas temos um problema: você gosta ou não de passas?",
-        "O meu telefone continua corrigindo automaticamente seu nome para “Amor”. Acredito que seja um sinal.",
-        "Você não é massagem cardíaca, mas reanima o meu coração!",
-        "Eu queria ser grego, mas grego eu não posso ser, porque grego tem várias deusas e minha única deusa é você.",
-        "Vontade de fazer aquilo que começa com s: ser o amor da sua vida.",
-        "Com licença, você teria um amigo em comum que pudesse nos apresentar?",
-        "Está vendo este meu amigo? Então, ele quer saber se você me acha fofo(a).",
-        "Existe um vazio no meu coração que tem as suas medidas.",
-        "Se preto fosse paixão e branco fosse carinho, o que eu sinto por você seria xadrezinho.",
-        "Posso tirar uma foto sua? É para mostrar ao Papai Noel o que eu quero de presente.",
-        "Da próxima vez que alguém me perguntar qual é meu tipo, irei mostrar a sua foto de perfil.",
-        "Está calor, né? Mas não é de hoje que eu me derreto por você.",
-        "Eu tenho uma memória terrível. Felizmente, você é inesquecível.",
-        "Não sou poeta, mas seus olhos são a inspiração que eu precisava.",
-        "Quando estou ao seu lado, sinto como se estivesse flutuando nas nuvens.",
-        "Você é a definição perfeita de fofura. Não consigo resistir!",
-        "Seu sorriso é como um raio de sol em um dia chuvoso. Não consigo evitar sorrir quando estou perto de você.",
-        "Sua mãe é uma rosa e seu pai um jasmim, admiro os dois porque fizeram você especialmente para mim.",
-        "Você pode não ser o meu primeiro/minha primeira, mas pode ser meu último/minha última.",
-        "Estou escrevendo um artigo sobre as coisas boas da vida. Posso te incluir nele?",
-        "Sua presença é tão cativante que o tempo parece parar quando você entra em uma sala.",
-        "A sua companhia ilumina qualquer ambiente.",
-        "Em um mundo repleto de imitações, você é uma obra-prima original que impressiona a todos ao redor.",
-        "Seu charme e graça são como uma dança delicada que encanta a todos que têm o privilégio de testemunhar.",
-        "Seus olhos brilham como safiras preciosas, e sua voz é como um suave acorde de violino.",
-        "Você é uma poesia em movimento, sua delicadeza encanta a todos ao seu redor.",
-        "Em um mundo ruidoso, sua elegância se destaca em um sussurro suave, conquistando corações sem esforço.",
-        "Nada na vida é perfeito, mas você é o que mais se aproxima da perfeição.",
-        "Seu pai é astronauta? Porque você é uma estrela.",
-        "Você é de Brasília? Porque é um tesouro nacional.",
-        "Ei, acabei de notar que você me notou. Então só queria avisar que notei você também.",
-        "Onde é que eu deixo meu currículo para concorrer à vaga de amor da sua vida?",
-        "Seu nome é VIVO? Porque você é tudo o que eu mais quero.",
-        "Você acredita em amor à primeira vista? Nem eu. Espera, deixa eu te olhar de novo.",
-        "Gata, você não é enquete do Datafolha, mas me deixa com a curiosidade de saber o resultado.",
-        "Você é a tradução da palavra perfeição no dicionário.",
-        "Eu não sou jardineiro, mas eu quero cuidar do seu jardim.",
-        "Você é o arco-íris da minha vida.",
-        "Me chama de outdoor e deixa eu fazer propaganda da sua beleza.",
-        "Você é o meu mundo, mas eu quero ser o seu universo.",
-        "Seu sorriso é a chave para o meu coração.",
-        "Você é tão linda que até as flores invejam você.",
-        "Me dê uma chance de te fazer feliz.",
-        "Você é a música que eu mais gosto de ouvir.",
-        "Você é a molécula de hidrogênio? Porque sem você não posso existir.",
-        "Gata, eu sou um elétron e você é um próton. Nós dois juntos formamos um átomo de amor.",
-        "Se eu fosse um ácido nucleico, você seria a minha hélice complementar.",
-        "Você é uma equação matemática? Porque sem você não faz sentido.",
-        "Querida, eu sou como o DNA helicase, eu quero desembrulhar seu código genético.",
-        "Gato, você é um neutrino? Porque você é extremamente rápido e passa por mim sem nenhum impedimento.",
-        "Você é um exoplaneta? Porque eu quero estudar tudo sobre você.",
-        "Você é a minha constante de Planck. Sem você, nada faz sentido.",
-        "Você é a hipótese de Riemann? Porque eu não posso deixar de pensar em você.",
-        "Você é como um campo magnético, eu sou a carga elétrica e juntos nós podemos criar algo incrível.",
-        "Gato, eu sou um químico e você é meu experimento favorito.",
-        "Você é como uma molécula de hidrocarboneto, simples, mas com um potencial ilimitado.",
-        "Você é uma força fundamental da natureza? Porque eu não posso resistir a você.",
-        "Você é uma molécula aromática? Porque você é excepcionalmente bonita e única.",
-        "Gata, você é um fóton? Porque você ilumina meu mundo.",
-        "Você é tão linda(o) que acelera meu batimento cardíaco mais rápido do que um reator nuclear.",
-        "Você é o carbono? Porque eu sinto uma ligação especial entre nós.",
-        "Meu amor por você é como a entropia, sempre aumentando e nunca diminuindo.",
-        "Você é o potencial de ação do meu neurônio, porque me deixa eletrizado(a) sempre que te vejo.",
-        "Se você fosse um fóssil, eu te desenterraria e te chamaria de tesouro, sua linda.",
-        "Se eu fosse uma enzima, seria helicase para despir seu DNA e replicar nosso amor.",
-        "Você deve ser a força gravitacional, porque você atrai meu olhar onde quer que esteja.",
-        "Meu amor por você é como pi: irracional, infinito e impossível de ser calculado.",
-        "Eu só quero que você saiba, que eu estou pensando em você agora mesmo.",
-        "Se você me der um beijo eu te dou um doce, um doce, um doce",
-        "Você é a luz que ilumina o meu caminho, é o amor que eu sinto todo dia",
-        "Você é como uma canção de amor, que não sai da minha cabeça",
-        "Você é a música que eu quero tocar, a razão do meu cantar",
-        "Você é a minha melodia preferida, não consigo tirar você da minha mente",
-        "Você é como uma música que eu não consigo parar de ouvir, sempre presente em minha mente",
-        "Você é a letra mais bonita que eu já escrevi, a canção que eu sempre quis ouvir",
-        "Você é o meu ritmo, a batida do meu coração, a música que me faz feliz",
-        "Você é como uma sinfonia perfeita, cada nota, cada acorde, é como música para os meus ouvidos",
-        "Você é como uma música que toca no meu coração, que me faz sorrir, que me faz sonhar",
-        "Você é a trilha sonora da minha vida, a melodia que eu quero cantar para sempre",
-        "Você é como uma música que eu não consigo parar de ouvir, que me faz dançar, que me faz feliz",
-        "Você é a música que eu sempre quis escrever, a canção que eu sempre quis cantar",
-        "Você é como uma música que me faz sentir vivo, que me faz sonhar, que me faz amar",
-        "Você é o meu filme favorito, não consigo parar de assistir a você.",
-        "Você é o meu par perfeito para assistir ao filme ‘Um Amor Para Recordar’",
-        "Eu gostaria de convidá-lo para assistir a um filme comigo. Qualquer um, desde que você esteja lá.",
-        "Você é a minha cena favorita em cada filme",
-        "Você é tão incrível que eu me sinto como se estivesse em um filme de ação toda vez que estou com você",
-        "Eu queria ser a sua mocinha em um filme de aventura",
-        "Você é o meu final feliz em cada filme romântico",
-        "Você é a minha ‘Era Uma Vez’ preferida. E eu adoraria ser o seu ‘Felizes Para Sempre’",
-        "Gato, você é tão lindo que poderia ser o protagonista de qualquer filme",
-        "Você é o meu filme de terror favorito, porque eu sempre tenho um susto quando você chega perto.",
-        "Eu poderia passar o dia inteiro assistindo a filmes com você. Vamos tentar isso?",
-        "Gato, eu adoraria ser a protagonista do seu filme de amor",
-        "Você é o meu ator favorito, e eu adoraria ter uma cena romântica com você",
-        "Gata, você é tão incrível que eu sinto como se estivesse em um filme de comédia romântica toda vez que estou com você",
-        "Você é o meu herói de ação preferido, e eu adoraria ser a sua parceira em qualquer missão",
-        "Você é um sol em um dia de chuva.",
-        "Com você, o meu clima interno está sempre ensolarado.",
-        "Não precisa chover, só quero você molhada(o) de suor.",
-        "Você é como um arco-íris em um dia cinzento.",
-        "Você me faz sentir como se estivesse em um dia ensolarado mesmo quando está chovendo.",
-        "Com você, o clima sempre fica quente.",
-        "Você é a brisa fresca que eu preciso em um dia quente.",
-        "Você é como uma tempestade de verão, intensa e inesquecível.",
-        "Você é o meu clima ideal para qualquer dia.",
-        "Com você, eu não preciso de sol para me aquecer.",
-        "Você é como uma nevasca, linda e mágica.",
-        "Com você, o inverno se torna a minha estação favorita.",
-        "Você é a brisa suave que me acalma em um dia quente.",
-        "Com você, até mesmo uma tempestade fica tranquila.",
-        "Você é como um raio de sol em um dia nublado.",
-        "Seu sorriso é como a resposta certa na prova, me faz sentir um verdadeiro vencedor.",
-        "Você é como o lápis HB, sempre presente nas minhas anotações.",
-        "Com você, eu me sinto como em uma aula de química, atraído pela sua química pessoal.",
-        "Com você, eu sinto que posso conquistar qualquer coisa, assim como conquistei minha formatura.",
-        "Com você, eu me sinto como em uma aula de matemática, encontrando a solução perfeita.",
-        "Com você, eu me sinto como em uma aula de artes, apreciando a beleza de cada detalhe.",
-        "Você é a luz do meu palco, iluminando todos os meus passos.",
-        "Com você, eu me sinto como em uma peça de Shakespeare, vivendo um amor proibido.",
-        "Você é como um ator de primeira classe, me fazendo querer aplaudir cada gesto seu.",
-        "Você é como uma obra-prima teatral, capaz de me fazer sentir emoções intensas.",
-        "Você é como uma trilha sonora emocionante, capaz de me fazer sentir cada nota.",
-        "Seu sorriso é como o motor de um carro, me faz acelerar o coração.",
-        "Você é como uma Harley Davidson, intensa e cheia de estilo.",
-        "Você é como uma Lamborghini, exótica e fascinante.",
-        "Se eu tivesse que escolher entre ter uma Ferrari e passar um tempo com você, escolheria você. Porque a única coisa melhor do que uma Ferrari é uma companhia maravilhosa."
-    ];
-    const TICK = { order: [], i: 0, on: false, t: 0, cur: '' };
-    const tickNext = () => {
-        if (TICK.i >= TICK.order.length) {
-            TICK.order = CANTADAS.map((_, k) => k);
-            for (let k = TICK.order.length - 1; k > 0; k--) { const j = Math.floor(Math.random() * (k + 1)); [TICK.order[k], TICK.order[j]] = [TICK.order[j], TICK.order[k]]; }
-            TICK.i = 0;
-        }
-        return CANTADAS[TICK.order[TICK.i++]];
-    };
-    function tickStart() {
-        const t = $('ink-title'); if (!t) return;
-        if (TICK.on && t.querySelector('.ia-tick-in')) return;
-        TICK.on = true;
-        t.textContent = '';
-        t.classList.add('tick');
-        const sp = document.createElement('span');
-        sp.className = 'ia-tick-in';
-        t.appendChild(sp);
-        let reduce = false; try { reduce = matchMedia('(prefers-reduced-motion:reduce)').matches; } catch (e) { }
-        const show = () => {
-            if (!TICK.on || !sp.isConnected) return;
-            const s = tickNext();
-            TICK.cur = s;
-            sp.textContent = s;
-            sp.style.animation = 'none'; void sp.offsetWidth;
-            if (reduce) { sp.style.paddingLeft = '0'; TICK.t = setTimeout(show, 6000); }
-            else sp.style.animation = `ink-tick ${Math.max(9, (s.length * 5.5 + 170) / 38).toFixed(1)}s linear 1`;
-        };
-        sp.addEventListener('animationend', show);
-        show();
-    }
-    function tickStop() {
-        TICK.on = false; clearTimeout(TICK.t);
-        const t = $('ink-title'); if (!t) return;
-        t.classList.remove('tick');
-        t.textContent = '';
-    }
-
-    function applyTheme() {
-        const u = $('ink-panel'); if (!u) return;
-        u.classList.toggle('boy', !cfg.girl);
-        SKINS.forEach(k => u.classList.toggle('skin-' + k.id, cfg.girl && curSkin().id === k.id));
-        $$('[data-skin]', u).forEach(b => b.classList.toggle('on', b.dataset.skin === curSkin().id));
-        const t = $('ink-title');
-        if (t) {
-            t.title = (cfg.girl ? curSkin().nome : 'Ink') + ' ' + VERSION;
-            if (cfg.girl) tickStart();
-            else { tickStop(); t.textContent = (cfg.girl ? curSkin().nome : 'Ink') + ' ' + VERSION; }
-        }
-        const g = $('ink-girl');
-        if (g) g.classList.toggle('on', cfg.girl);
-        newsTheme();
-    }
-    function applyEye() {
-        let o = $('ink-eye-el');
-        if (!cfg.eye || !location.pathname.startsWith('/ler/')) { if (o) o.remove(); }
-        else {
-            if (!o) {
-                o = document.createElement('div');
-                o.id = 'ink-eye-el';
-                o.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:2147482000' + (IS_MOBILE ? '' : ';mix-blend-mode:multiply');
-                document.body.appendChild(o);
-            }
-            const a = Math.min(0.6, Math.max(0.05, cfg.eyeLvl));
-            o.style.background = IS_MOBILE ? `rgba(255,150,40,${0.04 + a * 0.3})` : `rgba(255,${Math.round(190 - a * 150)},${Math.round(110 - a * 150)},${0.35 + a * 0.9})`;
-        }
-        const b = $('ink-eye'); if (b) b.classList.toggle('on', cfg.eye);
-    }
-    function toggleEye() { cfg.eye = !cfg.eye; saveCfg(); applyEye(); }
-    function toggleVoice() {
-        cfg.voice = !cfg.voice; saveCfg(); refreshPanel();
-        if (!cfg.voice) { cancelSpeech(); musDuck(false); return; }
-        if (!TTS || !ptVoices().length) setStatus('⚠ Nenhuma voz encontrada para este idioma');
-        else ocrWorker().then(() => { if (!running) setStatus('Audiolivro pronto'); }).catch(e => setStatus('⚠ OCR: ' + (e.message || e)));
-    }
-    function setSpeed(d) {
-        let i = 0, best = 1e9;
-        SPEEDS.forEach((v, k) => { const dd = Math.abs(v - cfg.speed); if (dd < best) { best = dd; i = k; } });
-        cfg.speed = SPEEDS[Math.min(SPEEDS.length - 1, Math.max(0, i + d))];
-        saveCfg(); workSave(); refreshPanel();
-    }
-    function fillVoices() {
-        const sel = $('ink-vsel'); if (!sel) return;
-        const list = ptVoices();
-        const cur = currentVoice();
-        sel.textContent = '';
-        if (!list.length) { const o = document.createElement('option'); o.textContent = 'Nenhuma voz para este idioma'; sel.appendChild(o); return; }
-        list.forEach(v => {
-            const o = document.createElement('option');
-            o.value = v.name; o.textContent = (isNatural(v) ? '★ ' : '') + v.name.replace(/^Microsoft\s+/, '');
-            if (cur && v.name === cur.name) o.selected = true;
-            sel.appendChild(o);
-        });
-    }
-    function refreshPanel() {
-        const u = $('ink-panel'); if (!u) return;
-        u.classList.toggle('run', running);
-        const g = $('ink-go');
-        if (g) g.innerHTML = running ? ICO.pause + '<span>Pausar</span>' : ICO.play + '<span>Ler sozinho</span>';
-        const mg = $('ink-mini-go');
-        if (mg) mg.innerHTML = running ? ICO.pause : ICO.play;
-        const sp = $('ink-spd'); if (sp) sp.textContent = String(+(cfg.speed).toFixed(2)) + '×';
-        const ma = $('ink-manga'); if (ma) ma.classList.toggle('on', cfg.manga);
-        const au = $('ink-auto'); if (au) au.classList.toggle('on', cfg.auto);
-        const vo = $('ink-voice'); if (vo) vo.classList.toggle('on', cfg.voice);
-        const pe = $('ink-perf'); if (pe) pe.classList.toggle('on', isPerf());
-        const ey = $('ink-eye'); if (ey) ey.classList.toggle('on', cfg.eye);
-        const ax = $('ink-anx'); if (ax) ax.classList.toggle('on', (cfg.anx | 0) > 0);
-        const al = $('ink-anx-l'); if (al) al.textContent = ANX_LBL[cfg.anx | 0] || ANX_LBL[0];
-        const vr = $('ink-vr'); if (vr) vr.textContent = String(cfg.vrate) + '×';
-        const el = $('ink-eyel'); if (el) el.textContent = Math.round(cfg.eyeLvl * 100) + '%';
-        const mv = $('ink-meta-val'); if (mv) mv.textContent = cfg.metaGoal;
-        const dk = $('ink-duck'); if (dk) dk.classList.toggle('on', cfg.duck !== false);
-        const ys = $('ink-yt-show'); if (ys) ys.classList.toggle('on', cfg.ytShow !== false);
-        const yb = $('ink-yt-box'); if (yb) yb.classList.toggle('off', cfg.ytShow === false);
-        // novidades 4.5.0
-        const fu = $('ink-full'); if (fu) fu.classList.toggle('on', !!cfg.full);
-        const sm = $('ink-slm'); if (sm) sm.textContent = cfg.sleepMin ? cfg.sleepMin + ' min' : 'Desligado';
-        const sc = $('ink-slc'); if (sc) sc.textContent = cfg.sleepCaps ? cfg.sleepCaps + (cfg.sleepCaps === 1 ? ' capítulo' : ' capítulos') : 'Sem limite de cap.';
-        const ea = $('ink-eyeauto'); if (ea) ea.classList.toggle('on', !!cfg.eyeAuto);
-        const ef = $('ink-eyef'); if (ef) ef.textContent = 'das ' + (cfg.eyeFrom | 0) + 'h';
-        const et = $('ink-eyet'); if (et) et.textContent = 'às ' + (cfg.eyeTo | 0) + 'h';
-        const pw = $('ink-perwork'); if (pw) pw.classList.toggle('on', !!cfg.perWork);
-        const sk = $('ink-skip'); if (sk) sk.classList.toggle('on', !!cfg.skipJunk);
-        const me = $('ink-media'); if (me) me.classList.toggle('on', cfg.media !== false);
-        const ol = $('ink-ocrl'); if (ol && ol.value !== curLang().id) ol.value = curLang().id;
-        contPaint();
-        musPaintBtn();
-    }
-
-    /* ================================================================== *
-     * 15. INIT
-     * ================================================================== */
-    function init() {
-        injectCSS();
-        buildPanel();
-        applyPos();
-        BubbleSorter.start();
-        OrderBar.build();
-        mediaInit();
-        if (window.InkNative && cfg.full) applyFull();
-        // voltou do botão "Continuar": avisa onde você tinha parado
-        try {
-            const rs = JSON.parse(sessionStorage.getItem('ink_resume') || 'null');
-            if (rs) { sessionStorage.removeItem('ink_resume'); setTimeout(() => setStatus('↩ Você parou em: ' + rs.label), 1800); }
-        } catch (e) { }
-        // novidades: na 1ª instalação só marca como vista; depois de atualizar, abre sozinho uma vez
-        if (!cfg.seenVer) { cfg.seenVer = VERSION; saveCfg(); }
-        else if (cfg.seenVer !== VERSION) setTimeout(() => { if (!$('ink-news')) openNews(); }, 2500);
-        newsDot();
-        setTimeout(() => checkUpdate(false), 4000);
-        setInterval(() => checkUpdate(false), 6 * 3600 * 1000);
-        // o site é SPA: reavalia a barra de capítulos, o filtro de olho, a obra atual e o "continuar" ao navegar
-        setInterval(() => { try { workTick(); OrderBar.build(); eyeAutoTick(); applyEye(); contPaint(); } catch (e) { } }, 1500);
-        // grava onde você está lendo (mais espaçado no modo leve)
-        setInterval(() => { try { trackRead(); } catch (e) { } }, isPerf() ? 4000 : 2500);
-        eyeAutoTick();
-    }
-    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
-    else init();
-
-    console.info(`[Ink] v${VERSION} carregado`);
-})();
+    const UPD = { text: '', ver: '', log: 
