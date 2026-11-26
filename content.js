@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ink Leitor
 // @namespace    ink-leitor
-// @version      4.9.0
+// @version      4.9.1
 // @description  Leitor automático, OCR, TTS, música, ordenador de capítulos, auto-arrumar bolhas, timer de sono, estatísticas e mais
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
@@ -78,7 +78,7 @@
         const iv = setInterval(tick, 1500);
     })();
 
-    const VERSION = '4.9.0';
+    const VERSION = '4.9.1';
     const IS_MOBILE = (() => {
         try { return matchMedia('(pointer:coarse)').matches || innerWidth < 700; }
         catch (e) { return innerWidth < 700; }
@@ -563,8 +563,10 @@
      *  6. BUBBLE SORTER (Auto-Arrumar Mangá/HQ)
      *   - cada bolha é um <div class="bz-order__tile"> dentro de .bz-order__track
      *   - o arraste usa EVENTOS DE PONTEIRO (não o drag-and-drop nativo)
-     *   - a miniatura (.bz-order__thumb) é um recorte da página via
+     *   - plano A: a miniatura (.bz-order__thumb) é um recorte da página via
      *     background-image/-size/-position → dá pra calcular onde a bolha está
+     *   - plano B (4.9.1): quando a miniatura NÃO é um recorte (size="auto"),
+     *     lê a posição pelas caixas numeradas desenhadas sobre a página
      * ================================================================== */
     const BubbleSorter = (() => {
         let isOpen = false;
@@ -594,7 +596,7 @@
             return only.length >= 2 ? only : t.filter(k => k.querySelector('.bz-order__thumb'));
         }
 
-        // posição da bolha na página (frações 0..1), lida do recorte da miniatura
+        // plano A: posição da bolha na página (frações 0..1), lida do recorte da miniatura
         let lastWhy = '';
         function boxOf(tile) {
             const th = tile.querySelector('.bz-order__thumb') || tile.firstElementChild;
@@ -614,6 +616,44 @@
             const py = /%$/.test(bp[1]) ? (h - bh) * parseFloat(bp[1]) / 100 : parseFloat(bp[1]);
             if (!isFinite(px) || !isFinite(py)) return null;
             return { l: -px / bw, t: -py / bh, r: (-px + w) / bw, b: (-py + h) / bh };
+        }
+
+        // plano B: as caixas numeradas (1, 2, 3…) desenhadas sobre a página, acima da fileira de bolhas.
+        // Devolve { numero: {l,t,r,b} } em pixels da tela, ou null se não achar todas.
+        function overlayBoxes(count) {
+            const modal = findModal();
+            const track = (modal || document).querySelector('.bz-order__track') || (getTiles()[0] || {}).parentElement || null;
+            const limit = track ? track.getBoundingClientRect().top : innerHeight;
+            const badges = new Map();
+            for (const el of $$('*', document.body)) {
+                if (el.childElementCount !== 0) continue;
+                const t = (el.textContent || '').trim();
+                if (!/^\d{1,2}$/.test(t)) continue;
+                const n = +t;
+                if (n < 1 || n > count || badges.has(n)) continue;
+                if (el.closest('#ink-panel,#ink-auto-row,#ink-news')) continue;
+                if (el.closest(TILE) || (track && track.contains(el))) continue;
+                let r; try { r = el.getBoundingClientRect(); } catch (e) { continue; }
+                if (r.width < 4 || r.height < 4 || r.width > 80 || r.height > 80) continue;
+                if (r.top < 0 || r.bottom > limit + 4) continue;
+                badges.set(n, { el, r });
+            }
+            if (badges.size < count) { lastWhy = `achei ${badges.size} de ${count} números sobre a página`; return null; }
+            const out = {};
+            badges.forEach(({ el, r }, n) => {
+                let best = r, p = el.parentElement;
+                for (let i = 0; i < 3 && p && p !== document.body; i++, p = p.parentElement) {
+                    let pr; try { pr = p.getBoundingClientRect(); } catch (e) { break; }
+                    if (pr.width > innerWidth * 0.6 || pr.height > innerHeight * 0.35) break;
+                    if (pr.width < r.width * 0.9 || pr.height < r.height * 0.9) break;
+                    let outro = false;
+                    badges.forEach(o => { if (o.el !== el && p.contains(o.el)) outro = true; });
+                    if (outro) break;
+                    best = pr;
+                }
+                out[n] = { l: best.left, t: best.top, r: best.right, b: best.bottom };
+            });
+            return out;
         }
 
         // agrupa em fileiras por sobreposição vertical; dentro da fileira: mangá = direita→esquerda
@@ -692,12 +732,24 @@
         async function run(mode, say) {
             const tiles = getTiles();
             if (tiles.length < 2) { say(tiles.length ? '⚠ Só 1 balão, nada pra ordenar' : '⚠ Não achei os balões nesta tela'); return; }
-            const pts = [];
+
+            // plano A: recorte da miniatura
+            let pts = [], failA = '';
             for (let i = 0; i < tiles.length; i++) {
                 const bx = boxOf(tiles[i]);
-                if (!bx) { console.warn('[Ink] bolha', i + 1, lastWhy, tiles[i].outerHTML.slice(0, 400)); say(`⚠ Não li a posição da bolha ${i + 1} (${lastWhy})`); return; }
+                if (!bx) { failA = `bolha ${i + 1}: ${lastWhy}`; console.warn('[Ink] bolha', i + 1, lastWhy, tiles[i].outerHTML.slice(0, 400)); pts = null; break; }
                 pts.push({ el: tiles[i], bx });
             }
+
+            // plano B: caixas numeradas sobre a página (número = posição atual da bolha na fileira)
+            if (!pts) {
+                const cur = curOrder();
+                const ov = overlayBoxes(cur.length);
+                if (!ov) { say(`⚠ Não li a posição das bolhas (${failA}; ${lastWhy})`); return; }
+                pts = cur.map((el, i) => ({ el, bx: ov[i + 1] }));
+                console.info('[Ink] usei as caixas numeradas da página (plano B)');
+            }
+
             const sorted = orderBoxes(pts, mode);
             const lbl = e => (e.getAttribute('aria-label') || '?').replace(/\D+/g, '');
             console.info('[Ink] ordem atual:', curOrder().map(lbl).join(','), '→ alvo:', sorted.map(lbl).join(','));
@@ -2143,6 +2195,10 @@
      * ================================================================== */
     /*CL_START*/
     const CHANGELOG = [
+        { "v": "4.9.1", "d": "2026-11-26", "t": [
+            "Auto Mangá/HQ corrigido: quando as miniaturas das bolhas não permitem calcular a posição, o painel agora lê pelas caixas numeradas desenhadas sobre a página",
+            "A mensagem de erro agora diz o que tentou, para facilitar achar o problema"
+        ] },
         { "v": "4.9.0", "d": "2026-11-26", "t": [
             "Interface refeita: botões principais na aba Ler e o resto em seções que abrem e fecham",
             "Controles de − e + maiores e padronizados; o status agora fica no topo",
