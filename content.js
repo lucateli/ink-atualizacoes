@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ink Leitor
 // @namespace    ink-leitor
-// @version      4.13.1
+// @version      4.13.2
 // @description  Leitor automático, OCR, TTS, música, ordenador de capítulos, auto-arrumar bolhas, timer de sono, estatísticas e mais
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
@@ -78,7 +78,7 @@
         const iv = setInterval(tick, 1500);
     })();
 
-    const VERSION = '4.13.1';
+    const VERSION = '4.13.2';
     const IS_MOBILE = (() => {
         try { return matchMedia('(pointer:coarse)').matches || innerWidth < 700; }
         catch (e) { return innerWidth < 700; }
@@ -568,6 +568,8 @@
      *     background-image/-size/-position → dá pra calcular onde a bolha está
      *   - plano B (4.9.1): quando a miniatura NÃO é um recorte (size="auto"),
      *     lê a posição pelas caixas numeradas desenhadas sobre a página
+     *   - 4.13.2: arraste rápido (poucos passos, sem esperas fixas, tenta mover
+     *     direto para o lugar certo); se falhar, volta sozinho ao modo lento
      * ================================================================== */
     const BubbleSorter = (() => {
         let isOpen = false;
@@ -700,44 +702,98 @@
             buttons: type === 'pointerup' ? 0 : 1
         });
 
-        async function dragBy(el, dx, hold) {
+        /* ritmos do arraste: 0 = rápido, 1 = médio, 2 = lento (segura antes de arrastar).
+           hold = espera depois de apertar · steps/gap = passos do movimento · pre = espera antes de soltar
+           wait = quanto esperar a bolha mudar de lugar · settle = espera a animação assentar */
+        const PACE = [
+            { hold: 25, steps: 7, gap: 9, pre: 40, wait: 450, settle: 140 },
+            { hold: 60, steps: 12, gap: 14, pre: 70, wait: 700, settle: 200 },
+            { hold: 450, steps: 14, gap: 16, pre: 70, wait: 900, settle: 220 }
+        ];
+        let slow = 0, okRun = 0, jumpBad = false;   // aprendem durante o uso: se o rápido falha, sobe o nível
+
+        async function dragBy(el, dx, P) {
             const r = el.getBoundingClientRect();
             const x0 = r.left + r.width / 2, y = r.top + r.height / 2;
             // o toque real cai no elemento de dentro (miniatura); o evento sobe até o quadrado
             const hit = document.elementFromPoint(x0, y);
             const t = hit && el.contains(hit) ? hit : el;
             t.dispatchEvent(pev('pointerdown', x0, y));
-            await sleep(hold);
-            const steps = 14;
-            for (let i = 1; i <= steps; i++) {
-                t.dispatchEvent(pev('pointermove', x0 + dx * i / steps, y));
-                await sleep(16);
+            await sleep(P.hold);
+            for (let i = 1; i <= P.steps; i++) {
+                t.dispatchEvent(pev('pointermove', x0 + dx * i / P.steps, y));
+                await sleep(P.gap);
             }
-            await sleep(70);
+            await sleep(P.pre);
             t.dispatchEvent(pev('pointerup', x0 + dx, y));
-            await sleep(200);
         }
 
-        // troca a bolha com a vizinha da esquerda, com as duas visíveis na fileira
-        async function stepLeft(el) {
+        // depois de soltar: espera a bolha mudar de posição (sem tempo fixo) e a animação assentar
+        async function waitMoved(el, from, P) {
+            const t0 = performance.now();
+            while (performance.now() - t0 < P.wait) {
+                await sleep(25);
+                if (curOrder().indexOf(el) !== from) {
+                    await sleep(P.settle);
+                    const now = curOrder().indexOf(el);
+                    if (now !== from) return now;     // se voltou ao lugar, o toque não pegou: continua esperando
+                }
+            }
+            return curOrder().indexOf(el);
+        }
+
+        const inView = r => r.left >= 4 && r.right <= innerWidth - 4;
+
+        // move a bolha em direção à posição `target`. Tenta ir direto; se não der, anda uma casa.
+        // Devolve a posição onde ela ficou, ou -1 se não saiu do lugar.
+        async function moveTo(el, target) {
             const from = curOrder().indexOf(el);
+            if (from < 0) return -1;
+            if (from === target) return from;
+            const dir = target < from ? -1 : 1;
             for (let tryN = 0; tryN < 3; tryN++) {
+                const lvl = Math.min(2, tryN + slow), P = PACE[lvl];
                 el.scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'instant' });
-                await sleep(60);
-                const prev = curOrder()[from - 1];
-                const target = prev.getBoundingClientRect(), me = el.getBoundingClientRect();
-                const dx = (target.left + target.width / 2) - (me.left + me.width / 2) - (6 + tryN * 16);
-                await dragBy(el, dx, tryN ? 450 : 60); // nas novas tentativas, segura antes de arrastar
-                const now = curOrder().indexOf(el);
-                if (now === from - 1) return true;
-                if (now !== from) { console.warn('[Ink] arraste foi pra posição', now + 1, 'em vez de', from); return false; }
+                await sleep(lvl ? 60 : 30);
+                const ord = curOrder();
+                const me = el.getBoundingClientRect();
+                let to = from + dir;
+                if (tryN === 0 && !jumpBad && Math.abs(target - from) > 1 && ord[target]) {
+                    const far = ord[target].getBoundingClientRect();
+                    if (inView(far) && inView(me)) to = target;      // as duas estão na tela: vai direto
+                }
+                if (!ord[to]) return -1;
+                const tg = ord[to].getBoundingClientRect();
+                const dx = (tg.left + tg.width / 2) - (me.left + me.width / 2) + dir * (6 + tryN * 16);
+                await dragBy(el, dx, P);
+                const now = await waitMoved(el, from, P);
+                if (now === to) {
+                    if (lvl > slow) { slow = lvl; okRun = 0; }
+                    else if (slow > 0 && ++okRun >= 10) { slow--; okRun = 0; }   // 10 acertos seguidos: tenta mais rápido de novo
+                    return now;
+                }
+                if (now >= 0 && now !== from) {
+                    if (to !== from + dir) jumpBad = true;     // o pulo direto não caiu certo: só uma casa por vez daqui pra frente
+                    return now;
+                }
+                if (tryN === 0 && slow === 0) okRun = 0;
             }
             console.warn('[Ink] a bolha na posição', from + 1, 'não se mexeu');
-            return false;
+            return -1;
         }
 
         let stopAsked = false, working = false, undoOrder = null;
         const clearPreview = () => $$('.ink-prev').forEach(e => e.remove());
+
+        // põe a bolha na posição i (pode precisar de mais de um arraste)
+        async function place(el, i) {
+            for (let guard = 0; guard < 30; guard++) {
+                if (stopAsked) return false;
+                if (curOrder().indexOf(el) === i) return true;
+                if (await moveTo(el, i) < 0) return false;
+            }
+            return curOrder().indexOf(el) === i;
+        }
 
         async function reorder(sorted, onStep) {
             // pointer capture com ponteiro sintético dá erro; engole só durante o arraste
@@ -748,10 +804,8 @@
                 for (let i = 0; i < sorted.length; i++) {
                     const el = sorted[i];
                     if (stopAsked) return false;
-                    if (onStep && curOrder().indexOf(el) > i) onStep(i + 1, sorted.length);
-                    while (curOrder().indexOf(el) > i) {
-                        if (stopAsked || !await stepLeft(el)) return false;
-                    }
+                    if (onStep && curOrder().indexOf(el) !== i) onStep(i + 1, sorted.length);
+                    if (!await place(el, i)) return false;
                 }
                 return curOrder().every((e, i) => e === sorted[i]);
             } finally {
@@ -897,6 +951,7 @@
 
     /* ================================================================== *
      *  6b. PREPARAR CAPÍTULO: arruma e salva as bolhas página por página
+     *  4.13.2: esperas fixas menores (o que ainda espera, espera só até o site responder)
      * ================================================================== */
     const Prep = (() => {
         let on = false;
@@ -923,7 +978,7 @@
                 const v = fn();
                 if (v) return v;
                 if (Date.now() - t0 >= ms) return null;
-                await sleep(120);
+                await sleep(80);
             }
         }
 
@@ -966,7 +1021,7 @@
                 try { if (!METHODS[name]()) continue; } catch (e) { continue; }
                 const now = await waitFor(() => { const c = counter(); return c && c.p !== from.p ? c : null; }, 1200);
                 if (!now) continue;
-                if (now.p === from.p + dir) { learned[dir] = name; await sleep(350); return; }
+                if (now.p === from.p + dir) { learned[dir] = name; await sleep(180); return; }
                 throw new Error(`a página pulou de ${from.p} para ${now.p}`);
             }
             throw new Error(`não consegui sair da página ${from.p}`);
@@ -995,7 +1050,7 @@
         // devolve 'ok', 'vazia' (sem balões) ou 'falhou'
         async function doPage(page, say) {
             await setZoom(true);
-            const c = await waitFor(() => { const x = counter(); return x && x.p === page && x.b != null ? x : null; }, 7000);
+            const c = await waitFor(() => { const x = counter(); return x && x.p === page && x.b != null ? x : null; }, 4000);
             if (!c) return 'vazia';
             const gear = await waitFor(gearBtn, 3000);
             if (!gear) throw new Error('não achei a engrenagem das bolhas');
@@ -1006,13 +1061,13 @@
             await waitFor(() => {
                 const n = BubbleSorter.getTiles().length;
                 if (n !== last) { last = n; since = Date.now(); }
-                return n > 0 && Date.now() - since > 900;
+                return n > 0 && Date.now() - since > 400;
             }, 8000);
             const ok = await BubbleSorter.arrange(cfg.manga ? 'manga' : 'hq', m => say(`Pág ${page}: ${m}`));
             check();
             if (!ok) { await closeModal(/^cancelar$/i); return 'falhou'; }
             await closeModal(/^salvar$/i);
-            await sleep(700);
+            await sleep(300);
             return 'ok';
         }
 
@@ -2601,6 +2656,11 @@
      * ================================================================== */
     /*CL_START*/
     const CHANGELOG = [
+        { "v": "4.13.2", "d": "2026-11-26", "t": [
+            "Preparar capítulo e Auto Mangá/HQ bem mais rápidos: o arraste das bolhas ficou mais curto, sem esperas fixas, e quando dá move a bolha direto para o lugar certo",
+            "Se o arraste rápido falhar, ele volta sozinho para o modo lento e seguro, e depois de acertar várias vezes tenta o rápido de novo",
+            "Páginas sem balões agora esperam até 4 s (antes eram 7 s) e as pausas entre as páginas ficaram menores"
+        ] },
         { "v": "4.13.1", "d": "2026-11-26", "t": [
             "No programa de PC, o botão Atualizar não baixa mais arquivos: avisa para fechar e abrir"
         ] },
