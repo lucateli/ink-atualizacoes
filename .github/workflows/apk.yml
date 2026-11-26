@@ -51,6 +51,9 @@ jobs:
           M=$P/app/src/main
           mkdir -p $M/java/br/inkleitor $M/res/drawable-nodpi $M/assets/ocr
           test -f content.js || { echo "ERRO: não achei o content.js na raiz do repositório"; exit 1; }
+          # não gera APK com content.js cortado ou com erro de sintaxe
+          tail -n 1 content.js | grep -q 'INK_EOF' || { echo "ERRO: content.js cortado (falta o marcador INK_EOF na última linha)"; exit 1; }
+          node --check content.js || { echo "ERRO: content.js com erro de sintaxe"; exit 1; }
           cp content.js $M/assets/content.js
           cat > $P/settings.gradle <<'EOF_SETTINGS'
           pluginManagement {
@@ -186,10 +189,11 @@ jobs:
           public class MainActivity extends Activity {
               static final String HOME = "https://www.ink.app.br/";
               static final String UPDATE_URL = "@UPDATE_URL@";   // trocado pelo workflow
+              static final String END_MARK = "/*INK_EOF*/";      // o content.js sempre termina com isto
               private WebView web;
               private volatile Thread updater;
               private long lastCheck = 0;
-          private boolean full = false;
+              private boolean full = false;
               private final Handler ui = new Handler(Looper.getMainLooper());
 
               @Override
@@ -238,23 +242,27 @@ jobs:
               }
 
               /* ---------- atualização do content.js (GitHub) ---------- */
-              // baixa o content.js novo e guarda no armazenamento do app. true = gravou.
-              private synchronized boolean fetchUpdate() {
+              // baixa o content.js novo e guarda no armazenamento do app.
+              // Devolve null se deu certo, ou o motivo da falha (o content.js mostra esse motivo no painel).
+              private synchronized String fetchUpdate() {
                   try {
                       HttpURLConnection c = (HttpURLConnection) new URL(UPDATE_URL + "?t=" + System.currentTimeMillis()).openConnection();
                       c.setConnectTimeout(5000);
                       c.setReadTimeout(8000);
                       c.setUseCaches(false);
-                      if (c.getResponseCode() != 200) return false;
+                      int code = c.getResponseCode();
+                      if (code != 200) return "GitHub respondeu HTTP " + code;
                       String t;
                       try (InputStream in = c.getInputStream()) { t = readAll(in); }
-                      if (t.length() > 20000 && t.contains("const VERSION")) {
-                          File tmp = new File(getFilesDir(), "content.js.tmp");
-                          try (FileOutputStream f = new FileOutputStream(tmp)) { f.write(t.getBytes(StandardCharsets.UTF_8)); }
-                          return tmp.renameTo(new File(getFilesDir(), "content.js"));
-                      }
-                  } catch (Exception ignored) { }
-                  return false;
+                      // só guarda arquivo inteiro: tamanho mínimo, versão e marcador de fim (nunca uma cópia cortada)
+                      if (t.length() < 20000 || !t.contains("const VERSION")) return "arquivo do GitHub inválido";
+                      if (!t.trim().endsWith(END_MARK)) return "arquivo do GitHub cortado (sem o marcador de fim)";
+                      File tmp = new File(getFilesDir(), "content.js.tmp");
+                      try (FileOutputStream f = new FileOutputStream(tmp)) { f.write(t.getBytes(StandardCharsets.UTF_8)); }
+                      return tmp.renameTo(new File(getFilesDir(), "content.js")) ? null : "não consegui gravar o arquivo no app";
+                  } catch (Exception e) {
+                      return "sem conexão com o GitHub";
+                  }
               }
 
               private void startUpdater() {
@@ -282,12 +290,31 @@ jobs:
                   try (InputStream in = getAssets().open(name)) { return readAll(in); }
               }
 
+              // lê "const VERSION = 'X.Y.Z'" do script
+              private static int[] verOf(String t) {
+                  java.util.regex.Matcher m = java.util.regex.Pattern.compile("const VERSION = '(\\d+)\\.(\\d+)\\.(\\d+)'").matcher(t);
+                  if (!m.find()) return new int[] {0, 0, 0};
+                  return new int[] {Integer.parseInt(m.group(1)), Integer.parseInt(m.group(2)), Integer.parseInt(m.group(3))};
+              }
+
+              // a é uma versão mais nova que b?
+              private static boolean newer(String a, String b) {
+                  int[] x = verOf(a), y = verOf(b);
+                  for (int i = 0; i < 3; i++) if (x[i] != y[i]) return x[i] > y[i];
+                  return false;
+              }
+
+              // usa a cópia baixada do GitHub, a não ser que esteja cortada ou seja mais velha que a que veio dentro do APK
               private String contentJs() throws IOException {
+                  String bundled = readAsset("content.js");     // a do repositório no momento em que o APK foi gerado
                   File f = new File(getFilesDir(), "content.js");
-                  if (f.exists() && f.length() > 20000) {
-                      try (InputStream in = new FileInputStream(f)) { return readAll(in); }
+                  if (f.exists()) {
+                      String stored = null;
+                      try (InputStream in = new FileInputStream(f)) { stored = readAll(in); } catch (IOException ignored) { }
+                      if (stored != null && stored.length() > 20000 && stored.trim().endsWith(END_MARK) && !newer(bundled, stored)) return stored;
+                      f.delete();                               // cópia cortada ou desatualizada: descarta
                   }
-                  return readAsset("content.js");     // reserva: o que estava no repositório quando o APK foi gerado
+                  return bundled;
               }
 
               private void inject() {
@@ -372,9 +399,10 @@ jobs:
                   public void update(final String id) {
                       if (id == null || !id.matches("\\d{1,9}")) return;
                       new Thread(() -> {
-                          final boolean ok = fetchUpdate();
+                          final String err = fetchUpdate();      // null = deu certo
+                          final boolean ok = err == null;
                           final String js = "window.__inkUpdDone(" + id + "," + ok + ","
-                                  + (ok ? "null" : org.json.JSONObject.quote("sem conexão com o GitHub")) + ")";
+                                  + (ok ? "null" : org.json.JSONObject.quote(err)) + ")";
                           ui.post(() -> {
                               web.evaluateJavascript(js, null);
                               if (ok) ui.postDelayed(() -> web.reload(), 1500);
