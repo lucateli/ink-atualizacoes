@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Ink Leitor
 // @namespace    ink-leitor
-// @version      4.4.4
-// @description  Leitor automático, OCR, TTS, música (YouTube + Drive), ordenador de capítulos e auto-arrumar bolhas mangá/HQ
+// @version      4.5.0
+// @description  Leitor automático, OCR, TTS, música, ordenador de capítulos, auto-arrumar bolhas, timer de sono, estatísticas e mais
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
 // @run-at       document-idle
@@ -25,7 +25,7 @@
     if (window.__ink) return;
     window.__ink = true;
 
-    const VERSION = '4.4.4';
+    const VERSION = '4.5.0';
     const IS_MOBILE = (() => {
         try { return matchMedia('(pointer:coarse)').matches || innerWidth < 700; }
         catch (e) { return innerWidth < 700; }
@@ -54,9 +54,21 @@
         pos: null, min: false, tab: 'read',
         musicUrl: '', musicKey: '', musicVol: 0.6,
         ytUrl: '', ytShow: true, duck: true, updSkip: '',
+        // novidades 4.5.0
+        last: null,                       // onde parou: { path, label, t }
+        perWork: true, works: {},         // velocidade/direção lembradas por obra
+        sleepMin: 0, sleepCaps: 0,        // timer de sono (minutos / capítulos)
+        eyeAuto: false, eyeFrom: 20, eyeTo: 7,
+        media: true,                      // controles na tela de bloqueio
+        skipJunk: true,                   // pular balões sem sentido no audiolivro
+        ocrLang: 'por',
+        stats: { days: {} },
+        full: false,
     };
     const cfg = { ...DEFAULTS };
     try { Object.assign(cfg, JSON.parse(localStorage.getItem(CFG_KEY) || '{}')); } catch (e) { }
+    if (!cfg.works || typeof cfg.works !== 'object') cfg.works = {};
+    if (!cfg.stats || typeof cfg.stats !== 'object' || !cfg.stats.days) cfg.stats = { days: {} };
 
     let _saveT;
     const saveCfg = () => { clearTimeout(_saveT); _saveT = setTimeout(() => { try { localStorage.setItem(CFG_KEY, JSON.stringify(cfg)); } catch (e) { } }, 150); };
@@ -68,7 +80,31 @@
     ];
     const curSkin = () => SKINS.find(s => s.id === cfg.skin) || SKINS[0];
 
+    const OCR_LANGS = [
+        { id: 'por', nome: 'Português', vl: 'pt' },
+        { id: 'por+eng', nome: 'Português + Inglês', vl: 'pt' },
+        { id: 'eng', nome: 'Inglês', vl: 'en' },
+        { id: 'jpn', nome: 'Japonês', vl: 'ja' },
+    ];
+    const curLang = () => OCR_LANGS.find(l => l.id === cfg.ocrLang) || OCR_LANGS[0];
+
     const setStatus = msg => { const el = $('ink-status'); if (el && el.textContent !== msg) el.textContent = msg; };
+
+    /* ---- Por obra: lembra velocidade e direção de cada obra ---- */
+    const RX_OBRA = /(manga|manhwa|hq|comic|obra|capitulo|titulo|series)/i;
+    function workKey() {
+        try { const s = sessionStorage.getItem('ink_work'); if (s) return s; } catch (e) { }
+        const seg = location.pathname.split('/').filter(Boolean);
+        return seg.length >= 3 ? '/' + seg.slice(0, -1).join('/') : '';
+    }
+    function workSave() {
+        if (!cfg.perWork) return;
+        const k = workKey(); if (!k) return;
+        cfg.works[k] = { speed: cfg.speed, manga: !!cfg.manga, t: Date.now() };
+        const ks = Object.keys(cfg.works);
+        if (ks.length > 200) ks.sort((a, b) => (cfg.works[a].t || 0) - (cfg.works[b].t || 0)).slice(0, ks.length - 200).forEach(x => delete cfg.works[x]);
+        saveCfg();
+    }
 
     /* ================================================================== *
      *  3. ANDROID POPUP FIX
@@ -335,18 +371,11 @@
     const MANGA = ['ArrowLeft', 'clickEsq', 'swipeR'];
 
     /* ================================================================== *
-     *  6. BUBBLE SORTER (Auto-Arrumar Mangá/HQ)  — reescrito na 4.4.1
-     *
-     *  Como o site funciona (descoberto pelo console):
-     *   - cada bolha é um <div class="bz-order__tile"> dentro de
-     *     <div class="bz-order__track">, posicionado com translateX;
-     *   - o arraste usa EVENTOS DE PONTEIRO (onPointerDown), não o
-     *     drag-and-drop nativo (por isso a versão 4.4.0 não fazia nada);
+     *  6. BUBBLE SORTER (Auto-Arrumar Mangá/HQ)
+     *   - cada bolha é um <div class="bz-order__tile"> dentro de .bz-order__track
+     *   - o arraste usa EVENTOS DE PONTEIRO (não o drag-and-drop nativo)
      *   - a miniatura (.bz-order__thumb) é um recorte da página via
-     *     background-image/-size/-position, então dá pra calcular onde
-     *     a bolha está na página a partir desses valores.
-     *  O resultado agora aparece na própria linha do botão (o painel
-     *  minimizado escondia as mensagens).
+     *     background-image/-size/-position → dá pra calcular onde a bolha está
      * ================================================================== */
     const BubbleSorter = (() => {
         let isOpen = false;
@@ -509,7 +538,7 @@
             const say = t => { msg.textContent = t; setStatus(t); };
             const paint = () => { btn.textContent = cfg.manga ? '↔ Auto Mangá (→ ←)' : '↔ Auto HQ (← →)'; btn.style.background = cfg.manga ? '#e8573f' : '#ff69b4'; };
             paint();
-            tog.onclick = e => { e.preventDefault(); cfg.manga = !cfg.manga; saveCfg(); paint(); refreshPanel(); };
+            tog.onclick = e => { e.preventDefault(); cfg.manga = !cfg.manga; saveCfg(); workSave(); paint(); refreshPanel(); };
             btn.onclick = async e => {
                 e.preventDefault();
                 if (btn.dataset.busy) return;
@@ -666,7 +695,7 @@
             if ($('ink-order')) return;
             // NÃO monta na tela de leitura: lá os links /ler/ são o carrossel "Próximas leituras"
             if (location.pathname.startsWith('/ler/')) return;
-            if (!/(manga|manhwa|hq|comic|obra|capitulo|titulo|series)/i.test(location.pathname)) return;
+            if (!RX_OBRA.test(location.pathname)) return;
             const box = findContainer();
             if (!box || collectItems(box).length < 2) return;
 
@@ -693,7 +722,7 @@
             bar.querySelector('[data-ord="reset"]').onclick = reset;
             bar.querySelectorAll('[data-dir]').forEach(b => b.onclick = () => {
                 state.dir = b.dataset.dir;
-                cfg.manga = state.dir === 'manga'; saveCfg(); refreshPanel();
+                cfg.manga = state.dir === 'manga'; saveCfg(); workSave(); refreshPanel();
                 apply();
             });
 
@@ -855,6 +884,7 @@
             if (st.b != null || st.pg != null || st.pct != null) break;
         }
         await sleep(600);
+        sleepChapter();
         return true;
     }
 
@@ -978,7 +1008,7 @@
 
     async function mainLoop() {
         const id = ++runId;
-        running = true; refreshPanel(); keepAwake(true);
+        running = true; refreshPanel(); keepAwake(true); sleepArm(); kaStart();
         let stuck = 0, endFails = 0;
         visited.clear();
         try {
@@ -1038,12 +1068,12 @@
                 if (++stuck >= 3) { finish('Não consegui avançar.'); return; }
             }
         } finally {
-            if (id === runId) { running = false; refreshPanel(); keepAwake(false); }
+            if (id === runId) { running = false; refreshPanel(); keepAwake(false); kaStop(); }
         }
     }
 
-    const finish = msg => { running = false; runId++; cancelSpeech(); musDuck(false); setStatus(msg); refreshPanel(); keepAwake(false); };
-    const stop = msg => { if (!running) return; running = false; runId++; cancelSpeech(); musDuck(false); setStatus(msg || 'Parado.'); refreshPanel(); keepAwake(false); };
+    const finish = msg => { running = false; runId++; cancelSpeech(); musDuck(false); setStatus(msg); refreshPanel(); keepAwake(false); kaStop(); };
+    const stop = msg => { if (!running) return; running = false; runId++; cancelSpeech(); musDuck(false); setStatus(msg || 'Parado.'); refreshPanel(); keepAwake(false); kaStop(); };
 
     let wakeLock = null;
     async function keepAwake(on) {
@@ -1068,23 +1098,27 @@
 
     const VRATES = [0.7, 0.8, 0.9, 1, 1.1, 1.2, 1.3, 1.5, 1.7, 2];
     const isNatural = v => /natural|neural|online/i.test(v.name);
+    // vozes do idioma escolhido no OCR (pt / en / ja)
     function ptVoices() {
-        const pt = voices.filter(v => /^pt([-]|$)/i.test(v.lang));
-        const br = pt.filter(v => /^pt[-]BR$/i.test(v.lang));
-        return (br.length ? br : pt).slice().sort((a, b) => isNatural(b) - isNatural(a));
+        const vl = curLang().vl;
+        const all = voices.filter(v => new RegExp('^' + vl + '([-_]|$)', 'i').test(v.lang));
+        const pref = vl === 'pt' ? all.filter(v => /^pt[-_]BR$/i.test(v.lang)) : (vl === 'en' ? all.filter(v => /^en[-_]US$/i.test(v.lang)) : []);
+        return (pref.length ? pref : all).slice().sort((a, b) => isNatural(b) - isNatural(a));
     }
     const currentVoice = () => { const l = ptVoices(); return l.find(v => v.name === cfg.vname) || l[0] || null; };
+    const ttsLang = () => ({ pt: 'pt-BR', en: 'en-US', ja: 'ja-JP' }[curLang().vl] || 'pt-BR');
 
     function mkUtt(text) {
         const u = new SpeechSynthesisUtterance(text);
         const v = currentVoice();
-        if (v) { u.voice = v; u.lang = v.lang; } else u.lang = 'pt-BR';
+        if (v) { u.voice = v; u.lang = v.lang; } else u.lang = ttsLang();
         u.rate = cfg.vrate || 1; u.pitch = 1;
         return u;
     }
     function chunk(t) {
         const out = []; let cur = '';
-        for (const x of t.split(/(?<=[.!?…])\s+/)) {
+        for (const x of t.split(/(?<=[.!?…。！？])\s*/)) {
+            if (!x) continue;
             if (cur && (cur + ' ' + x).length > 200) { out.push(cur); cur = x; }
             else cur = cur ? cur + ' ' + x : x;
         }
@@ -1108,29 +1142,35 @@
     const cancelSpeech = () => { try { if (TTS) TTS.cancel(); } catch (e) { } };
 
     /* ================================================================== *
-     * 10. OCR  (a captura de tela depende da extensão: window.postMessage inkCap)
+     * 10. OCR  (a captura de tela depende da extensão/app: window.postMessage inkCap)
      * ================================================================== */
-    const OCR = { worker: null, promise: null };
+    const OCR = { worker: null, promise: null, lang: '' };
     const ocrBase = () => {
         let b = window.__inkOcrBase || (document.documentElement.dataset && document.documentElement.dataset.inkOcr) || '';
         if (!b) { try { if (chrome && chrome.runtime && chrome.runtime.getURL) b = chrome.runtime.getURL('ocr'); } catch (e) { } }
         return b.replace(/\/$/, '');
     };
     function ocrWorker() {
+        const lang = cfg.ocrLang || 'por';
+        if (OCR.lang && OCR.lang !== lang) {          // trocou o idioma: descarta o worker antigo
+            const old = OCR.worker; OCR.worker = null; OCR.promise = null;
+            if (old) { try { old.terminate(); } catch (e) { } }
+        }
         if (OCR.worker) return Promise.resolve(OCR.worker);
         if (OCR.promise) return OCR.promise;
+        OCR.lang = lang;
         OCR.promise = (async () => {
             if (typeof Tesseract === 'undefined') throw new Error('Tesseract não carregou (precisa da extensão).');
             setStatus('⏳ Carregando OCR…');
             const base = ocrBase();
             const opts = { logger: () => { }, errorHandler: e => console.warn('[Ink-OCR]', e) };
             if (base) { opts.workerPath = base + '/worker.min.js'; opts.corePath = base; opts.langPath = base; opts.gzip = true; }
-            const w = await Tesseract.createWorker('por', 1, opts);
+            const w = await Tesseract.createWorker(lang, 1, opts);
             await w.setParameters({ tessedit_pageseg_mode: '11', preserve_interword_spaces: '1', user_defined_dpi: '300' });
             OCR.worker = w;
             return w;
         })();
-        OCR.promise.catch(() => { OCR.promise = null; });
+        OCR.promise.catch(() => { OCR.promise = null; OCR.lang = ''; });
         return OCR.promise;
     }
 
@@ -1159,16 +1199,17 @@
     }
 
     const RX_UI = /leitura\s*autom[aá]tica|modo\s*meninas|audiolivro|pr[oó]ximo\s*cap|conforto|desempenho|mang[aá]\s*:|pausar|ler\s*sozinho|em\s*pausa\s*|aba\s*oculta|voc[eê]\s*mexendo/i;
+    const isJpn = () => cfg.ocrLang === 'jpn';
 
     function cleanLine(l, relaxed) {
         if (!l || !l.bbox) return null;
-        const t = (l.text || '').replace(/[^\p{L}\p{N}\s.,!?…:;'"’“”()–—%-]/gu, ' ').replace(/\s+/g, ' ').trim();
+        const t = (l.text || '').replace(/[^\p{L}\p{N}\s.,!?…:;'"’“”()–—%。、！？「」ー-]/gu, ' ').replace(/\s+/g, ' ').trim();
         if (RX_UI.test(t)) return null;
         const letters = (t.match(/\p{L}/gu) || []).length;
         const conf = l.confidence != null ? l.confidence : 100;
         if (letters < 2 || letters < t.length * 0.45 || conf < (relaxed ? 28 : 35)) return null;
         const ws = t.split(' ').filter(w => /\p{L}/u.test(w));
-        if (!ws.some(w => w.length >= 2)) return null;
+        if (!isJpn() && !ws.some(w => w.length >= 2)) return null;
         return { bbox: l.bbox, text: t };
     }
     function joinLines(ls) {
@@ -1182,16 +1223,29 @@
         for (const l of ls) {
             if (!out) out = l.text;
             else if (/\p{L}-$/u.test(out)) out = out.slice(0, -1) + l.text;
-            else out += ' ' + l.text;
+            else out += (isJpn() ? '' : ' ') + l.text;
         }
         return out;
     }
     function toSpeech(t) {
         t = t.replace(/\s+/g, ' ').trim();
         if (RX_UI.test(t)) return '';
+        if (isJpn()) t = t.replace(/(?<=[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}ー、。！？])\s+(?=[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}ー、。！？])/gu, '');
         const up = (t.match(/\p{Lu}/gu) || []).length, lo = (t.match(/\p{Ll}/gu) || []).length;
         if (up >= 3 && up > 3 * lo) t = t.toLowerCase().replace(/(^|[.!?…]\s+)(\p{L})/gu, (m, a, b) => a + b.toUpperCase());
         return t.replace(/\.{3,}/g, '…').replace(/([!?])[!?]+/g, '$1');
+    }
+
+    // balão "sem sentido": só onomatopeia, letras soltas ou lixo do OCR
+    const RX_ONO = /^(b+o+m+|k+r+a+|s+p+l+a+s+h+|t+h+u+d+|g+r+r+|h+m+p+h*|a+r+g+h+|z+z+z+|b+a+n+g+|c+r+a+s+h+|p+o+w+|s+m+a+c+k+|w+h+a+m+)$/i;
+    function isJunk(t) {
+        if (isJpn()) return (t.match(/\p{L}/gu) || []).length < 1;
+        const toks = t.split(/\s+/).map(w => w.replace(/[^\p{L}]/gu, '')).filter(Boolean);
+        if (!toks.length) return true;
+        const letters = toks.join('').length;
+        if (letters < 2) return true;
+        const bad = w => w.length <= 1 || RX_ONO.test(w) || /^(\p{L})\1{2,}$/iu.test(w) || (w.length >= 3 && !/[aeiouyáéíóúâêôãõà]/i.test(w));
+        return toks.filter(bad).length / toks.length >= 0.7;
     }
 
     async function ocrView() {
@@ -1273,6 +1327,7 @@
         catch (e) { if (alive(id)) finish('🎧 Erro: ' + (e.message || e)); return; }
         if (!alive(id)) return;
         if (!text) { setStatus(`🎧 ${stateLabel(st)} · sem texto`); await humanWait(600, st, id); return; }
+        if (cfg.skipJunk && isJunk(text)) { setStatus(`🧹 ${stateLabel(st)} · pulei (sem sentido)`); await humanWait(500, st, id); return; }
         setStatus(`🎧 ${text.length > 70 ? text.slice(0, 67) + '…' : text}`);
         await speak(text, id);
         if (alive(id)) await sleep(250);
@@ -1412,6 +1467,18 @@
         if (on) { if (a._ducked) return; a._ducked = true; a._preVol = a.volume; a.volume = Math.min(a.volume, 0.12); }
         else if (a._ducked) { a._ducked = false; a.volume = a._preVol != null ? a._preVol : musVol(); a._preVol = null; }
     }
+    // fade do timer de sono: f vai de 1 (volume normal) até 0
+    function musFade(f) {
+        f = Math.min(1, Math.max(0, f));
+        if (YT.active) ytCmd('setVolume', [Math.round(ytPct() * f)]);
+        const a = MUS.audio;
+        if (a && a.src && !a._ducked) a.volume = Math.min(1, Math.max(0, musVol() * f));
+    }
+    function musPauseAll() {
+        if (YT.active) { ytCmd('pauseVideo'); YT.playing = false; }
+        if (MUS.audio && !MUS.audio.paused) MUS.audio.pause();
+        musPaintBtn();
+    }
     async function musPlay(i) {
         const t = MUS.list[i];
         if (!t) return;
@@ -1515,10 +1582,279 @@
     }
 
     /* ================================================================== *
+     * 12a. NOVIDADES 4.5.0
+     * ================================================================== */
+
+    /* ---- Copiar / compartilhar (no app usa o menu "Compartilhar" do Android) ---- */
+    async function copyText(t) {
+        try { await navigator.clipboard.writeText(t); return true; } catch (e) { }
+        try {
+            const ta = document.createElement('textarea');
+            ta.value = t; ta.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0';
+            document.body.appendChild(ta); ta.focus(); ta.select();
+            const ok = document.execCommand('copy'); ta.remove();
+            return !!ok;
+        } catch (e) { return false; }
+    }
+    const nativeApp = () => !!(window.InkNative && typeof window.InkNative.share === 'function');
+    async function shareText(t) {
+        if (!t) return;
+        if (nativeApp()) { try { window.InkNative.share(t); return; } catch (e) { } }
+        if (navigator.share) { try { await navigator.share({ text: t }); return; } catch (e) { if (e && e.name === 'AbortError') return; } }
+        setStatus(await copyText(t) ? '📋 Copiado (compartilhar não disponível aqui)' : '⚠ Não consegui compartilhar');
+    }
+    const shareChapter = () => shareText(`${(document.title || 'Ink').trim()}\n${location.href}`);
+    const copyCantada = async () => {
+        if (!cfg.girl || !TICK.cur) return;
+        setStatus(await copyText(TICK.cur) ? '💘 Cantada copiada! (💬 envia pra alguém)' : '⚠ Não consegui copiar');
+    };
+
+    /* ---- Continuar de onde parou ---- */
+    let _lastRec = '';
+    function trackRead() {
+        if (document.hidden || !location.pathname.startsWith('/ler/')) return;
+        const label = stateLabel(readState());
+        const path = location.pathname + location.search;
+        const sig = path + '|' + label;
+        if (sig === _lastRec) return;
+        _lastRec = sig;
+        let wt = ''; try { wt = sessionStorage.getItem('ink_work_title') || ''; } catch (e) { }
+        cfg.last = { path, label: `${(wt || document.title || 'Ink').trim().slice(0, 40)} · ${label}`, t: Date.now() };
+        saveCfg(); contPaint();
+    }
+    function contPaint() {
+        const b = $('ink-cont'); if (!b) return;
+        const l = cfg.last;
+        const here = location.pathname + location.search;
+        if (!l || !l.path || l.path === here) { b.hidden = true; return; }
+        b.hidden = false;
+        const s = b.querySelector('span'); if (s) s.textContent = '↩ Continuar: ' + l.label;
+        b.title = l.label;
+    }
+    function goContinue() {
+        if (!cfg.last || !cfg.last.path) return;
+        try { sessionStorage.setItem('ink_resume', JSON.stringify(cfg.last)); } catch (e) { }
+        location.href = cfg.last.path;
+    }
+
+    /* ---- Por obra ---- */
+    const WORK = { path: '', key: '' };
+    function applyWork(k) {
+        if (!cfg.perWork || !k) return;
+        const w = cfg.works[k]; if (!w) return;
+        if (w.speed) cfg.speed = w.speed;
+        if (typeof w.manga === 'boolean' && w.manga !== cfg.manga) { cfg.manga = w.manga; try { OrderBar.sync(); } catch (e) { } }
+        saveCfg(); refreshPanel();
+    }
+    function workTick() {
+        if (location.pathname === WORK.path) return;
+        WORK.path = location.pathname;
+        if (!location.pathname.startsWith('/ler/') && RX_OBRA.test(location.pathname)) {
+            try { sessionStorage.setItem('ink_work', location.pathname); sessionStorage.setItem('ink_work_title', (document.title || '').trim().slice(0, 60)); } catch (e) { }
+        }
+        const k = workKey();
+        if (k !== WORK.key) { WORK.key = k; applyWork(k); }
+    }
+
+    /* ---- Timer de sono ---- */
+    const SLEEP_MIN = [0, 15, 30, 45, 60, 90];
+    const SLEEP_CAP = [0, 1, 2, 3, 5];
+    const SLEEP = { endAt: 0, caps: 0, fading: false, t0: 0 };
+    const FADE_MS = 20000;
+    function sleepArm() {
+        SLEEP.fading = false;
+        SLEEP.endAt = cfg.sleepMin ? Date.now() + cfg.sleepMin * 60000 : 0;
+        SLEEP.caps = cfg.sleepCaps | 0;
+    }
+    function sleepChapter() {
+        if (SLEEP.caps > 0 && --SLEEP.caps === 0 && !SLEEP.fading) { SLEEP.fading = true; SLEEP.t0 = Date.now(); }
+    }
+    function sleepTick() {
+        const st = $('ink-sl-st');
+        const now = Date.now();
+        if (!running) {
+            if (SLEEP.fading) { SLEEP.fading = false; musFade(1); }
+            if (st && st.textContent) st.textContent = '';
+            return;
+        }
+        if (!SLEEP.fading && SLEEP.endAt && now >= SLEEP.endAt) { SLEEP.fading = true; SLEEP.t0 = now; }
+        if (SLEEP.fading) {
+            const f = 1 - (now - SLEEP.t0) / FADE_MS;
+            if (st) st.textContent = '😴 Apagando o som…';
+            if (f <= 0) {
+                SLEEP.fading = false; SLEEP.endAt = 0; SLEEP.caps = 0;
+                stop('😴 Timer de sono: boa noite!');
+                musPauseAll(); musFade(1);
+            } else musFade(f);
+            return;
+        }
+        if (!st) return;
+        const parts = [];
+        if (SLEEP.endAt) { const s = Math.max(0, Math.round((SLEEP.endAt - now) / 1000)); parts.push(`${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`); }
+        if (SLEEP.caps > 0) parts.push(`${SLEEP.caps} cap.`);
+        st.textContent = parts.length ? '😴 Restam ' + parts.join(' · ') : '';
+    }
+    setInterval(sleepTick, 1000);
+    const stepIn = (arr, cur, d) => { const i = Math.max(0, arr.indexOf(cur)); return arr[Math.min(arr.length - 1, Math.max(0, i + d))]; };
+
+    /* ---- Filtro de olho automático por horário ---- */
+    const EYEA = { last: null };
+    function eyeWant() {
+        const h = new Date().getHours(), a = cfg.eyeFrom | 0, b = cfg.eyeTo | 0;
+        if (a === b) return false;
+        return a < b ? (h >= a && h < b) : (h >= a || h < b);
+    }
+    function eyeAutoTick() {
+        if (!cfg.eyeAuto) { EYEA.last = null; return; }
+        const w = eyeWant();
+        if (EYEA.last !== w) {
+            EYEA.last = w;
+            if (cfg.eye !== w) { cfg.eye = w; saveCfg(); applyEye(); refreshPanel(); }
+        }
+    }
+
+    /* ---- Tela de bloqueio (Media Session + áudio silencioso) ---- */
+    const KA = { a: null };
+    function silentUrl() {
+        const sr = 8000, n = sr, buf = new ArrayBuffer(44 + n), v = new DataView(buf);
+        const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+        w(0, 'RIFF'); v.setUint32(4, 36 + n, true); w(8, 'WAVE'); w(12, 'fmt ');
+        v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+        v.setUint32(24, sr, true); v.setUint32(28, sr, true); v.setUint16(32, 1, true); v.setUint16(34, 8, true);
+        w(36, 'data'); v.setUint32(40, n, true);
+        for (let i = 0; i < n; i++) v.setUint8(44 + i, 128);
+        return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+    }
+    function mediaMeta() {
+        const ms = navigator.mediaSession; if (!ms) return;
+        try {
+            ms.playbackState = running ? 'playing' : 'paused';
+            if (typeof MediaMetadata !== 'undefined') ms.metadata = new MediaMetadata({
+                title: (document.title || 'Ink').trim().slice(0, 80), artist: 'Ink Leitor', album: running ? stateLabel(readState()) : 'Parado'
+            });
+        } catch (e) { }
+    }
+    function kaStart() {
+        if (cfg.media === false) return;
+        try {
+            if (!KA.a) { KA.a = new Audio(silentUrl()); KA.a.loop = true; KA.a.volume = 0.02; }
+            KA.a.play().catch(() => { });
+        } catch (e) { }
+        mediaMeta();
+    }
+    function kaStop() {
+        try { if (KA.a) KA.a.pause(); } catch (e) { }
+        mediaMeta();
+    }
+    function mediaInit() {
+        const ms = navigator.mediaSession; if (!ms) return;
+        const set = (a, f) => { try { ms.setActionHandler(a, f); } catch (e) { } };
+        set('play', () => { if (!running) mainLoop(); });
+        set('pause', () => stop('Parado.'));
+        set('stop', () => stop('Parado.'));
+        set('nexttrack', () => musNext(1));
+        set('previoustrack', () => musNext(-1));
+        set('seekforward', () => setSpeed(1));
+        set('seekbackward', () => setSpeed(-1));
+    }
+
+    /* ---- Estatísticas e sequência ---- */
+    const STAT = { seen: new Set(), n: 0 };
+    const dkey = (d = new Date()) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+    const dayOf = k => cfg.stats.days[k] || (cfg.stats.days[k] = { pages: 0, secs: 0 });
+    const activeDay = x => !!x && ((x.secs || 0) >= 60 || (x.pages || 0) >= 3);
+    function fmtT(s) { s = s | 0; const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60); return h ? `${h}h${String(m).padStart(2, '0')}` : (m ? `${m} min` : `${s}s`); }
+    function streakN() {
+        const D = cfg.stats.days; const d = new Date();
+        if (!activeDay(D[dkey(d)])) d.setDate(d.getDate() - 1);
+        let n = 0;
+        while (activeDay(D[dkey(d)]) && n < 4000) { n++; d.setDate(d.getDate() - 1); }
+        return n;
+    }
+    function pruneStats() {
+        const ks = Object.keys(cfg.stats.days).sort();
+        if (ks.length > 120) ks.slice(0, ks.length - 120).forEach(k => delete cfg.stats.days[k]);
+    }
+    function statsPaint() {
+        const box = $('ink-stats'); if (!box) return;
+        const D = cfg.stats.days, t = D[dkey()] || { pages: 0, secs: 0 };
+        let tp = 0, ts = 0;
+        for (const k in D) { tp += D[k].pages || 0; ts += D[k].secs || 0; }
+        const sr = streakN();
+        box.textContent = '';
+        const add = s => { const d = document.createElement('div'); d.textContent = s; box.appendChild(d); };
+        add(`Hoje: ${t.pages} págs · ${fmtT(t.secs)}`);
+        add(`Total: ${tp} págs · ${fmtT(ts)}`);
+        add(`🔥 Sequência: ${sr} dia${sr === 1 ? '' : 's'}`);
+        const vals = [];
+        for (let i = 6; i >= 0; i--) { const d = new Date(); d.setDate(d.getDate() - i); vals.push((D[dkey(d)] || {}).secs || 0); }
+        const mx = Math.max(60, ...vals);
+        const bars = document.createElement('div'); bars.className = 'ia-bars';
+        vals.forEach(v => { const s = document.createElement('span'); s.style.height = Math.max(6, Math.round(v / mx * 100)) + '%'; s.title = fmtT(v); bars.appendChild(s); });
+        box.appendChild(bars);
+    }
+    function statTick() {
+        STAT.n++;
+        if (running && !paused()) {
+            const t = dayOf(dkey()); t.secs++;
+            const k = metaKey(readState());
+            if (k && !STAT.seen.has(k)) { STAT.seen.add(k); if (STAT.seen.size > 1) t.pages++; }
+            if (STAT.n % 5 === 0) mediaMeta();
+        }
+        if (STAT.n % 10 === 0) { pruneStats(); saveCfg(); }
+        if (cfg.tab === 'more' && STAT.n % 3 === 0) statsPaint();
+    }
+    setInterval(statTick, 1000);
+
+    /* ---- Backup das configurações ---- */
+    async function backupExport() {
+        const ta = $('ink-bk'); if (!ta) return;
+        const text = JSON.stringify({ app: 'ink-leitor', v: VERSION, cfg, music: MUS.list });
+        ta.value = text;
+        const ok = await copyText(text);
+        if (nativeApp()) { try { window.InkNative.share(text); } catch (e) { } }
+        else if (!ok) {
+            try {
+                const u = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+                const a = document.createElement('a'); a.href = u; a.download = 'ink-backup.json';
+                document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(u), 5000);
+            } catch (e) { }
+        }
+        setStatus(ok ? '💾 Backup copiado! Cole em um lugar seguro.' : '💾 Backup gerado na caixa acima.');
+    }
+    function backupImport() {
+        const ta = $('ink-bk'); if (!ta) return;
+        try {
+            const j = JSON.parse(ta.value.trim());
+            if (!j || j.app !== 'ink-leitor' || !j.cfg || typeof j.cfg !== 'object') throw new Error('não parece um backup do Ink');
+            Object.assign(cfg, DEFAULTS, j.cfg);
+            if (!cfg.works || typeof cfg.works !== 'object') cfg.works = {};
+            if (!cfg.stats || !cfg.stats.days) cfg.stats = { days: {} };
+            if (Array.isArray(j.music)) { try { localStorage.setItem('ink_music_list', JSON.stringify(j.music)); } catch (e) { } }
+            try { localStorage.setItem(CFG_KEY, JSON.stringify(cfg)); } catch (e) { }
+            setStatus('✓ Backup restaurado. Recarregando…');
+            setTimeout(() => location.reload(), 700);
+        } catch (e) { setStatus('⚠ Backup inválido: ' + (e.message || e)); }
+    }
+
+    /* ---- Tela cheia (app: esconde as barras do Android; navegador: Fullscreen API) ---- */
+    function applyFull() {
+        if (window.InkNative && typeof window.InkNative.fullscreen === 'function') {
+            try { window.InkNative.fullscreen(!!cfg.full); } catch (e) { }
+            return;
+        }
+        try {
+            if (cfg.full && !document.fullscreenElement) document.documentElement.requestFullscreen();
+            else if (!cfg.full && document.fullscreenElement) document.exitFullscreen();
+        } catch (e) { }
+    }
+    function toggleFull() { cfg.full = !cfg.full; saveCfg(); applyFull(); refreshPanel(); }
+
+    /* ================================================================== *
      * 12b. ATUALIZAÇÃO (compara com o content.js do GitHub)
-     *  Na extensão: o botão "Atualizar" pede ao bg.js para baixar o arquivo
-     *  novo; depois é só apertar F5. Sem extensão (Tampermonkey): baixa o
-     *  arquivo como fallback.
+     *  Extensão: o botão "Atualizar" pede ao bg.js para baixar o arquivo novo; depois F5.
+     *  App (APK): a ponte nativa baixa e recarrega a página sozinha.
+     *  Sem nenhum dos dois (Tampermonkey): baixa o arquivo como fallback.
      * ================================================================== */
     const UPD_URL = 'https://raw.githubusercontent.com/lucateli/ink-atualizacoes/main/content.js';
     const UPD = { text: '', ver: '' };
@@ -1537,7 +1873,7 @@
         const f = updWait.get(d.inkUpdRes);
         if (f) { updWait.delete(d.inkUpdRes); f(d); }
     });
-    function extSync() {   // pede ao bg.js (via base.js) para baixar e registrar o script novo
+    function extSync() {   // pede ao bg.js / app para baixar e registrar o script novo
         return new Promise((res, rej) => {
             const id = ++updSeq;
             const t = setTimeout(() => { updWait.delete(id); rej(new Error('sem extensão')); }, 12000);
@@ -1556,10 +1892,10 @@
         setStatus('⏳ Atualizando…');
         try {
             const r = await extSync();
-            if (r && r.ok) setStatus(`✓ Atualizado (${r.src}). Aperte F5 para aplicar.`);
+            if (r && r.ok) setStatus(r.src === 'app' ? '✓ Atualizado! Recarregando…' : `✓ Atualizado (${r.src}). Aperte F5 para aplicar.`);
             else setStatus('⚠ Ative "Permitir scripts de usuário" nos Detalhes da extensão e tente de novo.');
         } catch (e) {
-            if (UPD.text) downloadNew(); else setStatus('⚠ ' + (e.message || e));
+            if (UPD.text && !window.InkNative) downloadNew(); else setStatus('⚠ ' + (e.message || e));
         }
     }
 
@@ -1636,10 +1972,15 @@ box-shadow:0 8px 24px rgba(255,105,180,.28),inset 0 1px 0 rgba(255,255,255,.5);-
 #ink-panel .ia-go{width:100%;height:38px;border-radius:12px;font-weight:800;font-size:13px;color:#fff;background:linear-gradient(135deg,var(--ib-ac),#ffb6c1);box-shadow:0 4px 12px rgba(255,105,180,.4);margin-top:4px}
 #ink-panel.mob .ia-go{height:46px}
 #ink-panel.run .ia-go{background:var(--ib-card2);box-shadow:none;color:var(--ib-txt)}
+#ink-panel .ia-cont{display:flex;width:100%;min-height:32px;margin-top:4px;padding:4px 9px;border-radius:11px;background:var(--ib-card);border:1px solid var(--ib-ac);color:var(--ib-txt);font-size:11.5px;font-weight:700;justify-content:flex-start}
+#ink-panel .ia-cont[hidden]{display:none}
+#ink-panel .ia-cont span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#ink-panel.mob .ia-cont{min-height:40px}
 #ink-panel .ia-row{display:flex;gap:4px;margin-top:6px;align-items:stretch}
 #ink-panel .ia-row>.ia-chip{flex:1;min-height:34px;flex-direction:row;font-size:12px;white-space:nowrap}
 #ink-panel.mob .ia-row>.ia-chip{min-height:42px}
 #ink-panel .ia-val{min-width:38px;flex:none;text-align:center;font-weight:600;font-size:12px;align-self:center;color:var(--ib-txt)}
+#ink-panel .ia-val.wide{flex:1;min-width:0}
 #ink-panel .ia-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;margin-top:6px}
 #ink-panel .ia-chip{flex-direction:column;min-height:42px;padding:4px;border-radius:11px;background:var(--ib-card);border:1px solid var(--ib-line);color:var(--ib-txt);font-size:9.5px;font-weight:600;gap:2px;text-align:center}
 #ink-panel.mob .ia-chip{min-height:50px}
@@ -1647,12 +1988,16 @@ box-shadow:0 8px 24px rgba(255,105,180,.28),inset 0 1px 0 rgba(255,255,255,.5);-
 #ink-panel .ia-chip svg{width:15px;height:15px}
 #ink-panel .ia-inp{display:block;width:100%;margin-top:4px;padding:6px 8px;border-radius:9px;border:1px solid var(--ib-line);background:var(--ib-card);color:var(--ib-txt);font:inherit;font-size:11.5px;outline:none}
 #ink-panel .ia-inp::placeholder{color:var(--ib-dim)}
+#ink-panel textarea.ia-inp{min-height:54px;resize:none;font-size:10.5px}
 #ink-panel .ia-status{margin-top:6px;padding:5px 8px;border-radius:9px;background:var(--ib-card);color:var(--ib-txt);font-size:11.5px;line-height:1.3;word-break:break-word;min-height:20px;border:1px solid var(--ib-line)}
 #ink-panel.run .ia-status{border-color:var(--ib-ac)}
 #ink-panel .ia-sec{margin:8px 2px 4px;font-size:9.5px;letter-spacing:.9px;text-transform:uppercase;color:var(--ib-dim);font-weight:700}
 #ink-panel .ia-skins{display:flex;gap:4px}
 #ink-panel .ia-skin{flex:1;min-height:30px;border-radius:10px;background:var(--ib-card);border:1px solid var(--ib-line);color:var(--ib-txt);font-size:11.5px;font-weight:600}
 #ink-panel .ia-skin.on{background:var(--ib-ac);color:#fff;border-color:var(--ib-ac)}
+#ink-panel .ia-statbox{padding:6px 9px;border-radius:9px;background:var(--ib-card);border:1px solid var(--ib-line);font-size:11.5px;line-height:1.55}
+#ink-panel .ia-bars{display:flex;align-items:flex-end;gap:3px;height:30px;margin-top:5px}
+#ink-panel .ia-bars span{flex:1;background:var(--ib-ac);border-radius:3px 3px 0 0;opacity:.85}
 #ink-panel.min{width:auto;padding:6px;border-radius:14px;overflow:visible}
 #ink-panel.min .ia-title,#ink-panel.min #ink-upd-chk{display:none}
 #ink-panel #ink-upd{display:flex;align-items:center;gap:6px;margin-bottom:6px;padding:5px 8px;border-radius:10px;background:var(--ib-ac);color:#fff;font-size:11.5px;font-weight:700}
@@ -1715,11 +2060,13 @@ box-shadow:0 8px 24px rgba(255,105,180,.28),inset 0 1px 0 rgba(255,255,255,.5);-
 <div id="ink-body">
   <div id="ink-upd" hidden></div>
   <div class="ia-tabs">
-    <button class="ia-tab" data-tab="read">📖 Leitor</button>
+    <button class="ia-tab" data-tab="read">📖 Ler</button>
     <button class="ia-tab" data-tab="music">🎵 Música</button>
+    <button class="ia-tab" data-tab="more">⚙ Mais</button>
   </div>
 
   <div class="ia-pane" data-pane="read">
+    <button class="ia-cont" id="ink-cont" hidden><span></span></button>
     <button class="ia-go" id="ink-go">${ICO.play}<span>Ler sozinho</span></button>
     <div class="ia-row">
       <button class="ia-chip" id="ink-spd-">−</button>
@@ -1734,6 +2081,8 @@ box-shadow:0 8px 24px rgba(255,105,180,.28),inset 0 1px 0 rgba(255,255,255,.5);-
       <button class="ia-chip" id="ink-girl">👧<span>Menina</span></button>
       <button class="ia-chip" id="ink-perf">⚡<span>Leve</span></button>
       <button class="ia-chip" id="ink-anx">😬<span id="ink-anx-l">Ansiedade</span></button>
+      <button class="ia-chip" id="ink-full">⛶<span>Tela cheia</span></button>
+      <button class="ia-chip" id="ink-sharec">🔗<span>Compartilhar</span></button>
     </div>
     <div class="ia-sec">Voz do audiolivro</div>
     <select class="ia-inp" id="ink-vsel"></select>
@@ -1795,6 +2144,54 @@ box-shadow:0 8px 24px rgba(255,105,180,.28),inset 0 1px 0 rgba(255,255,255,.5);-
     <div class="ia-music-list" id="ink-music-list"></div>
   </div>
 
+  <div class="ia-pane hide" data-pane="more">
+    <div class="ia-sec">Estatísticas</div>
+    <div class="ia-statbox" id="ink-stats"></div>
+    <div class="ia-sec">Timer de sono</div>
+    <div class="ia-row">
+      <button class="ia-chip" id="ink-slm-">−</button>
+      <span class="ia-val wide" id="ink-slm">Desligado</span>
+      <button class="ia-chip" id="ink-slm+">+</button>
+    </div>
+    <div class="ia-row">
+      <button class="ia-chip" id="ink-slc-">−</button>
+      <span class="ia-val wide" id="ink-slc">Sem limite de cap.</span>
+      <button class="ia-chip" id="ink-slc+">+</button>
+    </div>
+    <div class="ia-mstat" id="ink-sl-st"></div>
+    <div class="ia-sec">Filtro de olho automático</div>
+    <div class="ia-row">
+      <button class="ia-chip" id="ink-eyeauto">🌙 Auto por horário</button>
+    </div>
+    <div class="ia-row">
+      <button class="ia-chip" id="ink-eyef-">−</button>
+      <span class="ia-val wide" id="ink-eyef">das 20h</span>
+      <button class="ia-chip" id="ink-eyef+">+</button>
+      <button class="ia-chip" id="ink-eyet-">−</button>
+      <span class="ia-val wide" id="ink-eyet">às 7h</span>
+      <button class="ia-chip" id="ink-eyet+">+</button>
+    </div>
+    <div class="ia-sec">Leitura</div>
+    <div class="ia-grid">
+      <button class="ia-chip" id="ink-perwork">📌<span>Por obra</span></button>
+      <button class="ia-chip" id="ink-skip">🧹<span>Pular lixo</span></button>
+      <button class="ia-chip" id="ink-media">🔒<span>Tela bloq.</span></button>
+    </div>
+    <div class="ia-sec">Idioma do OCR / voz</div>
+    <select class="ia-inp" id="ink-ocrl"></select>
+    <div class="ia-sec">Cantada</div>
+    <div class="ia-row">
+      <button class="ia-chip" id="ink-cp">📋 Copiar</button>
+      <button class="ia-chip" id="ink-sharep">💬 Enviar</button>
+    </div>
+    <div class="ia-sec">Backup</div>
+    <textarea class="ia-inp" id="ink-bk" spellcheck="false" placeholder="Exporte aqui, ou cole um backup e toque em Importar"></textarea>
+    <div class="ia-row">
+      <button class="ia-chip" id="ink-bk-ex">💾 Exportar</button>
+      <button class="ia-chip" id="ink-bk-im">📥 Importar</button>
+    </div>
+  </div>
+
   <div class="ia-status" id="ink-status"></div>
 </div>`;
         (document.body || document.documentElement).appendChild(u);
@@ -1805,15 +2202,18 @@ box-shadow:0 8px 24px rgba(255,105,180,.28),inset 0 1px 0 rgba(255,255,255,.5);-
         $('ink-upd-chk').onclick = () => checkUpdate(true);
         $('ink-min').onclick = () => { cfg.min = !cfg.min; saveCfg(); applyMin(); };
         $$('[data-tab]', u).forEach(b => b.onclick = () => { cfg.tab = b.dataset.tab; saveCfg(); applyTab(); });
+        $('ink-cont').onclick = goContinue;
         $('ink-spd-').onclick = () => setSpeed(-1);
         $('ink-spd+').onclick = () => setSpeed(1);
-        $('ink-manga').onclick = () => { cfg.manga = !cfg.manga; saveCfg(); OrderBar.sync(); refreshPanel(); };
+        $('ink-manga').onclick = () => { cfg.manga = !cfg.manga; saveCfg(); workSave(); OrderBar.sync(); refreshPanel(); };
         $('ink-auto').onclick = () => { cfg.auto = !cfg.auto; saveCfg(); refreshPanel(); };
         $('ink-voice').onclick = toggleVoice;
         $('ink-eye').onclick = toggleEye;
         $('ink-girl').onclick = () => { cfg.girl = !cfg.girl; saveCfg(); applyTheme(); };
         $('ink-perf').onclick = () => { cfg.perf = !isPerf(); saveCfg(); refreshPanel(); };
         $('ink-anx').onclick = () => { cfg.anx = ((cfg.anx | 0) + 1) % 3; saveCfg(); refreshPanel(); };
+        $('ink-full').onclick = toggleFull;
+        $('ink-sharec').onclick = shareChapter;
         $$('[data-skin]', u).forEach(b => b.onclick = () => { cfg.skin = b.dataset.skin; saveCfg(); applyTheme(); });
         $('ink-meta-btn').onclick = metaToggle;
         $('ink-meta-').onclick = () => { cfg.metaGoal = Math.max(1, cfg.metaGoal - 1); saveCfg(); metaPaint(); refreshPanel(); };
@@ -1854,30 +2254,61 @@ box-shadow:0 8px 24px rgba(255,105,180,.28),inset 0 1px 0 rgba(255,255,255,.5);-
         $('ink-mus-sync').onclick = musSync;
         $('ink-mus-shuf').onclick = () => { MUS.shuffle = !MUS.shuffle; $('ink-mus-shuf').classList.toggle('on', MUS.shuffle); };
 
+        // mais
+        $('ink-slm-').onclick = () => { cfg.sleepMin = stepIn(SLEEP_MIN, cfg.sleepMin | 0, -1); saveCfg(); refreshPanel(); if (running) sleepArm(); };
+        $('ink-slm+').onclick = () => { cfg.sleepMin = stepIn(SLEEP_MIN, cfg.sleepMin | 0, 1); saveCfg(); refreshPanel(); if (running) sleepArm(); };
+        $('ink-slc-').onclick = () => { cfg.sleepCaps = stepIn(SLEEP_CAP, cfg.sleepCaps | 0, -1); saveCfg(); refreshPanel(); if (running) sleepArm(); };
+        $('ink-slc+').onclick = () => { cfg.sleepCaps = stepIn(SLEEP_CAP, cfg.sleepCaps | 0, 1); saveCfg(); refreshPanel(); if (running) sleepArm(); };
+        $('ink-eyeauto').onclick = () => { cfg.eyeAuto = !cfg.eyeAuto; EYEA.last = null; saveCfg(); eyeAutoTick(); refreshPanel(); };
+        const hr = (k, d) => { cfg[k] = ((cfg[k] | 0) + d + 24) % 24; EYEA.last = null; saveCfg(); eyeAutoTick(); refreshPanel(); };
+        $('ink-eyef-').onclick = () => hr('eyeFrom', -1);
+        $('ink-eyef+').onclick = () => hr('eyeFrom', 1);
+        $('ink-eyet-').onclick = () => hr('eyeTo', -1);
+        $('ink-eyet+').onclick = () => hr('eyeTo', 1);
+        $('ink-perwork').onclick = () => { cfg.perWork = !cfg.perWork; saveCfg(); if (cfg.perWork) workSave(); refreshPanel(); };
+        $('ink-skip').onclick = () => { cfg.skipJunk = !cfg.skipJunk; saveCfg(); refreshPanel(); };
+        $('ink-media').onclick = () => { cfg.media = cfg.media === false; saveCfg(); if (cfg.media === false) kaStop(); else if (running) kaStart(); refreshPanel(); };
+        const sel = $('ink-ocrl');
+        OCR_LANGS.forEach(l => { const o = document.createElement('option'); o.value = l.id; o.textContent = l.nome; sel.appendChild(o); });
+        sel.onchange = e => {
+            cfg.ocrLang = e.target.value; cfg.vname = ''; saveCfg(); fillVoices(); refreshPanel();
+            if (cfg.voice) ocrWorker().catch(x => setStatus('⚠ OCR: ' + (x.message || x)));
+        };
+        $('ink-cp').onclick = copyCantada;
+        $('ink-sharep').onclick = () => shareText(TICK.cur || '');
+        $('ink-bk-ex').onclick = backupExport;
+        $('ink-bk-im').onclick = backupImport;
+
         // campos de texto: não deixa as teclas vazarem pros atalhos do site
         ['keydown', 'keyup', 'keypress'].forEach(t => u.addEventListener(t, e => {
             if (/^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)) e.stopPropagation();
         }));
 
-        // Drag
+        // Drag (e toque no título = copiar a cantada)
         const head = $('ink-head');
         let drag = null;
         const onDown = e => {
             if (e.target.closest('button')) return;
             const p = e.touches ? e.touches[0] : e;
             const r = u.getBoundingClientRect();
-            drag = { ox: p.clientX - r.left, oy: p.clientY - r.top };
+            drag = { ox: p.clientX - r.left, oy: p.clientY - r.top, sx: p.clientX, sy: p.clientY, moved: false, title: !!e.target.closest('#ink-title') };
             e.preventDefault();
         };
         const onMove = e => {
             if (!drag) return;
             const p = e.touches ? e.touches[0] : e;
+            if (!drag.moved) { if (Math.hypot(p.clientX - drag.sx, p.clientY - drag.sy) < 6) return; drag.moved = true; }
             const x = Math.max(0, Math.min(innerWidth - u.offsetWidth, p.clientX - drag.ox));
             const y = Math.max(0, Math.min(innerHeight - u.offsetHeight, p.clientY - drag.oy));
             u.style.left = x + 'px'; u.style.top = y + 'px'; u.style.bottom = 'auto'; u.style.right = 'auto';
             cfg.pos = { x, y };
         };
-        const onUp = () => { if (drag) { drag = null; saveCfg(); } };
+        const onUp = () => {
+            if (!drag) return;
+            const d = drag; drag = null;
+            if (d.moved) saveCfg();
+            else if (d.title) copyCantada();
+        };
         head.addEventListener('mousedown', onDown);
         head.addEventListener('touchstart', onDown, { passive: false });
         document.addEventListener('mousemove', onMove);
@@ -1889,16 +2320,18 @@ box-shadow:0 8px 24px rgba(255,105,180,.28),inset 0 1px 0 rgba(255,255,255,.5);-
         document.addEventListener('keydown', () => { lastUser = Date.now(); });
 
         fillVoices(); musPaintList(); musPaintBtn();
-        refreshPanel(); applyTheme(); applyTab(); applyMin(); applyEye(); metaPaint();
+        refreshPanel(); applyTheme(); applyTab(); applyMin(); applyEye(); metaPaint(); contPaint(); statsPaint();
     }
 
     function applyTab() {
         const u = $('ink-panel'); if (!u) return;
-        const t = cfg.tab === 'music' ? 'music' : 'read';
+        const t = cfg.tab === 'music' || cfg.tab === 'more' ? cfg.tab : 'read';
         $$('[data-tab]', u).forEach(b => b.classList.toggle('on', b.dataset.tab === t));
-        const r = u.querySelector('[data-pane="read"]'), m = u.querySelector('[data-pane="music"]');
+        const r = u.querySelector('[data-pane="read"]'), m = u.querySelector('[data-pane="music"]'), x = u.querySelector('[data-pane="more"]');
         if (r) r.classList.toggle('hide', t !== 'read');
+        if (x) x.classList.toggle('hide', t !== 'more');
         if (m) m.classList.toggle('ghost', t !== 'music'); // fica fora da tela (não some) p/ o YouTube continuar tocando
+        if (t === 'more') statsPaint();
         applyPos();
     }
     function applyMin() {
@@ -2164,7 +2597,7 @@ box-shadow:0 8px 24px rgba(255,105,180,.28),inset 0 1px 0 rgba(255,255,255,.5);-
         "Você é como uma Lamborghini, exótica e fascinante.",
         "Se eu tivesse que escolher entre ter uma Ferrari e passar um tempo com você, escolheria você. Porque a única coisa melhor do que uma Ferrari é uma companhia maravilhosa."
     ];
-    const TICK = { order: [], i: 0, on: false, t: 0 };
+    const TICK = { order: [], i: 0, on: false, t: 0, cur: '' };
     const tickNext = () => {
         if (TICK.i >= TICK.order.length) {
             TICK.order = CANTADAS.map((_, k) => k);
@@ -2186,6 +2619,7 @@ box-shadow:0 8px 24px rgba(255,105,180,.28),inset 0 1px 0 rgba(255,255,255,.5);-
         const show = () => {
             if (!TICK.on || !sp.isConnected) return;
             const s = tickNext();
+            TICK.cur = s;
             sp.textContent = s;
             sp.style.animation = 'none'; void sp.offsetWidth;
             if (reduce) { sp.style.paddingLeft = '0'; TICK.t = setTimeout(show, 6000); }
@@ -2234,21 +2668,21 @@ box-shadow:0 8px 24px rgba(255,105,180,.28),inset 0 1px 0 rgba(255,255,255,.5);-
     function toggleVoice() {
         cfg.voice = !cfg.voice; saveCfg(); refreshPanel();
         if (!cfg.voice) { cancelSpeech(); musDuck(false); return; }
-        if (!TTS || !ptVoices().length) setStatus('⚠ Nenhuma voz pt encontrada');
+        if (!TTS || !ptVoices().length) setStatus('⚠ Nenhuma voz encontrada para este idioma');
         else ocrWorker().then(() => { if (!running) setStatus('Audiolivro pronto'); }).catch(e => setStatus('⚠ OCR: ' + (e.message || e)));
     }
     function setSpeed(d) {
         let i = 0, best = 1e9;
         SPEEDS.forEach((v, k) => { const dd = Math.abs(v - cfg.speed); if (dd < best) { best = dd; i = k; } });
         cfg.speed = SPEEDS[Math.min(SPEEDS.length - 1, Math.max(0, i + d))];
-        saveCfg(); refreshPanel();
+        saveCfg(); workSave(); refreshPanel();
     }
     function fillVoices() {
         const sel = $('ink-vsel'); if (!sel) return;
         const list = ptVoices();
         const cur = currentVoice();
         sel.textContent = '';
-        if (!list.length) { const o = document.createElement('option'); o.textContent = 'Nenhuma voz pt-BR'; sel.appendChild(o); return; }
+        if (!list.length) { const o = document.createElement('option'); o.textContent = 'Nenhuma voz para este idioma'; sel.appendChild(o); return; }
         list.forEach(v => {
             const o = document.createElement('option');
             o.value = v.name; o.textContent = (isNatural(v) ? '★ ' : '') + v.name.replace(/^Microsoft\s+/, '');
@@ -2277,6 +2711,18 @@ box-shadow:0 8px 24px rgba(255,105,180,.28),inset 0 1px 0 rgba(255,255,255,.5);-
         const dk = $('ink-duck'); if (dk) dk.classList.toggle('on', cfg.duck !== false);
         const ys = $('ink-yt-show'); if (ys) ys.classList.toggle('on', cfg.ytShow !== false);
         const yb = $('ink-yt-box'); if (yb) yb.classList.toggle('off', cfg.ytShow === false);
+        // novidades 4.5.0
+        const fu = $('ink-full'); if (fu) fu.classList.toggle('on', !!cfg.full);
+        const sm = $('ink-slm'); if (sm) sm.textContent = cfg.sleepMin ? cfg.sleepMin + ' min' : 'Desligado';
+        const sc = $('ink-slc'); if (sc) sc.textContent = cfg.sleepCaps ? cfg.sleepCaps + (cfg.sleepCaps === 1 ? ' capítulo' : ' capítulos') : 'Sem limite de cap.';
+        const ea = $('ink-eyeauto'); if (ea) ea.classList.toggle('on', !!cfg.eyeAuto);
+        const ef = $('ink-eyef'); if (ef) ef.textContent = 'das ' + (cfg.eyeFrom | 0) + 'h';
+        const et = $('ink-eyet'); if (et) et.textContent = 'às ' + (cfg.eyeTo | 0) + 'h';
+        const pw = $('ink-perwork'); if (pw) pw.classList.toggle('on', !!cfg.perWork);
+        const sk = $('ink-skip'); if (sk) sk.classList.toggle('on', !!cfg.skipJunk);
+        const me = $('ink-media'); if (me) me.classList.toggle('on', cfg.media !== false);
+        const ol = $('ink-ocrl'); if (ol && ol.value !== curLang().id) ol.value = curLang().id;
+        contPaint();
         musPaintBtn();
     }
 
@@ -2289,10 +2735,20 @@ box-shadow:0 8px 24px rgba(255,105,180,.28),inset 0 1px 0 rgba(255,255,255,.5);-
         applyPos();
         BubbleSorter.start();
         OrderBar.build();
+        mediaInit();
+        if (window.InkNative && cfg.full) applyFull();
+        // voltou do botão "Continuar": avisa onde você tinha parado
+        try {
+            const rs = JSON.parse(sessionStorage.getItem('ink_resume') || 'null');
+            if (rs) { sessionStorage.removeItem('ink_resume'); setTimeout(() => setStatus('↩ Você parou em: ' + rs.label), 1800); }
+        } catch (e) { }
         setTimeout(() => checkUpdate(false), 4000);
         setInterval(() => checkUpdate(false), 6 * 3600 * 1000);
-        // o site é SPA: reavalia a barra de capítulos e o filtro de olho ao navegar
-        setInterval(() => { try { OrderBar.build(); applyEye(); } catch (e) { } }, 1500);
+        // o site é SPA: reavalia a barra de capítulos, o filtro de olho, a obra atual e o "continuar" ao navegar
+        setInterval(() => { try { workTick(); OrderBar.build(); eyeAutoTick(); applyEye(); contPaint(); } catch (e) { } }, 1500);
+        // grava onde você está lendo (mais espaçado no modo leve)
+        setInterval(() => { try { trackRead(); } catch (e) { } }, isPerf() ? 4000 : 2500);
+        eyeAutoTick();
     }
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
     else init();
