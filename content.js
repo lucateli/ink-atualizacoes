@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ink Leitor
 // @namespace    ink-leitor
-// @version      4.13.6
+// @version      4.13.7
 // @description  Leitor automático, OCR, TTS, música, ordenador de capítulos, auto-arrumar bolhas, timer de sono, estatísticas e mais
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
@@ -78,7 +78,7 @@
         const iv = setInterval(tick, 1500);
     })();
 
-    const VERSION = '4.13.6';
+    const VERSION = '4.13.7';
     const IS_MOBILE = (() => {
         try { return matchMedia('(pointer:coarse)').matches || innerWidth < 700; }
         catch (e) { return innerWidth < 700; }
@@ -1017,9 +1017,23 @@
         }
 
         // anda UMA página (dir = 1 próxima, -1 anterior), com o zoom desligado
-        let learned = {};
+        // 4.13.7: tenta trocar de página com o zoom ligado (sem ligar/desligar a cada página).
+        // Se o site não trocar assim, aprende (zoomBad) e volta a desligar o zoom antes de trocar.
+        let learned = {}, zoomBad = false;
         async function step(dir) {
-            await setZoom(false);
+            if (zoomBad || !zoomIsOn()) {
+                await setZoom(false);
+                return stepRun(dir, 1200);
+            }
+            try { return await stepRun(dir, 500); }
+            catch (e) {
+                if (e === STOP) throw e;
+                zoomBad = true;
+                await setZoom(false);
+                return stepRun(dir, 1200);
+            }
+        }
+        async function stepRun(dir, ms) {
             const from = await waitFor(counter, 4000);
             if (!from) throw new Error('não li o número da página');
             const fwd = cfg.manga ? MANGA : WEST, bwd = cfg.manga ? WEST : MANGA;
@@ -1028,7 +1042,7 @@
             for (const name of list) {
                 check();
                 try { if (!METHODS[name]()) continue; } catch (e) { continue; }
-                const now = await waitFor(() => { const c = counter(); return c && c.p !== from.p ? c : null; }, 1200);
+                const now = await waitFor(() => { const c = counter(); return c && c.p !== from.p ? c : null; }, ms);
                 if (!now) continue;
                 if (now.p === from.p + dir) { learned[dir] = name; return; }
                 throw new Error(`a página pulou de ${from.p} para ${now.p}`);
@@ -1126,7 +1140,7 @@
             confirmUntil = 0;
             if (!from) cfg.prep = null;
             if (running) stop('Leitura parada para preparar o capítulo');
-            on = true; learned = {}; ctrEl = null;
+            on = true; learned = {}; zoomBad = false; ctrEl = null;
             stText = ''; setText($('ink-prep-st'), '');
             paint();
             const path = location.pathname;
@@ -2685,6 +2699,9 @@
      * ================================================================== */
     /*CL_START*/
     const CHANGELOG = [
+        { "v": "4.13.7", "d": "2026-11-27", "t": [
+            "Preparar capítulo tenta trocar de página sem desligar e ligar o Bubble Zoom a cada página (mais rápido); se o site não aceitar, volta sozinho ao jeito anterior"
+        ] },
         { "v": "4.13.6", "d": "2026-11-27", "t": [
             "Preparar capítulo e Auto Mangá/HQ no limite: arraste em 2 passos quase sem pausa e sem esperas fixas ao trocar de página e ao salvar",
             "Páginas sem balões esperam até 1 s (antes 1,5 s)"
