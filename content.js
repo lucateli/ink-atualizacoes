@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ink Leitor
 // @namespace    ink-leitor
-// @version      4.13.8
+// @version      4.13.9
 // @description  Leitor automático, OCR, TTS, música, ordenador de capítulos, auto-arrumar bolhas, timer de sono, estatísticas e mais
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
@@ -78,7 +78,7 @@
         const iv = setInterval(tick, 1500);
     })();
 
-    const VERSION = '4.13.8';
+    const VERSION = '4.13.9';
     const IS_MOBILE = (() => {
         try { return matchMedia('(pointer:coarse)').matches || innerWidth < 700; }
         catch (e) { return innerWidth < 700; }
@@ -806,10 +806,29 @@
             Element.prototype.setPointerCapture = function (id) { try { return oSet.call(this, id); } catch (e) { } };
             Element.prototype.releasePointerCapture = function (id) { try { return oRel.call(this, id); } catch (e) { } };
             try {
+                // 4.13.9: menos arrastes. Deixa parada a maior sequência que já está na ordem certa
+                // e só move as outras (antes: até 1 arraste por posição, mesmo sem precisar)
+                const seq = curOrder().map(e => sorted.indexOf(e)), n = seq.length;
+                const len = new Array(n).fill(1), prev = new Array(n).fill(-1);
+                for (let a = 0; a < n; a++) for (let b = 0; b < a; b++) if (seq[b] < seq[a] && len[b] + 1 > len[a]) { len[a] = len[b] + 1; prev[a] = b; }
+                let end = 0; for (let a = 1; a < n; a++) if (len[a] > len[end]) end = a;
+                const stay = new Set();
+                for (let a = end; a >= 0; a = prev[a]) stay.add(seq[a]);
+                const todo = sorted.map((_, k) => k).filter(k => !stay.has(k));
+                for (let c = 0; c < todo.length; c++) {
+                    const k = todo[c], el = sorted[k];
+                    if (stopAsked) return false;
+                    const ord = curOrder(), from = ord.indexOf(el);
+                    let want = 0;
+                    if (k > 0) { const pi = ord.indexOf(sorted[k - 1]); want = from < pi ? pi : pi + 1; }
+                    if (onStep) onStep(c + 1, todo.length);
+                    if (!await place(el, want)) break;
+                }
+                if (curOrder().every((e, i) => e === sorted[i])) return true;
+                // garantia: se algo saiu diferente, arruma posição por posição como antes
                 for (let i = 0; i < sorted.length; i++) {
                     const el = sorted[i];
                     if (stopAsked) return false;
-                    if (onStep && curOrder().indexOf(el) !== i) onStep(i + 1, sorted.length);
                     if (!await place(el, i)) return false;
                 }
                 return curOrder().every((e, i) => e === sorted[i]);
@@ -1145,7 +1164,7 @@
             await waitFor(() => {
                 const n = BubbleSorter.getTiles().length;
                 if (n !== last) { last = n; since = Date.now(); }
-                return n > 0 && Date.now() - since > 60;
+                return n > 0 && Date.now() - since > 40;
             }, 8000);
             const ok = await BubbleSorter.arrange(cfg.manga ? 'manga' : 'hq', m => say(`Pág ${page}: ${m}`));
             check();
@@ -2761,6 +2780,10 @@
      * ================================================================== */
     /*CL_START*/
     const CHANGELOG = [
+        { "v": "4.13.9", "d": "2026-11-27", "t": [
+            "Arrumar bolhas mais rápido: move só as bolhas que estão fora do lugar (a maior sequência já certa fica parada), com bem menos arrastes por página",
+            "Espera um pouco menos as bolhas carregarem ao abrir cada página"
+        ] },
         { "v": "4.13.8", "d": "2026-11-27", "t": [
             "A barra de páginas do site (ex.: 109/178) fica parada enquanto o Preparar capítulo está ligado; o preparo segue arrumando as páginas normalmente e a barra volta ao normal quando ele termina"
         ] },
