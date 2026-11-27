@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Ink Leitor
 // @namespace    ink-leitor
-// @version      4.13.18
-// @description  Leitor automático, OCR, TTS, música, ordenador de capítulos, auto-arrumar bolhas, timer de sono, estatísticas e mais
+// @version      4.16.0
+// @description  Ink Leitor: leitura automática, OCR/TTS, preparo inteligente, fila de capítulos, histórico, metas e backup
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
 // @run-at       document-idle
@@ -27,7 +27,7 @@
     'use strict';
     if (window.__ink) return;
     window.__ink = true;
-    const VERSION = '4.13.18';
+    const VERSION = '4.16.0';
 
     /* 4.13.10: programa de PC — "Atualizar" sem fechar o programa.
        O botão Atualizar guarda o arquivo novo no navegador do programa e recarrega a página;
@@ -144,11 +144,21 @@
         full: false,
         seenVer: '',                      // última versão cujas novidades você já viu
         skipIntro: true,                  // fecha sozinho avisos/novidades que o site abre ao entrar
+        // 4.16.0: preparo avançado, histórico, marcadores, fila e metas
+        prepSimMode: false, prepMetrics: {}, prepReports: {}, prepSimReports: {}, prepUndo: {}, prepQueue: [], prepQueueAuto: false, prepQueueSim: false,
+        prepNotify: true, prepNotifications: false, prepAutoPace: true,
+        readHistory: {}, bookmarks: [], readLater: [], dailyGoal: 10,
     };
     const cfg = { ...DEFAULTS };
     try { Object.assign(cfg, JSON.parse(localStorage.getItem(CFG_KEY) || '{}')); } catch (e) { }
-    if (!cfg.works || typeof cfg.works !== 'object') cfg.works = {};
-    if (!cfg.stats || typeof cfg.stats !== 'object' || !cfg.stats.days) cfg.stats = { days: {} };
+    if (!cfg.works || typeof cfg.works !== 'object' || Array.isArray(cfg.works)) cfg.works = {};
+    if (!cfg.stats || typeof cfg.stats !== 'object' || Array.isArray(cfg.stats) || !cfg.stats.days || typeof cfg.stats.days !== 'object') cfg.stats = { days: {} };
+    if (!cfg.prepDone || typeof cfg.prepDone !== 'object' || Array.isArray(cfg.prepDone)) cfg.prepDone = {};
+    if (!Array.isArray(cfg.favs)) cfg.favs = [];
+    cfg.prepQueueSim = !!cfg.prepQueueSim;
+    ['prepMetrics','prepReports','prepSimReports','prepUndo','readHistory'].forEach(k => { if (!cfg[k] || typeof cfg[k] !== 'object' || Array.isArray(cfg[k])) cfg[k] = {}; });
+    ['prepQueue','bookmarks','readLater'].forEach(k => { if (!Array.isArray(cfg[k])) cfg[k] = []; });
+    cfg.dailyGoal = Math.max(1, Math.min(300, Number(cfg.dailyGoal) || 10));
 
     let _saveT;
     const saveCfg = () => { clearTimeout(_saveT); _saveT = setTimeout(() => { try { localStorage.setItem(CFG_KEY, JSON.stringify(cfg)); } catch (e) { } }, 150); };
@@ -939,6 +949,56 @@
             }
         }
 
+        // Snapshot estável das miniaturas para permitir voltar ao arranjo anterior da página.
+        function tileKey(tile) {
+            const th = tile.querySelector('.bz-order__thumb') || tile.firstElementChild;
+            if (!th) return '';
+            let cs = {}; try { cs = getComputedStyle(th); } catch (e) { }
+            const img = th.style.backgroundImage || cs.backgroundImage || '';
+            const pos = th.style.backgroundPosition || cs.backgroundPosition || '';
+            const size = th.style.backgroundSize || cs.backgroundSize || '';
+            const src = th.querySelector('img')?.getAttribute('src') || '';
+            if ((img && img !== 'none') || src) return [img, pos, size, src].join('|');
+            return [tile.getAttribute('aria-label') || '', txt(tile).slice(0, 80)].join('|');
+        }
+        function snapshot() { return curOrder().map(tileKey); }
+        function inspect(mode) {
+            const tiles = getTiles();
+            if (tiles.length < 2) return { total: tiles.length, moves: 0, order: curOrder(), current: curOrder() };
+            let pts = [], fail = false;
+            for (const el of tiles) { const bx = boxOf(el); if (!bx) { fail = true; break; } pts.push({ el, bx }); }
+            if (fail) {
+                const cur = curOrder(), ov = overlayBoxes(cur.length);
+                if (!ov) return null;
+                pts = cur.map((el, i) => ({ el, bx: ov[i + 1] }));
+            }
+            const current = curOrder(), order = orderBoxes(pts, mode);
+            const seq = current.map(el => order.indexOf(el));
+            const dp = new Array(seq.length).fill(1);
+            let lis = 0;
+            for (let i = 0; i < seq.length; i++) {
+                for (let j = 0; j < i; j++) if (seq[j] < seq[i]) dp[i] = Math.max(dp[i], dp[j] + 1);
+                lis = Math.max(lis, dp[i]);
+            }
+            return { total: tiles.length, moves: Math.max(0, tiles.length - lis), order, current };
+        }
+        async function restoreSnapshot(keys, say) {
+            const tiles = getTiles();
+            if (!Array.isArray(keys) || keys.length !== tiles.length) return false;
+            const buckets = new Map();
+            for (const tile of tiles) { const k = tileKey(tile); if (!buckets.has(k)) buckets.set(k, []); buckets.get(k).push(tile); }
+            const desired = [];
+            for (const k of keys) {
+                const a = buckets.get(k);
+                if (!a || !a.length) return false;
+                desired.push(a.shift());
+            }
+            if (working) return false;
+            working = true; stopAsked = false; clearPreview();
+            try { return await reorder(desired, (n, t) => say && say(`↶ Restaurando ${n}/${t}`)); }
+            finally { working = false; }
+        }
+
         async function run(mode, say, preview) {
             const tiles = getTiles();
             if (tiles.length < 2) { say(tiles.length ? '⚠ Só 1 balão, nada pra ordenar' : '⚠ Não achei os balões nesta tela'); return tiles.length === 1; }
@@ -1071,7 +1131,7 @@
         }
         const halt = () => { if (working) stopAsked = true; };
 
-        return { start, findModal, getTiles, arrange, halt, get isOpen() { return isOpen; } };
+        return { start, findModal, getTiles, arrange, inspect, snapshot, restoreSnapshot, halt, get isOpen() { return isOpen; } };
     })();
 
     /* ================================================================== *
@@ -1083,10 +1143,11 @@
      *          ao trocar de página, ao carregar as bolhas e ao fechar a tela de arrumar
      * ================================================================== */
     const Prep = (() => {
-        let on = false, stText = '';
+        let on = false, resumingRead = false, stText = '', progressTimer = 0, runStarted = 0, activePage = 0, lastSummary = null;
+        let runtime = { total: 0, done: 0, times: [], simulated: false };
         const RX = /^(?:(\d+)\s*\/\s*(\d+)\s*[·•|-]\s*)?(\d+)\s*\/\s*(\d+)$/;
         const STOP = new Error('parado'), TINTA = new Error('tintas');
-        const check = () => { if (!on) throw STOP; };
+        const check = () => { if (!on && !resumingRead) throw STOP; };
         const visible = e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
         const mine = e => e.closest('#ink-panel,#ink-news,#ink-auto-row,[data-ink-freeze]');
 
@@ -1292,7 +1353,7 @@
         }
 
         // devolve 'ok', 'vazia' (sem balões) ou 'falhou'
-        async function doPage(page, say) {
+        async function doPage(page, say, options = {}) {
             await setZoom(true);
             const c = await waitFor(() => { const x = counter(); return x && x.p === page && x.b != null ? x : null; }, 1000);
             if (!c) return 'vazia';
@@ -1300,18 +1361,40 @@
             if (!gear) throw new Error('não achei a engrenagem das bolhas');
             gear.click();
             if (!await waitFor(() => BubbleSorter.findModal(), 5000)) throw new Error('a engrenagem não abriu Arrumar as bolhas');
-            // espera as bolhas terminarem de carregar (mesma quantidade por um tempinho)
             let last = -1, since = 0;
             await waitFor(() => {
                 const n = BubbleSorter.getTiles().length;
                 if (n !== last) { last = n; since = Date.now(); }
                 return n > 0 && Date.now() - since > 16;
             }, 8000);
+            const before = BubbleSorter.snapshot();
+            if (options.simulate) {
+                const info = BubbleSorter.inspect(cfg.manga ? 'manga' : 'hq');
+                await closeModal(/^cancelar$/i);
+                if (!info) throw new Error('não consegui calcular a ordem para simular esta página');
+                return { result: 'simulado', moves: info.moves, total: info.total, before };
+            }
             const ok = await BubbleSorter.arrange(cfg.manga ? 'manga' : 'hq', m => say(`Pág ${page}: ${m}`));
             check();
-            if (!ok) { await closeModal(/^cancelar$/i); return 'falhou'; }
+            if (!ok) { await closeModal(/^cancelar$/i); return { result: 'falhou', before }; }
             await closeModal(/^salvar$/i);
-            return 'ok';
+            return { result: 'ok', before };
+        }
+
+        async function restorePage(page, keys, say) {
+            await setZoom(true);
+            const c = await waitFor(() => { const x = counter(); return x && x.p === page && x.b != null ? x : null; }, 1200);
+            if (!c) return false;
+            const gear = await waitFor(gearBtn, 3000);
+            if (!gear) throw new Error('não achei a engrenagem para voltar a página ' + page);
+            gear.click();
+            if (!await waitFor(() => BubbleSorter.findModal(), 5000)) throw new Error('não abriu o ordenador na página ' + page);
+            let last = -1, since = 0;
+            await waitFor(() => { const n = BubbleSorter.getTiles().length; if (n !== last) { last = n; since = Date.now(); } return n > 0 && Date.now() - since > 20; }, 8000);
+            const ok = await BubbleSorter.restoreSnapshot(keys, m => say(`Página ${page}: ${m}`));
+            check();
+            await closeModal(ok ? /^salvar$/i : /^cancelar$/i);
+            return ok;
         }
 
         // progresso salvo deste capítulo (continua valendo mesmo recarregando a página)
@@ -1324,6 +1407,7 @@
             setText(b, label);
             // a caixa de progresso tem altura fixa; só aparece durante o preparo ou com o resumo do último
             if (st) { const show = on || !!stText; if (st.hidden !== !show) st.hidden = !show; }
+            const pw = $('ink-prep-progress-wrap'); if (pw) pw.hidden = !on && !stText;
             if (!r) return;
             const row = r.parentElement;
             if (on) {
@@ -1337,6 +1421,66 @@
             const go = s.next > s.total ? '▶ Terminar: voltar à página 1' : `▶ Continuar da página ${s.next} de ${s.total}`;
             setText(r, go);
         }
+        function progressPaint() {
+            const pct = runtime.total ? Math.min(100, Math.round(runtime.done / runtime.total * 100)) : 0;
+            const bar = $('ink-prep-progress'), label = $('ink-prep-progress-label'), eta = $('ink-prep-eta');
+            if (bar) bar.style.width = pct + '%';
+            if (label) setText(label, `${runtime.done}/${runtime.total || '—'} páginas · ${pct}%${runtime.simulated ? ' · simulação' : ''}`);
+            if (eta) {
+                if (!on) { setText(eta, ''); return; }
+                const avg = runtime.times.length ? runtime.times.reduce((a,b)=>a+b,0) / runtime.times.length : 0;
+                const left = Math.max(0, runtime.total - runtime.done);
+                const sec = avg ? Math.round(avg * left / 1000) : 0;
+                const stored = cfg.prepMetrics && cfg.prepMetrics[location.pathname];
+                const base = avg || (stored && stored.avgMs) || 0;
+                const remain = base ? fmtT(Math.round(base * left / 1000)) : 'calculando…';
+                setText(eta, on ? `Restante estimado: ${remain} · média ${base ? fmtT(Math.round(base/1000)) + '/pág.' : '—'}` : '');
+            }
+        }
+        function reportText() {
+            const local = lastSummary && lastSummary.path === location.pathname ? lastSummary : null;
+            const persisted = [cfg.prepReports && cfg.prepReports[location.pathname], cfg.prepSimReports && cfg.prepSimReports[location.pathname]].filter(Boolean).sort((a,b)=>(b.endedAt||0)-(a.endedAt||0))[0];
+            const r = local || persisted;
+            const recentErrors = ERRS.slice(-12).map(e => `${new Date(e.t || Date.now()).toLocaleString()} [${e.onde || 'script'}] ${e.msg || ''}`).join('\n') || 'nenhum';
+            if (!r) return [`Ink Leitor ${VERSION} — sem relatório de preparo nesta obra.`, `Erros recentes do script (até 12):\n${recentErrors}`].join('\n\n');
+            return [
+                `Ink Leitor ${VERSION} — relatório de preparo`,
+                `Obra: ${r.title || document.title || location.pathname}`,
+                `Caminho: ${r.path || location.pathname}`,
+                `Resultado: ${r.status || 'desconhecido'}`,
+                `Páginas: ${r.total || 0} · salvas: ${(r.saved || []).length} · vazias: ${(r.empty || []).length} · falhas: ${(r.failed || []).length}`,
+                `Simulação: ${r.simulated ? 'sim' : 'não'} · bolhas que mudariam: ${r.moves || 0}`,
+                `Duração: ${r.durationMs ? fmtT(Math.round(r.durationMs/1000)) : '—'}`,
+                `Páginas que falharam: ${(r.failed || []).join(', ') || 'nenhuma'}`,
+                `Detalhes das falhas: ${Object.entries(r.pageErrors || {}).map(([k,v])=>`${k}: ${v}`).join(' | ') || '—'}`,
+                `Páginas sem bolhas: ${(r.empty || []).join(', ') || 'nenhuma'}`,
+                `Tempo por página (ms): ${Object.entries(r.pageTimes || {}).map(([k,v])=>`${k}=${Math.round(v)}`).join(', ') || '—'}`,
+                `Erros recentes do script (até 12):\n${recentErrors}`,
+                `Gerado: ${new Date(r.endedAt || Date.now()).toLocaleString()}`
+            ].join('\n');
+        }
+        async function copyReport() {
+            const t = reportText();
+            const ok = await copyText(t);
+            setStatus(ok ? '📋 Relatório copiado. Pode mandar aqui.' : '⚠ Não consegui copiar o relatório');
+        }
+        function notifyDone(message, failed) {
+            if (cfg.prepNotify !== false) {
+                try {
+                    const AC = window.AudioContext || window.webkitAudioContext;
+                    if (AC) {
+                        const ctx = new AC(), osc = ctx.createOscillator(), gain = ctx.createGain();
+                        osc.type = 'sine'; osc.frequency.value = failed ? 420 : 760; gain.gain.value = 0.07;
+                        osc.connect(gain); gain.connect(ctx.destination); osc.start();
+                        gain.gain.setTargetAtTime(0, ctx.currentTime + 0.12, 0.08);
+                        osc.stop(ctx.currentTime + 0.45); osc.onended = () => ctx.close();
+                    }
+                } catch (e) { }
+            }
+            if (cfg.prepNotifications && 'Notification' in window && Notification.permission === 'granted') {
+                try { new Notification('Ink Leitor — preparo', { body: message }); } catch (e) { }
+            }
+        }
         // página a página: vai no status do topo e na caixa de progresso
         function report(t) {
             setStatus(t);
@@ -1346,34 +1490,49 @@
         }
         // detalhe de cada posição das bolhas: só no status do topo (a caixa de progresso fica parada)
         const detail = t => setStatus(t);
-        async function start(resume) {
+        async function start(resume, options = {}) {
             if (on) { on = false; BubbleSorter.halt(); report('⏹ Parando…'); return; }
             if (!location.pathname.startsWith('/ler/')) { report('⚠ Abra um capítulo primeiro'); return; }
             if (BubbleSorter.findModal()) { report('⚠ Feche Arrumar as bolhas antes de começar'); return; }
             const from = resume ? pending() : null;
+            const simulation = !!options.simulate;
             if (resume && !from) { paint(); return; }
             // recomeçar com progresso salvo pede um segundo toque
-            if (!resume && pending()) {
+            if (!resume && !simulation && pending()) {
                 const wait = confirmUntil - Date.now();
                 if (wait <= 0) { confirmUntil = Date.now() + 4000; paint(); setTimeout(paint, 4100); return; }
                 if (wait > 3400) return;      // toque duplo sem querer não conta
             }
             confirmUntil = 0;
             // "Recomeçar do zero" (havia progresso salvo e o toque foi confirmado) refaz tudo: esquece as páginas já salvas
-            const restartZero = !resume && !!pending();
+            const restartZero = !resume && !simulation && !!pending();
             if (restartZero && cfg.prepDone && cfg.prepDone[location.pathname]) { const d = { ...cfg.prepDone }; delete d[location.pathname]; cfg.prepDone = d; saveCfg(); }
-            if (!from) cfg.prep = null;
+            if (!from && !simulation) cfg.prep = null;
             if (running) stop('Leitura parada para preparar o capítulo');
             on = true; learned = {}; zoomBad = false; ctrEl = null;
+            runStarted = Date.now(); activePage = 0;
+            runtime = { total: 0, done: 0, times: [], simulated: simulation };
             stText = ''; setText($('ink-prep-st'), '');
             paint();
             freezeBar();
             watchTinta();
+            startProgress();
             const path = location.pathname;
-            const saved = from ? [...from.saved] : [], empty = from ? [...from.empty] : [], failed = from ? [...from.failed] : [];
+            const saved = from ? [...(from.saved || [])] : [], empty = from ? [...(from.empty || [])] : [], failed = from ? [...(from.failed || [])] : [];
+            const undoPages = from && from.undoPages ? { ...from.undoPages } : {};
+            const pageTimes = from && from.pageTimes ? { ...from.pageTimes } : {};
+            const pageErrors = from && from.pageErrors ? { ...from.pageErrors } : {};
+            let simulatedMoves = 0;
             let manga = from ? from.manga : !!cfg.manga;
             let total = 0, page = 0, end = '', skip = new Set(), skipped = 0;
-            const keep = next => { cfg.prep = { path, next, total, manga, saved: [...saved], empty: [...empty], failed: [...failed] }; saveCfg(); };
+            const keep = next => {
+                if (simulation) return;
+                cfg.prep = { path, next, total, manga, saved: [...saved], empty: [...empty], failed: [...failed], undoPages: { ...undoPages }, pageTimes: { ...pageTimes }, pageErrors: { ...pageErrors } };
+                if (Object.keys(undoPages).length) cfg.prepUndo[path] = { total, manga, pages: { ...undoPages }, createdAt: Date.now(), partial: true };
+                const mk = Object.keys(cfg.prepMetrics); while (mk.length > 100) delete cfg.prepMetrics[mk.shift()];
+                const uk = Object.keys(cfg.prepUndo); while (uk.length > 40) delete cfg.prepUndo[uk.shift()];
+                saveCfg();
+            };
             try {
                 if (!await waitFor(counter, 5000)) throw new Error('não achei o contador de páginas (mostre os controles da leitura)');
                 await setZoom(false);
@@ -1383,41 +1542,94 @@
                 if (!from && found) manga = found === 'manga';
                 setMode(manga ? 'manga' : 'hq');
                 const first = from ? from.next : 1;
-                total = counter().pt;
+                total = counter().pt; runtime.total = total; runtime.done = from ? Math.max(0, first - 1) : 0; progressPaint();
                 if (from && from.total !== total) { cfg.prep = null; throw new Error('o total de páginas mudou; comece de novo'); }
                 // 4.13.15: páginas que já ficaram salvas num preparo anterior (ex.: só sobraram as que falharam) são puladas
                 const rec = cfg.prepDone && cfg.prepDone[path];
-                if (rec && rec.total === total && Array.isArray(rec.pages) && rec.pages.length < total) skip = new Set(rec.pages);
-                if (skip.size) report(`↷ ${skip.size} páginas já salvas serão puladas`);
+                if (!simulation && rec && rec.total === total && Array.isArray(rec.pages) && rec.pages.length < total) skip = new Set(rec.pages);
+                if (skip.size && !simulation) report(`↷ ${skip.size} páginas já salvas serão puladas`);
                 if (first <= total) await goTo(first, report);
                 keep(first);
                 for (page = first; page <= total; page++) {
                     if (location.pathname !== path) throw new Error('o capítulo mudou');
+                    activePage = page;
                     if (skip.has(page)) {
-                        skipped++;
+                        skipped++; runtime.done++; progressPaint();
                         report(`↷ Página ${page} de ${total} já salva · pulando`);
                         keep(page + 1);
                         if (page < total) await step(1);
                         continue;
                     }
-                    report(`🧰 Página ${page} de ${total} (${Math.round((page - 1) / total * 100)}%) · ${cfg.manga ? 'mangá' : 'HQ'}`);
-                    const r = await doPage(page, detail);
-                    (r === 'ok' ? saved : r === 'vazia' ? empty : failed).push(page);
-                    keep(page + 1);
-                    if (cfg.tintaStop && tintaOut) throw TINTA;
-                    if (page < total) await step(1);
+                    report(`${simulation ? '🧪 Simulando' : '🧰 Preparando'} página ${page} de ${total} (${Math.round((page - 1) / total * 100)}%) · ${manga ? 'mangá' : 'HQ'}`);
+                    const pageT0 = performance.now();
+                    let r = null, pageFailure = null;
+                    try {
+                        r = await doPage(page, detail, { simulate: simulation });
+                    } catch (e) {
+                        if (e === STOP || e === TINTA || location.pathname !== path) throw e;
+                        pageFailure = String(e && (e.message || e) || 'falha desconhecida').slice(0, 220);
+                        pageErrors[page] = pageFailure;
+                        if (!failed.includes(page)) failed.push(page);
+                        console.warn('[Ink] falha isolada na página', page, e);
+                        const modal = BubbleSorter.findModal();
+                        if (modal) {
+                            const cancel = modalBtn(modal, /^cancelar$/i);
+                            if (cancel) { try { cancel.click(); } catch (x) { } }
+                            await waitFor(() => !BubbleSorter.findModal(), 2200);
+                        }
+                    }
+                    const elapsed = performance.now() - pageT0; pageTimes[page] = elapsed; runtime.times.push(elapsed);
+                    runtime.done++; progressPaint();
+                    if (pageFailure) {
+                        if (!simulation) {
+                            const pm = cfg.prepMetrics[path] || { samples: [], avgMs: 0 };
+                            pm.samples = [...(pm.samples || []), elapsed].slice(-60);
+                            pm.avgMs = pm.samples.reduce((a,b)=>a+b,0) / Math.max(1, pm.samples.length);
+                            pm.lastAt = Date.now(); cfg.prepMetrics[path] = pm;
+                            keep(page + 1);
+                        }
+                        report(`⚠ Página ${page} falhou (${pageFailure}). Vou tentar a próxima.`);
+                        if (page < total) await step(1);
+                        continue;
+                    }
+                    const result = typeof r === 'string' ? r : r.result;
+                    if (simulation) {
+                        if (result === 'simulado') simulatedMoves += r.moves || 0;
+                        else if (result === 'vazia') empty.push(page);
+                        else if (result === 'falhou') failed.push(page);
+                    } else {
+                        [saved, empty, failed].forEach(a => { const i = a.indexOf(page); if (i >= 0) a.splice(i, 1); });
+                        if (result === 'ok') { saved.push(page); delete pageErrors[page]; if (r.before && r.before.length) undoPages[page] = r.before; }
+                        else if (result === 'vazia') { empty.push(page); delete pageErrors[page]; }
+                        else failed.push(page);
+                        const pm = cfg.prepMetrics[path] || { samples: [], avgMs: 0 };
+                        pm.samples = [...(pm.samples || []), elapsed].slice(-60);
+                        pm.avgMs = pm.samples.reduce((a,b)=>a+b,0) / Math.max(1, pm.samples.length);
+                        pm.lastAt = Date.now(); cfg.prepMetrics[path] = pm;
+                        keep(page + 1);
+                    }
+                    if (!simulation && cfg.tintaStop && tintaOut) throw TINTA;
+                    if (page < total) {
+                        if (!simulation && cfg.prepAutoPace) await sleep(Math.max(25, Math.min(180, Math.round(elapsed / 65))));
+                        await step(1);
+                    }
                 }
                 await setZoom(false);
                 await goTo(1, report);
                 await setZoom(true);
-                cfg.prep = null;
-                // guarda o que ficou salvo: se sobraram pendências, a próxima vez só refaz as que faltam
-                const d = { ...cfg.prepDone };
-                if (failed.length) d[path] = { total, pages: [...new Set([...skip, ...saved, ...empty])] }; else delete d[path];
-                const ks = Object.keys(d); while (ks.length > 40) delete d[ks.shift()];
-                cfg.prepDone = d; saveCfg();
-                end = failed.length ? '⚠ Preparo terminou com pendências' : '✓ Preparo terminou';
+                if (!simulation) {
+                    cfg.prep = null;
+                    const d = { ...cfg.prepDone };
+                    if (failed.length) d[path] = { total, pages: [...new Set([...skip, ...saved, ...empty])] }; else delete d[path];
+                    const ks = Object.keys(d); while (ks.length > 40) delete d[ks.shift()];
+                    cfg.prepDone = d;
+                    if (Object.keys(undoPages).length) cfg.prepUndo[path] = { total, manga, pages: undoPages, createdAt: Date.now() };
+                    saveCfg();
+                }
+                end = simulation ? '🧪 Simulação concluída (nenhuma bolha foi salva)' : (failed.length ? '⚠ Preparo terminou com pendências' : '✓ Preparo terminou');
             } catch (e) {
+                if (page > 0 && !simulation && e !== STOP && !saved.includes(page) && !empty.includes(page) && !failed.includes(page)) failed.push(page);
+                if (page > 0 && simulation && e !== STOP && !failed.includes(page)) failed.push(page);
                 end = e === TINTA ? `⏸ As Tintas de hoje acabaram; parei depois da página ${page}. Continue amanhã em ▶ Continuar`
                     : e === STOP ? `⏹ Parado na página ${page || '?'}` : `⚠ Parei${page ? ' na página ' + page : ''}: ${e.message || e}`;
                 if (e !== STOP) console.warn('[Ink] preparo:', e);
@@ -1425,16 +1637,200 @@
             // se parou com a tela das bolhas aberta, fecha sem salvar a página incompleta
             const m = cfg.prep && BubbleSorter.findModal();
             if (m) { const c = modalBtn(m, /^cancelar$/i); if (c) c.click(); }
-            on = false; unfreezeBar(); stopTinta(); paint();
-            report(`${end}. Salvas: ${saved.length}${total ? ' de ' + total : ''}`
+            on = false;
+            if (progressTimer) { clearInterval(progressTimer); progressTimer = 0; }
+            unfreezeBar(); stopTinta(); paint();
+            const durationMs = runStarted ? Date.now() - runStarted : 0;
+            const summary = {
+                path, title: (() => { try { return sessionStorage.getItem('ink_work_title') || document.title; } catch (e) { return document.title; } })(),
+                total, saved: [...saved], empty: [...empty], failed: [...failed], simulated: simulation,
+                moves: simulatedMoves, durationMs, pageTimes: { ...pageTimes }, pageErrors: { ...pageErrors }, startedAt: runStarted, endedAt: Date.now(), status: end, errorPage: failed.includes(page) ? page : null
+            };
+            lastSummary = summary;
+            if (simulation) cfg.prepSimReports[path] = summary; else cfg.prepReports[path] = summary;
+            const reportKeys = Object.keys(cfg.prepReports); while (reportKeys.length > 50) delete cfg.prepReports[reportKeys.shift()];
+            const simKeys = Object.keys(cfg.prepSimReports); while (simKeys.length > 30) delete cfg.prepSimReports[simKeys.shift()];
+            saveCfg();
+            progressPaint();
+            report(`${end}. ${simulation ? `Bolhas que mudariam: ${simulatedMoves}` : `Salvas: ${saved.length}`}${total ? ' de ' + total : ''}`
                 + (skipped ? ` · já salvas (puladas): ${skipped}` : '')
                 + (empty.length ? ` · sem balões detectados: ${empty.join(', ')}` : '')
                 + (failed.length ? ` · revisar: ${failed.join(', ')}` : ''));
+            notifyDone(end, failed.length > 0 || end.startsWith('⚠') || end.startsWith('⏹') || end.startsWith('⏸'));
+            if (cfg.prepQueueAuto && (simulation ? end.startsWith('🧪 Simulação concluída') : (end === '✓ Preparo terminou' || end === '⚠ Preparo terminou com pendências'))) PrepQueue.complete(path, failed.length > 0, simulation, simulatedMoves);
         }
-        // Esc também para o preparo
-        document.addEventListener('keydown', e => { if (on && e.key === 'Escape') { on = false; BubbleSorter.halt(); } }, true);
 
-        return { start, paint, get on() { return on; } };
+        async function retryFailed() {
+            const path = location.pathname, r = cfg.prepReports && cfg.prepReports[path];
+            if (!r || r.simulated || !r.failed || !r.failed.length) { setStatus('✓ Não há relatório real com páginas pendentes neste capítulo'); return; }
+            const done = new Set([...(r.saved || []), ...(r.empty || [])]);
+            cfg.prepDone[path] = { total: r.total, pages: [...done] };
+            cfg.prep = { path, next: 1, total: r.total, manga: !!cfg.manga, saved: [...(r.saved || [])], empty: [...(r.empty || [])], failed: [...r.failed], undoPages: { ...((cfg.prepUndo[path] && cfg.prepUndo[path].pages) || {}) }, pageTimes: { ...(r.pageTimes || {}) }, pageErrors: { ...(r.pageErrors || {}) } };
+            saveCfg(); paint();
+            await start(true, { retry: true });
+        }
+
+        async function rollback() {
+            const path = location.pathname, rec = cfg.prepUndo && cfg.prepUndo[path];
+            if (on) return;
+            if (!location.pathname.startsWith('/ler/') || !rec || !rec.pages || !Object.keys(rec.pages).length) { setStatus('⚠ Não há preparo anterior salvo para esta obra'); return; }
+            if (BubbleSorter.findModal()) { setStatus('⚠ Feche Arrumar as bolhas antes de voltar'); return; }
+            if (running) stop('Leitura parada para restaurar o preparo anterior');
+            on = true; runStarted = Date.now(); activePage = 0; runtime = { total: Object.keys(rec.pages).length, done: 0, times: [], simulated: false };
+            paint(); freezeBar(); startProgress();
+            let errors = [];
+            try {
+                if (!await waitFor(counter, 5000)) throw new Error('não achei o contador de páginas');
+                await setZoom(false);
+                setMode(rec.manga ? 'manga' : 'hq');
+                const pages = Object.keys(rec.pages).map(Number).sort((a,b)=>a-b);
+                for (const page of pages) {
+                    check(); activePage = page;
+                    await goTo(page, report);
+                    const t0 = performance.now();
+                    const ok = await restorePage(page, rec.pages[page], detail);
+                    runtime.times.push(performance.now()-t0); runtime.done++; progressPaint();
+                    if (!ok) errors.push(page);
+                    if (page < pages[pages.length-1]) await step(1);
+                }
+                await setZoom(false); await goTo(1, report); await setZoom(true);
+                if (!errors.length) { delete cfg.prepUndo[path]; saveCfg(); }
+            } catch (e) { errors.push(activePage || '?'); console.warn('[Ink] voltar preparo:', e); }
+            const stillOpen = BubbleSorter.findModal();
+            if (stillOpen) { const cancel = modalBtn(stillOpen, /^cancelar$/i); if (cancel) { try { cancel.click(); } catch (e) { } } }
+            on = false; if (progressTimer) { clearInterval(progressTimer); progressTimer = 0; }
+            unfreezeBar(); paint();
+            const msg = errors.length ? `⚠ Não foi possível restaurar as páginas: ${errors.join(', ')}` : '↶ Preparação anterior restaurada';
+            report(msg); notifyDone(msg, errors.length > 0);
+        }
+
+        async function resumeToPage(target) {
+            if (on || running || !location.pathname.startsWith('/ler/')) return false;
+            target = Math.max(1, Math.floor(Number(target) || 1));
+            resumingRead = true;
+            try {
+                if (!await waitFor(counter, 7000)) return false;
+                const total = counter().pt;
+                target = Math.min(target, total);
+                const current = counter().p;
+                if (current === target) return true;
+                setStatus(`↩ Retomando leitura: página ${current} → ${target}`);
+                const restoreZoom = zoomIsOn();
+                if (restoreZoom) await setZoom(false);
+                await goTo(target, t => setStatus(t));
+                if (restoreZoom) await setZoom(true);
+                setStatus(`✓ Leitura retomada na página ${target} de ${total}`);
+                return true;
+            } catch (e) {
+                if (e !== STOP) console.warn('[Ink] retomada de leitura:', e);
+                setStatus(`⚠ Não consegui retomar automaticamente: ${e.message || e}`);
+                return false;
+            } finally { resumingRead = false; }
+        }
+
+        function stop() { if (on) { on = false; BubbleSorter.halt(); report('⏹ Parando preparo…'); } }
+        function startProgress() {
+            if (progressTimer) clearInterval(progressTimer);
+            progressTimer = setInterval(progressPaint, 500);
+        }
+        // Atalhos também funcionam durante o preparo; Escape mantém compatibilidade.
+        document.addEventListener('keydown', e => {
+            if (e.key === 'Escape' && on) { stop(); return; }
+            if (!e.altKey || !e.shiftKey || e.ctrlKey || e.metaKey || e.repeat) return;
+            if (/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) || e.target.isContentEditable) return;
+            if (e.code === 'KeyK' && on) { e.preventDefault(); stop(); }
+            else if (e.code === 'KeyI' && !on) { e.preventDefault(); start(!!pending() && !(cfg.prepQueueAuto && cfg.prepQueueSim), { simulate: cfg.prepQueueAuto ? !!cfg.prepQueueSim : !!cfg.prepSimMode }); }
+            else if (e.code === 'KeyJ' && !on && pending()) { e.preventDefault(); start(true); }
+        }, true);
+
+        return { start, stop, retryFailed, rollback, resumeToPage, copyReport, reportText, paint, progressPaint, get on() { return on; } };
+    })();
+
+    /* ================================================================== *
+     *  6c. FILA DE CAPÍTULOS — prepara capítulos listados em sequência
+     * ================================================================== */
+    const PrepQueue = (() => {
+        let queueTimer = 0;
+        const norm = href => { try { const u = new URL(href, location.href); return u.origin === location.origin ? u.pathname : ''; } catch(e) { return ''; } };
+        function paint() {
+            const box = $('ink-queue-list'), st = $('ink-queue-status');
+            if (!box) return;
+            box.textContent = '';
+            const q = cfg.prepQueue || [];
+            if (st) setText(st, `${q.filter(x=>x.status!=='ok').length} pendentes · ${q.length} na fila${cfg.prepQueueAuto ? ' · execução automática ligada' : ''}${cfg.prepQueueAuto && cfg.prepQueueSim ? ' · simulação' : ''}`);
+            if (!q.length) { box.textContent = 'Fila vazia'; return; }
+            q.slice(0,80).forEach((item, i) => {
+                const row = document.createElement('div'); row.className='ia-row';
+                const go=document.createElement('button'), del=document.createElement('button');
+                go.className=del.className='ia-chip'; go.style.flex='4'; del.style.flex='0 0 42px';
+                go.textContent=`${i+1}. ${item.title || item.path}${item.status==='ok'?' ✓':item.status==='review'?' ⚠':item.simulatedAt?' 🧪':''}`;
+                go.onclick=()=>{ if (cfg.prep?.path===item.path && cfg.prep.next) { location.href=item.path; return; } location.href=item.path; };
+                del.textContent='✕'; del.onclick=()=>{ cfg.prepQueue.splice(i,1); saveCfg(); paint(); };
+                row.append(go,del); box.appendChild(row);
+            });
+        }
+        function add(path,title) {
+            const p=norm(path); if (!p || !p.startsWith('/ler/')) return false;
+            if ((cfg.prepQueue||[]).some(x=>x.path===p)) return false;
+            cfg.prepQueue.push({path:p,title:(title||p).trim().slice(0,100),status:'pending',addedAt:Date.now()});
+            return true;
+        }
+        function addCurrent() {
+            if (!location.pathname.startsWith('/ler/')) { setStatus('⚠ Abra um capítulo para adicionar à fila'); return; }
+            add(location.pathname+location.search, document.title); saveCfg(); paint(); setStatus('＋ Capítulo adicionado à fila');
+        }
+        function addListed() {
+            const links = $$('a[href*="/ler/"],a[href*="/capitulo/"],a[href*="/cap/"],a[href*="/chapter/"]');
+            let n=0;
+            for (const a of links) { const p=norm(a.href); if (p.startsWith('/ler/') && add(p,txt(a)||a.title||p)) n++; }
+            saveCfg(); paint(); setStatus(n ? `＋ ${n} capítulo(s) adicionado(s) à fila` : '⚠ Não achei capítulos listados nesta página');
+        }
+        function clear() { if (Prep.on) { setStatus('⚠ Pare o preparo antes de limpar a fila'); return; } if (queueTimer) { clearTimeout(queueTimer); queueTimer=0; } cfg.prepQueue=[]; cfg.prepQueueAuto=false; cfg.prepQueueSim=false; saveCfg(); paint(); }
+        function pause() { cfg.prepQueueAuto=false; if (queueTimer) { clearTimeout(queueTimer); queueTimer=0; } saveCfg(); paint(); setStatus('⏸ Fila pausada. Os capítulos e o progresso foram mantidos.'); }
+        function nextPending() { return (cfg.prepQueue||[]).find(x=>x.status==='pending' || x.status==='review'); }
+        function start() {
+            if (!cfg.prepQueue || !cfg.prepQueue.length) { setStatus('⚠ A fila está vazia'); return; }
+            const current=norm(location.pathname+location.search);
+            if (!cfg.prepQueue.some(x=>x.path===current)) addCurrent();
+            cfg.prepQueueAuto=true;
+            cfg.prepQueueSim=!!cfg.prepSimMode;
+            cfg.prepQueue.forEach(x=>{ if(x.status==='review') x.status='pending'; });
+            saveCfg(); paint();
+            const first=nextPending();
+            if (!first) { cfg.prepQueueAuto=false; saveCfg(); paint(); setStatus('✓ Todos os capítulos da fila já foram preparados'); return; }
+            if (norm(first.path)!==current) location.href=first.path;
+            else if (location.pathname.startsWith('/ler/')) Prep.start(!cfg.prepQueueSim && !!(cfg.prep && cfg.prep.path===location.pathname), { simulate: !!cfg.prepQueueSim });
+        }
+        function complete(path, hasFailed, simulated = false, moves = 0) {
+            const p=norm(path);
+            const item=(cfg.prepQueue||[]).find(x=>x.path===p);
+            if (item) {
+                if (simulated) { item.simulatedAt=Date.now(); item.simulatedMoves=moves|0; }
+                else { item.status=hasFailed?'review':'ok'; item.finishedAt=Date.now(); }
+            }
+            saveCfg(); paint();
+            if (!cfg.prepQueueAuto) return;
+            // Em simulação a fila avança, mas mantém cada capítulo como pendente para o preparo real.
+            const next=(cfg.prepQueue||[]).find(x=>x.status==='pending' && x.path!==p);
+            if (next) {
+                setStatus(`${simulated?'Simulação':'Fila'}: próximo capítulo — ${next.title}`);
+                if (queueTimer) clearTimeout(queueTimer);
+                queueTimer=setTimeout(()=>{ queueTimer=0; if(cfg.prepQueueAuto) location.href=next.path; }, 900);
+            } else {
+                cfg.prepQueueAuto=false; saveCfg(); paint();
+                const reviews=(cfg.prepQueue||[]).filter(x=>x.status==='review').length;
+                const msg=simulated ? '✓ Simulação da fila concluída. Nenhum capítulo foi salvo; a fila continua disponível para o preparo real.' : `✓ Fila concluída. ${reviews} capítulo(s) precisam de revisão.`;
+                setStatus(msg);
+            }
+        }
+        function resumeOnOpen() {
+            if (!cfg.prepQueueAuto || !location.pathname.startsWith('/ler/')) return;
+            const p=norm(location.pathname+location.search);
+            const item=(cfg.prepQueue||[]).find(x=>x.path===p);
+            if (!item || item.status==='ok') return;
+            setTimeout(()=>{ if(cfg.prepQueueAuto && !Prep.on && location.pathname.startsWith('/ler/')) Prep.start(!cfg.prepQueueSim && !!(cfg.prep && cfg.prep.path===location.pathname), { simulate: !!cfg.prepQueueSim }); }, 2200);
+        }
+        return { paint, addCurrent, addListed, clear, pause, start, complete, resumeOnOpen };
     })();
 
     /* ================================================================== *
@@ -2045,6 +2441,7 @@
     }
     async function speak(text, id) {
         if (!TTS) return;
+        try { if (TTS.paused) TTS.resume(); } catch (e) { }
         lastSpoken = text;
         for (const p of chunk(applyDict(text))) {
             if (!alive(id)) break;
@@ -2053,7 +2450,7 @@
                 const fin = () => { if (done) return; done = true; clearTimeout(wd); res(); };
                 const u = mkUtt(p);
                 u.onend = fin; u.onerror = fin;
-                wd = setTimeout(fin, 3500 + p.length * 140 / (cfg.vrate || 1));
+                wd = setTimeout(() => { try { if (TTS.speaking) TTS.cancel(); } catch (e) { } fin(); }, 5000 + p.length * 180 / (cfg.vrate || 1));
                 try { TTS.speak(u); } catch (e) { fin(); }
             });
         }
@@ -2112,7 +2509,7 @@
     async function captureRetry() {
         try { return await capture(); }
         catch (e) {
-            if (/MAX_CAPTURE|quota|per second/i.test(e.message || '')) { await sleep(700); return capture(); }
+            if (/MAX_CAPTURE|quota|per second|captura não respondeu/i.test(e.message || '')) { await sleep(700); return capture(); }
             throw e;
         }
     }
@@ -2529,16 +2926,24 @@
 
     /* ---- Continuar de onde parou ---- */
     let _lastRec = '';
+    const READ_RESUME = { busy: false };
     function trackRead() {
-        if (document.hidden || !location.pathname.startsWith('/ler/')) return;
-        const label = stateLabel(readState());
+        if (READ_RESUME.busy || document.hidden || !location.pathname.startsWith('/ler/')) return;
+        const st = readState();
+        const label = stateLabel(st);
         const path = location.pathname + location.search;
         const sig = path + '|' + label;
         if (sig === _lastRec) return;
         _lastRec = sig;
         let wt = ''; try { wt = sessionStorage.getItem('ink_work_title') || ''; } catch (e) { }
-        cfg.last = { path, label: `${(wt || document.title || 'Ink').trim().slice(0, 40)} · ${label}`, t: Date.now() };
-        saveCfg(); contPaint();
+        const item = { path, page: st.p != null ? st.p : st.pg, total: st.pt != null ? st.pt : st.pgt, label: `${(wt || document.title || 'Ink').trim().slice(0, 40)} · ${label}`, t: Date.now() };
+        cfg.last = item;
+        const wk = workKey() || location.pathname;
+        const hist = Array.isArray(cfg.readHistory[wk]) ? cfg.readHistory[wk] : [];
+        const historyChanged = !hist.length || hist[0].path !== path || hist[0].page !== item.page;
+        if (historyChanged) cfg.readHistory[wk] = [item, ...hist.filter(x => !(x.path === path && x.page === item.page))].slice(0, 40);
+        const hk = Object.keys(cfg.readHistory); while (hk.length > 80) delete cfg.readHistory[hk.shift()];
+        saveCfg(); contPaint(); if (historyChanged) historyPaint();
     }
     function contPaint() {
         Prep.paint();
@@ -2561,10 +2966,11 @@
     function favAdd() {
         if (!location.pathname.startsWith('/ler/')) { setStatus('⚠ Abra uma página de leitura para favoritar'); return; }
         const path = location.pathname + location.search;
-        const page = stateLabel(readState());
+        const st = readState();
+        const page = stateLabel(st);
         let wt = ''; try { wt = sessionStorage.getItem('ink_work_title') || ''; } catch (e) { }
         const inp = $('ink-fav-note'), note = inp ? inp.value.trim().slice(0, 80) : '';
-        const fav = { path, label: `${(wt || document.title || 'Ink').trim().slice(0, 40)} · ${page}`, note, t: Date.now() };
+        const fav = { path, page: st.p != null ? st.p : st.pg, total: st.pt != null ? st.pt : st.pgt, label: `${(wt || document.title || 'Ink').trim().slice(0, 40)} · ${page}`, note, t: Date.now() };
         cfg.favs = [fav, ...(cfg.favs || []).filter(f => !(f.path === path && f.label === fav.label))].slice(0, 50);
         if (inp) inp.value = '';
         saveCfg(); favPaint(); setStatus('⭐ Favorito salvo');
@@ -2582,6 +2988,57 @@
             del.onclick = () => { cfg.favs = cfg.favs.filter(x => x !== f); saveCfg(); favPaint(); };
             row.append(go, del); box.appendChild(row);
         });
+    }
+
+    /* ---- Marcadores, lista Ler depois e histórico por obra ---- */
+    function currentReadItem() {
+        const path = location.pathname + location.search;
+        let wt = ''; try { wt = sessionStorage.getItem('ink_work_title') || ''; } catch (e) { }
+        const st = readState();
+        return { path, page: st.p != null ? st.p : st.pg, total: st.pt != null ? st.pt : st.pgt, label: `${(wt || document.title || 'Ink').trim().slice(0, 60)} · ${stateLabel(st)}`, t: Date.now() };
+    }
+    function bookmarkAdd() {
+        if (!location.pathname.startsWith('/ler/')) { setStatus('⚠ Abra uma página de leitura para marcar'); return; }
+        const note = ($('ink-bookmark-note')?.value || '').trim().slice(0,100);
+        const item = { ...currentReadItem(), note };
+        cfg.bookmarks = [item, ...(cfg.bookmarks || []).filter(x => x.path !== item.path)].slice(0,200);
+        if ($('ink-bookmark-note')) $('ink-bookmark-note').value = '';
+        saveCfg(); bookmarkPaint(); setStatus('📍 Marcador salvo');
+    }
+    function readLaterAdd(path, label) {
+        const item = { path: path || location.pathname + location.search, label: (label || document.title || 'Capítulo').slice(0,100), t: Date.now() };
+        if (!item.path || !/^\//.test(item.path)) { setStatus('⚠ Não consegui identificar o capítulo'); return; }
+        cfg.readLater = [item, ...(cfg.readLater || []).filter(x => x.path !== item.path)].slice(0,200);
+        saveCfg(); laterPaint(); setStatus('📚 Adicionado à lista Ler depois');
+    }
+    function laterAddCurrent() {
+        if (!location.pathname.startsWith('/ler/')) { setStatus('⚠ Abra um capítulo ou use Adicionar capítulos listados'); return; }
+        readLaterAdd(location.pathname + location.search, document.title);
+    }
+    function paintLinks(box, items, empty, removeFn) {
+        if (!box) return; box.textContent = '';
+        if (!items.length) { box.textContent = empty; return; }
+        items.slice(0,30).forEach((it, idx) => {
+            const row = document.createElement('div'); row.className = 'ia-row';
+            const go = document.createElement('button'), del = document.createElement('button');
+            go.className = del.className = 'ia-chip'; go.style.flex='4'; del.style.flex='0 0 42px';
+            go.textContent = (it.label || it.path || 'Item') + (it.note ? ' — ' + it.note : '');
+            go.title = go.textContent;
+            go.onclick = () => { try { sessionStorage.setItem('ink_resume', JSON.stringify(it)); } catch(e){} location.href = it.path; };
+            del.textContent = '✕'; del.title = 'Remover'; del.onclick = () => { removeFn(it,idx); };
+            row.append(go,del); box.appendChild(row);
+        });
+    }
+    function bookmarkPaint() {
+        paintLinks($('ink-bookmark-list'), cfg.bookmarks || [], 'Nenhum marcador salvo', (it) => { cfg.bookmarks = cfg.bookmarks.filter(x=>x!==it); saveCfg(); bookmarkPaint(); });
+    }
+    function laterPaint() {
+        paintLinks($('ink-later-list'), cfg.readLater || [], 'Lista vazia', (it) => { cfg.readLater = cfg.readLater.filter(x=>x!==it); saveCfg(); laterPaint(); });
+    }
+    function historyPaint() {
+        const box = $('ink-history-list'); if (!box) return;
+        const wk = workKey() || location.pathname; const items = cfg.readHistory[wk] || [];
+        paintLinks(box, items, 'Sem histórico registrado para esta obra', (it) => { cfg.readHistory[wk] = items.filter(x=>x!==it); saveCfg(); historyPaint(); });
     }
 
     /* ---- Atalhos de teclado (Alt+Shift+tecla) ---- */
@@ -2771,7 +3228,7 @@
     }
 
     /* ---- Estatísticas e sequência ---- */
-    const STAT = { seen: new Set(), n: 0 };
+    const STAT = { seen: new Set(), n: 0, day: '' };
     const dkey = (d = new Date()) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
     const dayOf = k => cfg.stats.days[k] || (cfg.stats.days[k] = { pages: 0, secs: 0 });
     const activeDay = x => !!x && ((x.secs || 0) >= 60 || (x.pages || 0) >= 3);
@@ -2795,6 +3252,7 @@
         const sr = streakN();
         const lines = [
             `Hoje: ${t.pages} págs · ${fmtT(t.secs)}`,
+            `🎯 Meta diária: ${Math.min(t.pages, cfg.dailyGoal)}/${cfg.dailyGoal} páginas`,
             `Total: ${tp} págs · ${fmtT(ts)}`,
             `🔥 Sequência: ${sr} dia${sr === 1 ? '' : 's'}`
         ];
@@ -2813,6 +3271,8 @@
     }
     function statTick() {
         STAT.n++;
+        const today = dkey();
+        if (STAT.day !== today) { STAT.day = today; STAT.seen.clear(); }
         if (running && !paused()) {
             const t = dayOf(dkey()); t.secs++;
             const k = metaKey(readState());
@@ -2827,18 +3287,20 @@
     /* ---- Backup das configurações ---- */
     async function backupExport() {
         const ta = $('ink-bk'); if (!ta) return;
-        const text = JSON.stringify({ app: 'ink-leitor', v: VERSION, cfg, music: MUS.list });
+        let orderCfg = {}; try { orderCfg = JSON.parse(localStorage.getItem('ink_ord_cfg') || '{}'); } catch (e) { }
+        const text = JSON.stringify({ app: 'ink-leitor', schema: 3, v: VERSION, exportedAt: new Date().toISOString(), cfg, music: MUS.list, order: orderCfg });
         ta.value = text;
         const ok = await copyText(text);
+        let downloaded = false;
         if (nativeApp()) { try { window.InkNative.share(text); } catch (e) { } }
-        else if (!ok) {
+        else {
             try {
                 const u = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
-                const a = document.createElement('a'); a.href = u; a.download = 'ink-backup.json';
-                document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(u), 5000);
+                const a = document.createElement('a'); a.href = u; a.download = `ink-backup-${VERSION}.json`;
+                document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(u), 5000); downloaded = true;
             } catch (e) { }
         }
-        setStatus(ok ? '💾 Backup copiado! Cole em um lugar seguro.' : '💾 Backup gerado na caixa acima.');
+        setStatus([ok ? '📋 Backup copiado' : '', downloaded ? '💾 arquivo JSON baixado' : ''].filter(Boolean).join(' · ') || '💾 Backup gerado na caixa acima.');
     }
     function backupImport() {
         const ta = $('ink-bk'); if (!ta) return;
@@ -2846,9 +3308,16 @@
             const j = JSON.parse(ta.value.trim());
             if (!j || j.app !== 'ink-leitor' || !j.cfg || typeof j.cfg !== 'object') throw new Error('não parece um backup do Ink');
             Object.assign(cfg, DEFAULTS, j.cfg);
-            if (!cfg.works || typeof cfg.works !== 'object') cfg.works = {};
-            if (!cfg.stats || !cfg.stats.days) cfg.stats = { days: {} };
+            if (!cfg.works || typeof cfg.works !== 'object' || Array.isArray(cfg.works)) cfg.works = {};
+            if (!cfg.stats || typeof cfg.stats !== 'object' || Array.isArray(cfg.stats) || !cfg.stats.days || typeof cfg.stats.days !== 'object') cfg.stats = { days: {} };
+            if (!cfg.prepDone || typeof cfg.prepDone !== 'object' || Array.isArray(cfg.prepDone)) cfg.prepDone = {};
+            if (!Array.isArray(cfg.favs)) cfg.favs = [];
+            cfg.prepQueueSim = !!cfg.prepQueueSim;
+            ['prepMetrics','prepReports','prepSimReports','prepUndo','readHistory'].forEach(k => { if (!cfg[k] || typeof cfg[k] !== 'object' || Array.isArray(cfg[k])) cfg[k] = {}; });
+            ['prepQueue','bookmarks','readLater'].forEach(k => { if (!Array.isArray(cfg[k])) cfg[k] = []; });
+            cfg.dailyGoal = Math.max(1, Math.min(300, Number(cfg.dailyGoal) || 10));
             if (Array.isArray(j.music)) { try { localStorage.setItem('ink_music_list', JSON.stringify(j.music)); } catch (e) { } }
+            if (j.order && typeof j.order === 'object') { try { localStorage.setItem('ink_ord_cfg', JSON.stringify(j.order)); } catch (e) { } }
             try { localStorage.setItem(CFG_KEY, JSON.stringify(cfg)); } catch (e) { }
             setStatus('✓ Backup restaurado. Recarregando…');
             setTimeout(() => location.reload(), 700);
@@ -2977,6 +3446,24 @@
      * ================================================================== */
     /*CL_START*/
     const CHANGELOG = [
+        { "v": "4.16.0", "d": "2026-11-27", "t": [
+            "Mega atualização: simulação de preparo sem salvar, estimativa de bolhas que mudariam e tempo por página",
+            "Relatório copiável, lista de páginas com falha, refazer somente pendentes, barra de progresso e tempo restante",
+            "Atalhos Alt+Shift+I/K/J para iniciar, parar e continuar; aviso sonoro e notificações opcionais",
+            "Fila de capítulos da obra com preparo em sequência, retomada automática e ritmo adaptativo do arraste",
+            "Histórico por obra, retomada da leitura, marcadores, lista Ler depois e metas diárias com sequência",
+            "Backup completo em JSON: inclui fila, progresso, relatórios, histórico, marcadores, favoritos e configurações",
+            "Snapshots por página e botão Voltar para restaurar o estado anterior do preparo; temporizadores e observadores são limpos ao concluir"
+        ] },
+        { "v": "4.15.0", "d": "2026-11-27", "t": [
+            "Fila de capítulos e preparo em sequência para os capítulos listados na página da obra",
+            "Preparo da obra inteira com retomada após navegar ou reabrir o Ink e estimativa de ritmo baseada no histórico"
+        ] },
+        { "v": "4.14.0", "d": "2026-11-27", "t": [
+            "Preparo avançado: simulação, medição por página, relatório de falhas, refazer pendentes, progresso e ETA",
+            "Atalhos de preparo, histórico de ordem por página e restauração do preparo anterior",
+            "Limpeza dos timers/observers do preparo ao parar, terminar ou falhar"
+        ] },
         { "v": "4.13.18", "d": "2026-11-27", "t": [
             "Corrigido o histórico do painel de novidades: a lista agora inclui a nota da versão 4.13.17, que estava ausente",
             "A versão 4.13.18 também registra esta correção para que o programa detecte a atualização e mostre a novidade"
@@ -3316,6 +3803,12 @@ padding:8px;border:1px solid var(--ib-line);border-radius:16px;background:var(--
 #ink-panel .ia-trk{display:flex;border-radius:6px;content-visibility:auto;contain-intrinsic-size:auto 36px}
 #ink-panel .ia-trk-t{flex:1;justify-content:flex-start;min-height:calc(var(--h) - 8px);padding:3px 6px;color:inherit;text-align:left}
 
+#ink-panel .ia-prep-progress{margin-top:5px;padding:0 2px}
+#ink-panel .ia-prep-progress-track{height:7px;border-radius:99px;overflow:hidden;background:var(--ib-card)}
+#ink-panel .ia-prep-progress-track span{display:block;width:0;height:100%;border-radius:99px;background:var(--ib-ac);transition:width .18s ease}
+#ink-panel .ia-prep-progress-meta{display:flex;flex-direction:column;gap:2px;margin-top:4px;color:var(--ib-dim);font-size:11px;line-height:1.35}
+#ink-panel .ia-prep-progress-meta span{overflow-wrap:anywhere}
+#ink-panel .ia-prep-progress:has(#ink-prep-progress-label:empty){display:none}
 /* ---------- painel de novidades ---------- */
 #ink-news{position:fixed;inset:0;z-index:2147483200;display:flex;align-items:flex-end;justify-content:center;background:rgba(0,0,0,.6);font:14px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
 --n-bg:#2a1622;--n-card:rgba(255,130,180,.14);--n-line:rgba(255,150,195,.38);--n-txt:#ffeef5;--n-dim:#e2b0c7;--n-ac:#ff4f9a}
@@ -3402,6 +3895,19 @@ padding:8px;border:1px solid var(--ib-line);border-radius:16px;background:var(--
     <div class="ia-row"><button class="ia-chip" id="ink-tinta" title="Para o preparo quando o site avisar que as Tintas de hoje acabaram; continue depois em Continuar">⏸ Parar se as Tintas acabarem</button></div>
     <div class="ia-row" hidden><button class="ia-chip" id="ink-prep-go">▶ Continuar</button></div>
     <div class="ia-pst" id="ink-prep-st" hidden></div>
+    <div class="ia-prep-progress" id="ink-prep-progress-wrap" hidden><div class="ia-prep-progress-track"><span id="ink-prep-progress"></span></div><div class="ia-prep-progress-meta"><span id="ink-prep-progress-label">0/0 páginas</span><span id="ink-prep-eta"></span></div></div>
+    <details class="ia-fold">
+      <summary>🧰 Ferramentas avançadas de preparo</summary>
+      <div class="ia-row"><button class="ia-chip" id="ink-prep-sim">🧪 Simular sem salvar</button><button class="ia-chip" id="ink-prep-copy">📋 Copiar relatório</button></div>
+      <div class="ia-row"><button class="ia-chip" id="ink-prep-retry">↻ Refazer pendentes</button><button class="ia-chip" id="ink-prep-undo">↶ Voltar preparo</button></div>
+      <div class="ia-row"><button class="ia-chip" id="ink-prep-notify">🔔 Avisos: ligados</button><button class="ia-chip" id="ink-prep-permission">Ativar notificação</button></div>
+      <div class="ia-row"><button class="ia-chip" id="ink-prep-pace">⚡ Ritmo adaptativo: ligado</button></div>
+      <div class="ia-sec">Fila de capítulos</div>
+      <div class="ia-row"><button class="ia-chip" id="ink-queue-add">＋ Adicionar capítulos listados</button><button class="ia-chip" id="ink-queue-run">▶ Preparar fila</button></div>
+      <div class="ia-row"><button class="ia-chip" id="ink-queue-current">＋ Adicionar capítulo atual</button><button class="ia-chip" id="ink-queue-pause">⏸ Pausar fila</button><button class="ia-chip" id="ink-queue-clear">Limpar fila</button></div>
+      <div id="ink-queue-status" class="ia-mstat"></div><div id="ink-queue-list" class="ia-music-list"></div>
+      <div class="ia-sec">Atalhos: Alt+Shift+I iniciar · K parar · J continuar</div>
+    </details>
     <div class="ia-row ia-step">
       <button class="ia-chip" id="ink-spd-" aria-label="Diminuir">−</button>
       <span class="ia-val" id="ink-spd">1.5×</span>
@@ -3452,6 +3958,12 @@ padding:8px;border:1px solid var(--ib-line);border-radius:16px;background:var(--
       <button class="ia-chip" id="ink-meta-" aria-label="Diminuir">−</button>
       <span class="ia-val" id="ink-meta-val">10</span>
       <button class="ia-chip" id="ink-meta+" aria-label="Aumentar">+</button>
+    </div>
+    <div class="ia-sec">Meta diária de leitura</div>
+    <div class="ia-row ia-step">
+      <button class="ia-chip" id="ink-daily-" aria-label="Diminuir meta diária">−</button>
+      <span class="ia-val" id="ink-daily-val">10 páginas</span>
+      <button class="ia-chip" id="ink-daily+" aria-label="Aumentar meta diária">+</button>
     </div>
   </div>
 
@@ -3556,14 +4068,25 @@ padding:8px;border:1px solid var(--ib-line);border-radius:16px;background:var(--
 Alt+Shift+V: voz
 Alt+Shift+R: repetir fala
 Alt+Shift+S: salvar favorito
-Alt+Shift+ponto / vírgula: mais / menos velocidade</div>
+Alt+Shift+ponto / vírgula: mais / menos velocidade
+Alt+Shift+I: iniciar preparo · K: parar · J: continuar</div>
     </details>
     <details class="ia-fold">
-      <summary>💾 Backup</summary>
+      <summary>📍 Marcadores e Ler depois</summary>
+      <input class="ia-inp" id="ink-bookmark-note" maxlength="100" placeholder="Anotação do marcador (opcional)">
+      <div class="ia-row"><button class="ia-chip" id="ink-bookmark-add">📍 Marcar página</button><button class="ia-chip" id="ink-later-add">＋ Ler depois</button></div>
+      <div class="ia-sec">Marcadores</div><div id="ink-bookmark-list"></div>
+      <div class="ia-sec">Ler depois</div><div id="ink-later-list"></div>
+      <div class="ia-sec">Histórico desta obra</div><div id="ink-history-list"></div>
+    </details>
+    <details class="ia-fold">
+      <summary>💾 Backup completo</summary>
     <textarea class="ia-inp" id="ink-bk" spellcheck="false" placeholder="Exporte aqui, ou cole um backup e toque em Importar"></textarea>
     <div class="ia-row">
-      <button class="ia-chip" id="ink-bk-ex">💾 Exportar</button>
-      <button class="ia-chip" id="ink-bk-im">📥 Importar</button>
+      <button class="ia-chip" id="ink-bk-ex">💾 Exportar tudo</button>
+      <button class="ia-chip" id="ink-bk-im">📥 Importar texto</button>
+      <button class="ia-chip" id="ink-bk-file-btn">📂 Abrir arquivo</button>
+      <input id="ink-bk-file" type="file" accept=".json,application/json" hidden>
     </div>
     </details>
   </div>
@@ -3573,8 +4096,20 @@ Alt+Shift+ponto / vírgula: mais / menos velocidade</div>
         // ---- Handlers ----
         $('ink-go').onclick = () => { if (Prep.on) setStatus('⚠ Espere o preparo terminar ou pare-o'); else if (running) stop('Parado.'); else mainLoop(); };
         $('ink-mini-go').onclick = $('ink-go').onclick;
-        $('ink-prep').onclick = () => Prep.start();
+        $('ink-prep').onclick = () => Prep.start(false, { simulate: cfg.prepQueueAuto ? !!cfg.prepQueueSim : !!cfg.prepSimMode });
         $('ink-prep-go').onclick = () => Prep.start(true);
+        $('ink-prep-sim').onclick = () => { cfg.prepSimMode = !cfg.prepSimMode; saveCfg(); $('ink-prep-sim').classList.toggle('on', cfg.prepSimMode); setStatus(cfg.prepSimMode ? '🧪 Simulação ligada: o preparo não salva alterações' : '🧰 Modo normal de preparo'); };
+        $('ink-prep-copy').onclick = () => Prep.copyReport();
+        $('ink-prep-retry').onclick = () => Prep.retryFailed();
+        $('ink-prep-undo').onclick = () => Prep.rollback();
+        $('ink-prep-notify').onclick = () => { cfg.prepNotify = cfg.prepNotify === false; saveCfg(); $('ink-prep-notify').textContent = cfg.prepNotify ? '🔔 Avisos: ligados' : '🔕 Avisos: desligados'; };
+        $('ink-prep-pace').onclick = () => { cfg.prepAutoPace = cfg.prepAutoPace === false; saveCfg(); $('ink-prep-pace').textContent = cfg.prepAutoPace ? '⚡ Ritmo adaptativo: ligado' : '⏸ Ritmo adaptativo: desligado'; $('ink-prep-pace').classList.toggle('on', cfg.prepAutoPace); };
+        $('ink-prep-permission').onclick = async () => { if (!('Notification' in window)) { setStatus('Notificações não suportadas neste navegador'); return; } try { const p = await Notification.requestPermission(); cfg.prepNotifications = p === 'granted'; saveCfg(); $('ink-prep-permission').textContent = cfg.prepNotifications ? '🔔 Notificações ativadas' : 'Ativar notificação'; setStatus(cfg.prepNotifications ? '✓ Notificações ativadas' : 'Notificações não autorizadas'); } catch(e) { setStatus('⚠ Não consegui ativar notificações'); } };
+        $('ink-queue-add').onclick = () => PrepQueue.addListed();
+        $('ink-queue-current').onclick = () => PrepQueue.addCurrent();
+        $('ink-queue-run').onclick = () => PrepQueue.start();
+        $('ink-queue-clear').onclick = () => PrepQueue.clear();
+        $('ink-queue-pause').onclick = () => PrepQueue.pause();
         $('ink-tinta').classList.toggle('on', !!cfg.tintaStop);
         $('ink-tinta').onclick = () => { cfg.tintaStop = !cfg.tintaStop; saveCfg(); $('ink-tinta').classList.toggle('on', cfg.tintaStop); setStatus(cfg.tintaStop ? '⏸ O preparo vai parar quando as Tintas de hoje acabarem' : '▶ O preparo segue mesmo com as Tintas acabadas'); };
         $('ink-upd-chk').onclick = () => checkUpdate(true);
@@ -3598,6 +4133,8 @@ Alt+Shift+ponto / vírgula: mais / menos velocidade</div>
         $('ink-meta-btn').onclick = metaToggle;
         $('ink-meta-').onclick = () => { cfg.metaGoal = Math.max(1, cfg.metaGoal - 1); saveCfg(); metaPaint(); refreshPanel(); };
         $('ink-meta+').onclick = () => { cfg.metaGoal = Math.min(300, cfg.metaGoal + 1); saveCfg(); metaPaint(); refreshPanel(); };
+        $('ink-daily-').onclick = () => { cfg.dailyGoal = Math.max(1, cfg.dailyGoal - 1); saveCfg(); statsPaint(); refreshPanel(); };
+        $('ink-daily+').onclick = () => { cfg.dailyGoal = Math.min(300, cfg.dailyGoal + 1); saveCfg(); statsPaint(); refreshPanel(); };
 
         // voz
         $('ink-vsel').onchange = e => { cfg.vname = e.target.value; saveCfg(); };
@@ -3659,11 +4196,25 @@ Alt+Shift+ponto / vírgula: mais / menos velocidade</div>
         $('ink-sharep').onclick = () => shareText(TICK.cur || '');
         $('ink-bk-ex').onclick = backupExport;
         $('ink-bk-im').onclick = backupImport;
+        $('ink-bk-file-btn').onclick = () => $('ink-bk-file').click();
+        $('ink-bk-file').onchange = async e => {
+            const file = e.target.files && e.target.files[0]; if (!file) return;
+            try { $('ink-bk').value = await file.text(); backupImport(); }
+            catch (err) { setStatus('⚠ Não consegui ler o arquivo de backup'); }
+            e.target.value = '';
+        };
         $('ink-repeat').onclick = repeatLine;
         $('ink-dict').value = cfg.dict || '';
         $('ink-dict').oninput = e => { cfg.dict = e.target.value; saveCfg(); };
         $('ink-fav-add').onclick = favAdd;
-        favPaint();
+        $('ink-bookmark-add').onclick = bookmarkAdd;
+        $('ink-later-add').onclick = laterAddCurrent;
+        favPaint(); bookmarkPaint(); laterPaint(); historyPaint(); PrepQueue.paint();
+        $('ink-prep-sim').classList.toggle('on', !!cfg.prepSimMode);
+        $('ink-prep-notify').textContent = cfg.prepNotify === false ? '🔕 Avisos: desligados' : '🔔 Avisos: ligados';
+        $('ink-prep-pace').textContent = cfg.prepAutoPace === false ? '⏸ Ritmo adaptativo: desligado' : '⚡ Ritmo adaptativo: ligado';
+        $('ink-prep-pace').classList.toggle('on', cfg.prepAutoPace !== false);
+        $('ink-prep-permission').textContent = cfg.prepNotifications ? '🔔 Notificações ativadas' : 'Ativar notificação';
         document.addEventListener('keydown', hotkeys, true);
 
         // campos de texto: não deixa as teclas vazarem pros atalhos do site
@@ -4107,6 +4658,7 @@ Alt+Shift+ponto / vírgula: mais / menos velocidade</div>
         setText($('ink-vr'), String(cfg.vrate) + '×');
         setText($('ink-eyel'), Math.round(cfg.eyeLvl * 100) + '%');
         setText($('ink-meta-val'), String(cfg.metaGoal));
+        setText($('ink-daily-val'), `${cfg.dailyGoal} páginas`);
         const dk = $('ink-duck'); if (dk) dk.classList.toggle('on', cfg.duck !== false);
         const ys = $('ink-yt-show'); if (ys) ys.classList.toggle('on', cfg.ytShow !== false);
         const yb = $('ink-yt-box'); if (yb) yb.classList.toggle('off', cfg.ytShow === false);
@@ -4138,11 +4690,40 @@ Alt+Shift+ponto / vírgula: mais / menos velocidade</div>
         mediaInit();
         SkipIntro.start();
         if (window.InkNative && cfg.full) applyFull();
-        // voltou do botão "Continuar": avisa onde você tinha parado
+        // Retoma o ponto exato da leitura guardado no histórico, se a obra abrir na mesma página.
+        let resumeRecord = null;
         try {
-            const rs = JSON.parse(sessionStorage.getItem('ink_resume') || 'null');
-            if (rs) { sessionStorage.removeItem('ink_resume'); setTimeout(() => setStatus('↩ Você parou em: ' + rs.label), 1800); }
+            resumeRecord = JSON.parse(sessionStorage.getItem('ink_resume') || 'null');
+            if (resumeRecord) sessionStorage.removeItem('ink_resume');
         } catch (e) { }
+        resumeRecord = resumeRecord || cfg.last;
+        if (!cfg.prepQueueAuto && !(cfg.prep && cfg.prep.path === location.pathname) && resumeRecord && resumeRecord.path === location.pathname + location.search && Number(resumeRecord.page) > 1) {
+            READ_RESUME.busy = true;
+            let touched = false;
+            const cancelResume = () => { touched = true; READ_RESUME.busy = false; };
+            document.addEventListener('pointerdown', cancelResume, { once: true, capture: true });
+            document.addEventListener('keydown', cancelResume, { once: true, capture: true });
+            setTimeout(async () => {
+                try {
+                    if (!touched) {
+                        const st = await new Promise(resolve => {
+                            const t0 = Date.now();
+                            const poll = () => { const v = readState(); const n = v.p != null ? v.p : v.pg; if (n != null || Date.now() - t0 > 7000) return resolve(v); setTimeout(poll, 100); };
+                            poll();
+                        });
+                        const currentPage = st.p != null ? st.p : st.pg;
+                        if (!touched && currentPage != null && currentPage < Number(resumeRecord.page)) await Prep.resumeToPage(resumeRecord.page);
+                        else if (!touched) setStatus('↩ Você parou em: ' + (resumeRecord.label || `página ${resumeRecord.page}`));
+                    }
+                } finally {
+                    READ_RESUME.busy = false;
+                    document.removeEventListener('pointerdown', cancelResume, true);
+                    document.removeEventListener('keydown', cancelResume, true);
+                }
+            }, 1700);
+        } else if (resumeRecord) {
+            setTimeout(() => setStatus('↩ Você parou em: ' + resumeRecord.label), 1800);
+        }
         // novidades: na 1ª instalação só marca como vista; depois de atualizar, abre sozinho uma vez
         if (!cfg.seenVer) { cfg.seenVer = VERSION; saveCfg(); }
         else if (cfg.seenVer !== VERSION) setTimeout(() => { if (!$('ink-news')) openNews(); }, 2500);
@@ -4154,6 +4735,7 @@ Alt+Shift+ponto / vírgula: mais / menos velocidade</div>
         // grava onde você está lendo (mais espaçado no modo leve)
         setInterval(() => { try { trackRead(); } catch (e) { } }, isPerf() ? 4000 : 2500);
         eyeAutoTick();
+        PrepQueue.resumeOnOpen();
     }
     const safeInit = guard('init', init);
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', safeInit);
