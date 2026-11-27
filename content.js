@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ink Leitor
 // @namespace    ink-leitor
-// @version      4.13.10
+// @version      4.13.11
 // @description  Leitor automático, OCR, TTS, música, ordenador de capítulos, auto-arrumar bolhas, timer de sono, estatísticas e mais
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
@@ -27,7 +27,7 @@
     'use strict';
     if (window.__ink) return;
     window.__ink = true;
-    const VERSION = '4.13.10';
+    const VERSION = '4.13.11';
 
     /* 4.13.10: programa de PC — "Atualizar" sem fechar o programa.
        O botão Atualizar guarda o arquivo novo no navegador do programa e recarrega a página;
@@ -733,7 +733,7 @@
            wait = quanto esperar a bolha mudar de lugar · settle = espera a animação assentar
            4.13.4: valores menores em todos os ritmos */
         const PACE = [
-            { hold: 0, steps: 2, gap: 1, pre: 0, wait: 250, settle: 15 },
+            { hold: 0, steps: 1, gap: 0, pre: 0, wait: 250, settle: 6 },
             { hold: 12, steps: 4, gap: 3, pre: 12, wait: 400, settle: 40 },
             { hold: 200, steps: 6, gap: 6, pre: 25, wait: 650, settle: 100 }
         ];
@@ -759,7 +759,7 @@
         async function waitMoved(el, from, P) {
             const t0 = performance.now();
             while (performance.now() - t0 < P.wait) {
-                await sleep(4);
+                await sleep(1);
                 if (curOrder().indexOf(el) !== from) {
                     await sleep(P.settle);
                     const now = curOrder().indexOf(el);
@@ -1089,7 +1089,7 @@
                 const v = fn();
                 if (v) return v;
                 if (Date.now() - t0 >= ms) return null;
-                await sleep(8);
+                await sleep(2);
             }
         }
 
@@ -1186,7 +1186,7 @@
             await waitFor(() => {
                 const n = BubbleSorter.getTiles().length;
                 if (n !== last) { last = n; since = Date.now(); }
-                return n > 0 && Date.now() - since > 40;
+                return n > 0 && Date.now() - since > 16;
             }, 8000);
             const ok = await BubbleSorter.arrange(cfg.manga ? 'manga' : 'hq', m => say(`Pág ${page}: ${m}`));
             check();
@@ -2810,6 +2810,10 @@
      * ================================================================== */
     /*CL_START*/
     const CHANGELOG = [
+        { "v": "4.13.11", "d": "2026-11-27", "t": [
+            "Preparar capítulo no máximo: arraste rápido em 1 passo, conferências do site a cada ~2 ms e esperas mínimas ao carregar as bolhas e ao assentar a animação",
+            "Se o arraste de 1 passo falhar, ele sobe sozinho para o ritmo médio/lento e volta ao rápido depois de acertar 10 vezes seguidas"
+        ] },
         { "v": "4.13.10", "d": "2026-11-27", "t": [
             "No programa de PC, o botão Atualizar agora aplica a versão nova e reinicia a página sozinho, sem precisar fechar e abrir o programa"
         ] },
