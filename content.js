@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ink Leitor
 // @namespace    ink-leitor
-// @version      4.13.14
+// @version      4.13.15
 // @description  Leitor automático, OCR, TTS, música, ordenador de capítulos, auto-arrumar bolhas, timer de sono, estatísticas e mais
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
@@ -27,7 +27,7 @@
     'use strict';
     if (window.__ink) return;
     window.__ink = true;
-    const VERSION = '4.13.14';
+    const VERSION = '4.13.15';
 
     /* 4.13.10: programa de PC — "Atualizar" sem fechar o programa.
        O botão Atualizar guarda o arquivo novo no navegador do programa e recarrega a página;
@@ -124,7 +124,7 @@
     const CFG_KEY = 'ink_cfg_v4';
     const DEFAULTS = {
         speed: 1.5, auto: true, voice: false, vrate: 1, vname: '',
-        dict: '', favs: [], prep: null,               // 4.10.0: pronúncia e favoritos
+        dict: '', favs: [], prep: null, prepDone: {}, tintaStop: false,               // 4.10.0: pronúncia e favoritos
         manga: false, method: '', methodM: '',
         girl: true, skin: 'gato',
         eye: false, eyeLvl: 0.25,
@@ -1006,7 +1006,7 @@
     const Prep = (() => {
         let on = false, stText = '';
         const RX = /^(?:(\d+)\s*\/\s*(\d+)\s*[·•|-]\s*)?(\d+)\s*\/\s*(\d+)$/;
-        const STOP = new Error('parado');
+        const STOP = new Error('parado'), TINTA = new Error('tintas');
         const check = () => { if (!on) throw STOP; };
         const visible = e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
         const mine = e => e.closest('#ink-panel,#ink-news,#ink-auto-row,[data-ink-freeze]');
@@ -1023,6 +1023,29 @@
         // 4.13.8: a barra de páginas do site (ex.: 109/178) fica parada enquanto o preparo roda.
         // Põe uma cópia parada por cima e esconde a original (que continua no lugar e continua sendo lida pelo script).
         let ghost = null, frozenBar = null, freezeTimer = 0, snap = null;
+        // 4.13.15: avisa quando o site mostra "as Tintas de hoje já caíram" (só olha o que aparece DEPOIS de começar)
+        const RX_TINTA = /tintas?\s+de\s+hoje\s+j[aá]\s+ca[ií]ram/i;
+        let tintaOut = false, tintaObs = null;
+        function watchTinta() {
+            stopTinta(); tintaOut = false;
+            try {
+                tintaObs = new MutationObserver(ms => {
+                    for (const m of ms) {
+                        const nodes = m.type === 'characterData' ? [m.target] : m.addedNodes;
+                        for (const n of nodes) {
+                            const t = n.nodeType === 1 ? n.textContent : n.nodeType === 3 ? n.nodeValue : '';
+                            if (!t || t.length > 600 || !RX_TINTA.test(t)) continue;
+                            const el = n.nodeType === 1 ? n : n.parentElement;
+                            if (el && mine(el)) continue;
+                            tintaOut = true;
+                        }
+                    }
+                });
+                tintaObs.observe(document.body, { childList: true, subtree: true, characterData: true });
+            } catch (e) { }
+        }
+        function stopTinta() { if (tintaObs) { try { tintaObs.disconnect(); } catch (e) { } tintaObs = null; } }
+
         let warned = false;
         function findBar() {
             if (!ctrEl || !ctrEl.isConnected) counter();
@@ -1257,16 +1280,20 @@
                 if (wait > 3400) return;      // toque duplo sem querer não conta
             }
             confirmUntil = 0;
+            // "Recomeçar do zero" (havia progresso salvo e o toque foi confirmado) refaz tudo: esquece as páginas já salvas
+            const restartZero = !resume && !!pending();
+            if (restartZero && cfg.prepDone && cfg.prepDone[location.pathname]) { const d = { ...cfg.prepDone }; delete d[location.pathname]; cfg.prepDone = d; saveCfg(); }
             if (!from) cfg.prep = null;
             if (running) stop('Leitura parada para preparar o capítulo');
             on = true; learned = {}; zoomBad = false; ctrEl = null;
             stText = ''; setText($('ink-prep-st'), '');
             paint();
             freezeBar();
+            watchTinta();
             const path = location.pathname;
             const saved = from ? [...from.saved] : [], empty = from ? [...from.empty] : [], failed = from ? [...from.failed] : [];
             let manga = from ? from.manga : !!cfg.manga;
-            let total = 0, page = 0, end = '';
+            let total = 0, page = 0, end = '', skip = new Set(), skipped = 0;
             const keep = next => { cfg.prep = { path, next, total, manga, saved: [...saved], empty: [...empty], failed: [...failed] }; saveCfg(); };
             try {
                 if (!await waitFor(counter, 5000)) throw new Error('não achei o contador de páginas (mostre os controles da leitura)');
@@ -1279,30 +1306,49 @@
                 const first = from ? from.next : 1;
                 total = counter().pt;
                 if (from && from.total !== total) { cfg.prep = null; throw new Error('o total de páginas mudou; comece de novo'); }
+                // 4.13.15: páginas que já ficaram salvas num preparo anterior (ex.: só sobraram as que falharam) são puladas
+                const rec = cfg.prepDone && cfg.prepDone[path];
+                if (rec && rec.total === total && Array.isArray(rec.pages) && rec.pages.length < total) skip = new Set(rec.pages);
+                if (skip.size) report(`↷ ${skip.size} páginas já salvas serão puladas`);
                 if (first <= total) await goTo(first, report);
                 keep(first);
                 for (page = first; page <= total; page++) {
                     if (location.pathname !== path) throw new Error('o capítulo mudou');
+                    if (skip.has(page)) {
+                        skipped++;
+                        report(`↷ Página ${page} de ${total} já salva · pulando`);
+                        keep(page + 1);
+                        if (page < total) await step(1);
+                        continue;
+                    }
                     report(`🧰 Página ${page} de ${total} (${Math.round((page - 1) / total * 100)}%) · ${cfg.manga ? 'mangá' : 'HQ'}`);
                     const r = await doPage(page, detail);
                     (r === 'ok' ? saved : r === 'vazia' ? empty : failed).push(page);
                     keep(page + 1);
+                    if (cfg.tintaStop && tintaOut) throw TINTA;
                     if (page < total) await step(1);
                 }
                 await setZoom(false);
                 await goTo(1, report);
                 await setZoom(true);
-                cfg.prep = null; saveCfg();
+                cfg.prep = null;
+                // guarda o que ficou salvo: se sobraram pendências, a próxima vez só refaz as que faltam
+                const d = { ...cfg.prepDone };
+                if (failed.length) d[path] = { total, pages: [...new Set([...skip, ...saved, ...empty])] }; else delete d[path];
+                const ks = Object.keys(d); while (ks.length > 40) delete d[ks.shift()];
+                cfg.prepDone = d; saveCfg();
                 end = failed.length ? '⚠ Preparo terminou com pendências' : '✓ Preparo terminou';
             } catch (e) {
-                end = e === STOP ? `⏹ Parado na página ${page || '?'}` : `⚠ Parei${page ? ' na página ' + page : ''}: ${e.message || e}`;
+                end = e === TINTA ? `⏸ As Tintas de hoje acabaram; parei depois da página ${page}. Continue amanhã em ▶ Continuar`
+                    : e === STOP ? `⏹ Parado na página ${page || '?'}` : `⚠ Parei${page ? ' na página ' + page : ''}: ${e.message || e}`;
                 if (e !== STOP) console.warn('[Ink] preparo:', e);
             }
             // se parou com a tela das bolhas aberta, fecha sem salvar a página incompleta
             const m = cfg.prep && BubbleSorter.findModal();
             if (m) { const c = modalBtn(m, /^cancelar$/i); if (c) c.click(); }
-            on = false; unfreezeBar(); paint();
+            on = false; unfreezeBar(); stopTinta(); paint();
             report(`${end}. Salvas: ${saved.length}${total ? ' de ' + total : ''}`
+                + (skipped ? ` · já salvas (puladas): ${skipped}` : '')
                 + (empty.length ? ` · sem balões detectados: ${empty.join(', ')}` : '')
                 + (failed.length ? ` · revisar: ${failed.join(', ')}` : ''));
         }
@@ -2827,6 +2873,10 @@
      * ================================================================== */
     /*CL_START*/
     const CHANGELOG = [
+        { "v": "4.13.15", "d": "2026-11-27", "t": [
+            "Preparar capítulo pula as páginas que já ficaram salvas num preparo anterior (se sobraram só algumas, refaz só elas). \"Recomeçar do zero\" continua refazendo tudo",
+            "Novo botão \"Parar se as Tintas acabarem\" (desligado por padrão): quando o site avisa que as Tintas de hoje caíram, o preparo para depois de salvar a página e você continua depois em Continuar"
+        ] },
         { "v": "4.13.14", "d": "2026-11-27", "t": [
             "A barra de páginas do site não avança mais com o Preparar capítulo ligado: acha a faixa inteira (número + barra deslizante), copia o valor da barra e, se não achar, congela pelo menos o número"
         ] },
@@ -3233,6 +3283,7 @@ padding:8px;border:1px solid var(--ib-line);border-radius:16px;background:var(--
     <button class="ia-cont" id="ink-cont" hidden><span></span></button>
     <button class="ia-go" id="ink-go">${ICO.play}<span>Ler sozinho</span></button>
     <div class="ia-row"><button class="ia-chip" id="ink-prep" title="Arruma e salva as bolhas de todas as páginas">🧰 Preparar capítulo</button></div>
+    <div class="ia-row"><button class="ia-chip" id="ink-tinta" title="Para o preparo quando o site avisar que as Tintas de hoje acabaram; continue depois em Continuar">⏸ Parar se as Tintas acabarem</button></div>
     <div class="ia-row" hidden><button class="ia-chip" id="ink-prep-go">▶ Continuar</button></div>
     <div class="ia-pst" id="ink-prep-st" hidden></div>
     <div class="ia-row ia-step">
@@ -3408,6 +3459,8 @@ Alt+Shift+ponto / vírgula: mais / menos velocidade</div>
         $('ink-mini-go').onclick = $('ink-go').onclick;
         $('ink-prep').onclick = () => Prep.start();
         $('ink-prep-go').onclick = () => Prep.start(true);
+        $('ink-tinta').classList.toggle('on', !!cfg.tintaStop);
+        $('ink-tinta').onclick = () => { cfg.tintaStop = !cfg.tintaStop; saveCfg(); $('ink-tinta').classList.toggle('on', cfg.tintaStop); setStatus(cfg.tintaStop ? '⏸ O preparo vai parar quando as Tintas de hoje acabarem' : '▶ O preparo segue mesmo com as Tintas acabadas'); };
         $('ink-upd-chk').onclick = () => checkUpdate(true);
         $('ink-news-btn').onclick = () => openNews();
         $('ink-min').onclick = () => { cfg.min = !cfg.min; saveCfg(); applyMin(); };
