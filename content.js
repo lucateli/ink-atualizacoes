@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ink Leitor
 // @namespace    ink-leitor
-// @version      4.13.4
+// @version      4.13.6
 // @description  Leitor automático, OCR, TTS, música, ordenador de capítulos, auto-arrumar bolhas, timer de sono, estatísticas e mais
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
@@ -78,7 +78,7 @@
         const iv = setInterval(tick, 1500);
     })();
 
-    const VERSION = '4.13.4';
+    const VERSION = '4.13.6';
     const IS_MOBILE = (() => {
         try { return matchMedia('(pointer:coarse)').matches || innerWidth < 700; }
         catch (e) { return innerWidth < 700; }
@@ -711,9 +711,9 @@
            wait = quanto esperar a bolha mudar de lugar · settle = espera a animação assentar
            4.13.4: valores menores em todos os ritmos */
         const PACE = [
-            { hold: 10, steps: 4, gap: 5, pre: 15, wait: 350, settle: 70 },
-            { hold: 40, steps: 8, gap: 9, pre: 40, wait: 550, settle: 120 },
-            { hold: 300, steps: 10, gap: 12, pre: 50, wait: 800, settle: 180 }
+            { hold: 0, steps: 2, gap: 1, pre: 0, wait: 250, settle: 15 },
+            { hold: 12, steps: 4, gap: 3, pre: 12, wait: 400, settle: 40 },
+            { hold: 200, steps: 6, gap: 6, pre: 25, wait: 650, settle: 100 }
         ];
         let slow = 0, okRun = 0, jumpBad = false;   // aprendem durante o uso: se o rápido falha, sobe o nível
 
@@ -737,7 +737,7 @@
         async function waitMoved(el, from, P) {
             const t0 = performance.now();
             while (performance.now() - t0 < P.wait) {
-                await sleep(15);
+                await sleep(4);
                 if (curOrder().indexOf(el) !== from) {
                     await sleep(P.settle);
                     const now = curOrder().indexOf(el);
@@ -759,7 +759,7 @@
             for (let tryN = 0; tryN < 3; tryN++) {
                 const lvl = Math.min(2, tryN + slow), P = PACE[lvl];
                 el.scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'instant' });
-                await sleep(lvl ? 40 : 12);
+                await sleep(lvl ? 15 : 0);
                 const ord = curOrder();
                 const me = el.getBoundingClientRect();
                 let to = from + dir;
@@ -987,7 +987,7 @@
                 const v = fn();
                 if (v) return v;
                 if (Date.now() - t0 >= ms) return null;
-                await sleep(35);
+                await sleep(8);
             }
         }
 
@@ -1030,7 +1030,7 @@
                 try { if (!METHODS[name]()) continue; } catch (e) { continue; }
                 const now = await waitFor(() => { const c = counter(); return c && c.p !== from.p ? c : null; }, 1200);
                 if (!now) continue;
-                if (now.p === from.p + dir) { learned[dir] = name; await sleep(60); return; }
+                if (now.p === from.p + dir) { learned[dir] = name; return; }
                 throw new Error(`a página pulou de ${from.p} para ${now.p}`);
             }
             throw new Error(`não consegui sair da página ${from.p}`);
@@ -1059,7 +1059,7 @@
         // devolve 'ok', 'vazia' (sem balões) ou 'falhou'
         async function doPage(page, say) {
             await setZoom(true);
-            const c = await waitFor(() => { const x = counter(); return x && x.p === page && x.b != null ? x : null; }, 2500);
+            const c = await waitFor(() => { const x = counter(); return x && x.p === page && x.b != null ? x : null; }, 1000);
             if (!c) return 'vazia';
             const gear = await waitFor(gearBtn, 3000);
             if (!gear) throw new Error('não achei a engrenagem das bolhas');
@@ -1070,13 +1070,12 @@
             await waitFor(() => {
                 const n = BubbleSorter.getTiles().length;
                 if (n !== last) { last = n; since = Date.now(); }
-                return n > 0 && Date.now() - since > 180;
+                return n > 0 && Date.now() - since > 60;
             }, 8000);
             const ok = await BubbleSorter.arrange(cfg.manga ? 'manga' : 'hq', m => say(`Pág ${page}: ${m}`));
             check();
             if (!ok) { await closeModal(/^cancelar$/i); return 'falhou'; }
             await closeModal(/^salvar$/i);
-            await sleep(100);
             return 'ok';
         }
 
@@ -2686,6 +2685,14 @@
      * ================================================================== */
     /*CL_START*/
     const CHANGELOG = [
+        { "v": "4.13.6", "d": "2026-11-27", "t": [
+            "Preparar capítulo e Auto Mangá/HQ no limite: arraste em 2 passos quase sem pausa e sem esperas fixas ao trocar de página e ao salvar",
+            "Páginas sem balões esperam até 1 s (antes 1,5 s)"
+        ] },
+        { "v": "4.13.5", "d": "2026-11-27", "t": [
+            "Preparar capítulo e Auto Mangá/HQ de novo mais rápidos: arraste com ainda menos passos e quase sem pausas, e conferências mais frequentes do site",
+            "Páginas sem balões esperam até 1,5 s (antes 2,5 s) e as pausas ao trocar de página e ao salvar quase sumiram"
+        ] },
         { "v": "4.13.4", "d": "2026-11-26", "t": [
             "Preparar capítulo e Auto Mangá/HQ ainda mais rápidos: o arraste das bolhas usa menos passos e esperas bem menores em todos os ritmos",
             "O preparo confere o site com mais frequência e espera menos ao trocar de página, ao carregar as bolhas e ao fechar a tela de arrumar",
