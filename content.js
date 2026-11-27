@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ink Leitor
 // @namespace    ink-leitor
-// @version      4.13.17
+// @version      4.13.18
 // @description  Leitor automático, OCR, TTS, música, ordenador de capítulos, auto-arrumar bolhas, timer de sono, estatísticas e mais
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
@@ -27,7 +27,7 @@
     'use strict';
     if (window.__ink) return;
     window.__ink = true;
-    const VERSION = '4.13.17';
+    const VERSION = '4.13.18';
 
     /* 4.13.10: programa de PC — "Atualizar" sem fechar o programa.
        O botão Atualizar guarda o arquivo novo no navegador do programa e recarrega a página;
@@ -2977,6 +2977,14 @@
      * ================================================================== */
     /*CL_START*/
     const CHANGELOG = [
+        { "v": "4.13.18", "d": "2026-11-27", "t": [
+            "Corrigido o histórico do painel de novidades: a lista agora inclui a nota da versão 4.13.17, que estava ausente",
+            "A versão 4.13.18 também registra esta correção para que o programa detecte a atualização e mostre a novidade"
+        ] },
+        { "v": "4.13.17", "d": "2026-11-27", "t": [
+            "Auto Mangá: organiza os quadros por faixas, de cima para baixo e da direita para a esquerda, considerando quadros de tamanhos diferentes",
+            "Modo HQ mantém a lógica anterior; prévia, desfazer e controles do ordenador continuam disponíveis"
+        ] },
         { "v": "4.13.16", "d": "2026-11-27", "t": [
             "Leitura automática mais leve: assinatura visual e verificação do botão de próximo capítulo agora usam caches curtos",
             "Menos varreduras repetidas da página ao procurar o modal de bolhas e a lista de capítulos"
