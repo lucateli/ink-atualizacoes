@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ink Leitor
 // @namespace    ink-leitor
-// @version      4.13.2
+// @version      4.13.3
 // @description  Leitor automático, OCR, TTS, música, ordenador de capítulos, auto-arrumar bolhas, timer de sono, estatísticas e mais
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
@@ -78,7 +78,7 @@
         const iv = setInterval(tick, 1500);
     })();
 
-    const VERSION = '4.13.2';
+    const VERSION = '4.13.3';
     const IS_MOBILE = (() => {
         try { return matchMedia('(pointer:coarse)').matches || innerWidth < 700; }
         catch (e) { return innerWidth < 700; }
@@ -93,6 +93,8 @@
     const rnd = (a, b) => a + Math.random() * (b - a);
     const gauss = () => { let u = 0, v = 0; while (!u) u = Math.random(); while (!v) v = Math.random(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); };
     const txt = el => (el.textContent || '').replace(/\s+/g, ' ').trim();
+    // 4.13.3: só mexe no DOM quando o texto realmente mudou (evita redesenhar e o painel pular)
+    const setText = (el, v) => { if (el && el.textContent !== v) el.textContent = v; };
 
     /* ================================================================== *
      *  2. CONFIG
@@ -144,7 +146,8 @@
     ];
     const curLang = () => OCR_LANGS.find(l => l.id === cfg.ocrLang) || OCR_LANGS[0];
 
-    const setStatus = msg => { const el = $('ink-status'); if (el && el.textContent !== msg) el.textContent = msg; };
+    // 4.13.3: a caixa de status tem altura fixa; só reescreve quando a mensagem muda e volta ao início do texto
+    const setStatus = msg => { const el = $('ink-status'); if (el && el.textContent !== msg) { el.textContent = msg; el.scrollTop = 0; } };
 
     /* ---- Por obra: lembra velocidade e direção de cada obra ---- */
     const RX_OBRA = /(manga|manhwa|hq|comic|obra|capitulo|titulo|series)/i;
@@ -952,9 +955,11 @@
     /* ================================================================== *
      *  6b. PREPARAR CAPÍTULO: arruma e salva as bolhas página por página
      *  4.13.2: esperas fixas menores (o que ainda espera, espera só até o site responder)
+     *  4.13.3: o painel não pula durante o preparo (caixas de texto com altura fixa,
+     *          a linha "Continuar" guarda o lugar e o detalhe de cada posição vai só no status do topo)
      * ================================================================== */
     const Prep = (() => {
-        let on = false;
+        let on = false, stText = '';
         const RX = /^(?:(\d+)\s*\/\s*(\d+)\s*[·•|-]\s*)?(\d+)\s*\/\s*(\d+)$/;
         const STOP = new Error('parado');
         const check = () => { if (!on) throw STOP; };
@@ -1075,20 +1080,34 @@
         const pending = () => cfg.prep && cfg.prep.path === location.pathname ? cfg.prep : null;
         let confirmUntil = 0;
         function paint() {
-            const b = $('ink-prep'), r = $('ink-prep-go');
+            const b = $('ink-prep'), r = $('ink-prep-go'), st = $('ink-prep-st');
             const s = on ? null : pending();
             const label = on ? '⏹ Parar preparo' : (s ? (Date.now() < confirmUntil ? '⚠ Toque de novo pra recomeçar' : '↺ Recomeçar do zero') : '🧰 Preparar capítulo');
-            if (b && b.textContent !== label) b.textContent = label;
+            setText(b, label);
+            // a caixa de progresso tem altura fixa; só aparece durante o preparo ou com o resumo do último
+            if (st) { const show = on || !!stText; if (st.hidden !== !show) st.hidden = !show; }
             if (!r) return;
-            if (r.parentElement.hidden !== !s) r.parentElement.hidden = !s;
+            const row = r.parentElement;
+            if (on) {
+                // preparo rodando: a linha "Continuar" não some (senão o painel dá um pulo), só fica invisível
+                if (!row.hidden && row.style.visibility !== 'hidden') row.style.visibility = 'hidden';
+                return;
+            }
+            if (row.style.visibility) row.style.visibility = '';
+            if (row.hidden !== !s) row.hidden = !s;
             if (!s) return;
             const go = s.next > s.total ? '▶ Terminar: voltar à página 1' : `▶ Continuar da página ${s.next} de ${s.total}`;
-            if (r.textContent !== go) r.textContent = go;
+            setText(r, go);
         }
+        // página a página: vai no status do topo e na caixa de progresso
         function report(t) {
             setStatus(t);
-            const e = $('ink-prep-st'); if (e) e.textContent = t;
+            stText = t;
+            const e = $('ink-prep-st');
+            if (e) { setText(e, t); if (e.hidden) e.hidden = false; }
         }
+        // detalhe de cada posição das bolhas: só no status do topo (a caixa de progresso fica parada)
+        const detail = t => setStatus(t);
         async function start(resume) {
             if (on) { on = false; BubbleSorter.halt(); report('⏹ Parando…'); return; }
             if (!location.pathname.startsWith('/ler/')) { report('⚠ Abra um capítulo primeiro'); return; }
@@ -1104,7 +1123,9 @@
             confirmUntil = 0;
             if (!from) cfg.prep = null;
             if (running) stop('Leitura parada para preparar o capítulo');
-            on = true; learned = {}; ctrEl = null; paint();
+            on = true; learned = {}; ctrEl = null;
+            stText = ''; setText($('ink-prep-st'), '');
+            paint();
             const path = location.pathname;
             const saved = from ? [...from.saved] : [], empty = from ? [...from.empty] : [], failed = from ? [...from.failed] : [];
             let manga = from ? from.manga : !!cfg.manga;
@@ -1126,7 +1147,7 @@
                 for (page = first; page <= total; page++) {
                     if (location.pathname !== path) throw new Error('o capítulo mudou');
                     report(`🧰 Página ${page} de ${total} (${Math.round((page - 1) / total * 100)}%) · ${cfg.manga ? 'mangá' : 'HQ'}`);
-                    const r = await doPage(page, report);
+                    const r = await doPage(page, detail);
                     (r === 'ok' ? saved : r === 'vazia' ? empty : failed).push(page);
                     keep(page + 1);
                     if (page < total) await step(1);
@@ -2186,8 +2207,7 @@
     }
     setInterval(metaTick, 500);
     function metaPaint() {
-        const l = $('ink-meta-lbl');
-        if (l) l.textContent = meta.on ? `${meta.done}/${cfg.metaGoal}` : 'Ligar meta';
+        setText($('ink-meta-lbl'), meta.on ? `${meta.done}/${cfg.metaGoal}` : 'Ligar meta');
         const b = $('ink-meta-btn');
         if (b) b.classList.toggle('on', meta.on);
     }
@@ -2385,7 +2405,7 @@
         if (!SLEEP.fading && SLEEP.endAt && now >= SLEEP.endAt) { SLEEP.fading = true; SLEEP.t0 = now; }
         if (SLEEP.fading) {
             const f = 1 - (now - SLEEP.t0) / FADE_MS;
-            if (st) st.textContent = '😴 Apagando o som…';
+            setText(st, '😴 Apagando o som…');
             if (f <= 0) {
                 SLEEP.fading = false; SLEEP.endAt = 0; SLEEP.caps = 0;
                 stop('😴 Timer de sono: boa noite!');
@@ -2397,7 +2417,7 @@
         const parts = [];
         if (SLEEP.endAt) { const s = Math.max(0, Math.round((SLEEP.endAt - now) / 1000)); parts.push(`${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`); }
         if (SLEEP.caps > 0) parts.push(`${SLEEP.caps} cap.`);
-        st.textContent = parts.length ? '😴 Restam ' + parts.join(' · ') : '';
+        setText(st, parts.length ? '😴 Restam ' + parts.join(' · ') : '');
     }
     setInterval(sleepTick, 1000);
     const stepIn = (arr, cur, d) => { const i = Math.max(0, arr.indexOf(cur)); return arr[Math.min(arr.length - 1, Math.max(0, i + d))]; };
@@ -2486,14 +2506,20 @@
         let tp = 0, ts = 0;
         for (const k in D) { tp += D[k].pages || 0; ts += D[k].secs || 0; }
         const sr = streakN();
-        box.textContent = '';
-        const add = s => { const d = document.createElement('div'); d.textContent = s; box.appendChild(d); };
-        add(`Hoje: ${t.pages} págs · ${fmtT(t.secs)}`);
-        add(`Total: ${tp} págs · ${fmtT(ts)}`);
-        add(`🔥 Sequência: ${sr} dia${sr === 1 ? '' : 's'}`);
+        const lines = [
+            `Hoje: ${t.pages} págs · ${fmtT(t.secs)}`,
+            `Total: ${tp} págs · ${fmtT(ts)}`,
+            `🔥 Sequência: ${sr} dia${sr === 1 ? '' : 's'}`
+        ];
         const vals = [];
         for (let i = 6; i >= 0; i--) { const d = new Date(); d.setDate(d.getDate() - i); vals.push((D[dkey(d)] || {}).secs || 0); }
         const mx = Math.max(60, ...vals);
+        // só redesenha quando algum número mudou de verdade
+        const sig = lines.join('|') + '|' + vals.map(v => Math.max(6, Math.round(v / mx * 100)) + fmtT(v)).join(',');
+        if (box.dataset.sig === sig) return;
+        box.dataset.sig = sig;
+        box.textContent = '';
+        lines.forEach(s => { const d = document.createElement('div'); d.textContent = s; box.appendChild(d); });
         const bars = document.createElement('div'); bars.className = 'ia-bars';
         vals.forEach(v => { const s = document.createElement('span'); s.style.height = Math.max(6, Math.round(v / mx * 100)) + '%'; s.title = fmtT(v); bars.appendChild(s); });
         box.appendChild(bars);
@@ -2656,6 +2682,11 @@
      * ================================================================== */
     /*CL_START*/
     const CHANGELOG = [
+        { "v": "4.13.3", "d": "2026-11-26", "t": [
+            "O painel não pula mais durante o Preparar capítulo: o status e a linha de progresso têm altura fixa (texto longo rola dentro da caixa)",
+            "A linha Continuar não some quando o preparo começa, então nada se mexe de lugar",
+            "O detalhe de cada posição das bolhas aparece só no status do topo; o painel só reescreve um texto quando ele realmente mudou"
+        ] },
         { "v": "4.13.2", "d": "2026-11-26", "t": [
             "Preparar capítulo e Auto Mangá/HQ bem mais rápidos: o arraste das bolhas ficou mais curto, sem esperas fixas, e quando dá move a bolha direto para o lugar certo",
             "Se o arraste rápido falhar, ele volta sozinho para o modo lento e seguro, e depois de acertar várias vezes tenta o rápido de novo",
@@ -2868,9 +2899,11 @@ padding:8px;border:1px solid var(--ib-line);border-radius:16px;background:var(--
 #ink-panel .ia-ib{position:relative;flex:none;width:calc(var(--h) - 4px);height:calc(var(--h) - 4px);border-radius:var(--r);background:var(--ib-card)}
 #ink-panel .ia-dot{position:absolute;top:2px;right:2px;width:8px;height:8px;border-radius:50%;background:#ff3b3b}
 
-#ink-panel .ia-status{margin-top:var(--g);padding:4px 2px;color:var(--ib-dim);overflow-wrap:anywhere}
-#ink-panel .ia-status:empty{display:none}
+/* 4.13.3: status com altura FIXA (2 linhas, o que passar rola dentro da caixa): o painel não cresce nem encolhe quando a mensagem muda */
+#ink-panel .ia-status{height:calc(2.6em + 8px);margin-top:var(--g);padding:4px 2px;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:var(--ib-line) transparent;color:var(--ib-dim);overflow-wrap:anywhere}
 #ink-panel.run .ia-status{color:var(--ib-txt)}
+/* 4.13.3: progresso do "Preparar capítulo", também com altura fixa */
+#ink-panel .ia-pst{height:calc(2 * 1.35em + 2px);margin-top:var(--g);padding:0 2px;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:var(--ib-line) transparent;font-size:.85em;line-height:1.35;color:var(--ib-dim);overflow-wrap:anywhere}
 
 #ink-panel .ia-tabs{display:flex;gap:2px;margin-top:var(--g);padding:2px;border-radius:calc(var(--r) + 2px);background:var(--ib-card)}
 #ink-panel .ia-tab{flex:1;min-width:0;min-height:calc(var(--h) - 4px);flex-direction:column;gap:0;border-radius:var(--r);color:var(--ib-dim);font-size:.85em;font-weight:700;white-space:nowrap;overflow:hidden}
@@ -3017,7 +3050,7 @@ padding:8px;border:1px solid var(--ib-line);border-radius:16px;background:var(--
     <button class="ia-go" id="ink-go">${ICO.play}<span>Ler sozinho</span></button>
     <div class="ia-row"><button class="ia-chip" id="ink-prep" title="Arruma e salva as bolhas de todas as páginas">🧰 Preparar capítulo</button></div>
     <div class="ia-row" hidden><button class="ia-chip" id="ink-prep-go">▶ Continuar</button></div>
-    <div id="ink-prep-st" style="font-size:.85em;line-height:1.35"></div>
+    <div class="ia-pst" id="ink-prep-st" hidden></div>
     <div class="ia-row ia-step">
       <button class="ia-chip" id="ink-spd-" aria-label="Diminuir">−</button>
       <span class="ia-val" id="ink-spd">1.5×</span>
@@ -3709,27 +3742,28 @@ Alt+Shift+ponto / vírgula: mais / menos velocidade</div>
             g.innerHTML = running ? ICO.pause + '<span>Pausar</span>' : ICO.play + '<span>Ler sozinho</span>';
             if (mg) mg.innerHTML = running ? ICO.pause : ICO.play;
         }
-        const sp = $('ink-spd'); if (sp) sp.textContent = String(+(cfg.speed).toFixed(2)) + '×';
+        // 4.13.3: cada texto só é reescrito se mudou (setText)
+        setText($('ink-spd'), String(+(cfg.speed).toFixed(2)) + '×');
         const ma = $('ink-manga'); if (ma) ma.classList.toggle('on', cfg.manga);
         const au = $('ink-auto'); if (au) au.classList.toggle('on', cfg.auto);
         const vo = $('ink-voice'); if (vo) vo.classList.toggle('on', cfg.voice);
         const pe = $('ink-perf'); if (pe) pe.classList.toggle('on', isPerf());
         const ey = $('ink-eye'); if (ey) ey.classList.toggle('on', cfg.eye);
         const ax = $('ink-anx'); if (ax) ax.classList.toggle('on', (cfg.anx | 0) > 0);
-        const al = $('ink-anx-l'); if (al) al.textContent = ANX_LBL[cfg.anx | 0] || ANX_LBL[0];
-        const vr = $('ink-vr'); if (vr) vr.textContent = String(cfg.vrate) + '×';
-        const el = $('ink-eyel'); if (el) el.textContent = Math.round(cfg.eyeLvl * 100) + '%';
-        const mv = $('ink-meta-val'); if (mv) mv.textContent = cfg.metaGoal;
+        setText($('ink-anx-l'), ANX_LBL[cfg.anx | 0] || ANX_LBL[0]);
+        setText($('ink-vr'), String(cfg.vrate) + '×');
+        setText($('ink-eyel'), Math.round(cfg.eyeLvl * 100) + '%');
+        setText($('ink-meta-val'), String(cfg.metaGoal));
         const dk = $('ink-duck'); if (dk) dk.classList.toggle('on', cfg.duck !== false);
         const ys = $('ink-yt-show'); if (ys) ys.classList.toggle('on', cfg.ytShow !== false);
         const yb = $('ink-yt-box'); if (yb) yb.classList.toggle('off', cfg.ytShow === false);
         // novidades 4.5.0
         const fu = $('ink-full'); if (fu) fu.classList.toggle('on', !!cfg.full);
-        const sm = $('ink-slm'); if (sm) sm.textContent = cfg.sleepMin ? cfg.sleepMin + ' min' : 'Desligado';
-        const sc = $('ink-slc'); if (sc) sc.textContent = cfg.sleepCaps ? cfg.sleepCaps + (cfg.sleepCaps === 1 ? ' capítulo' : ' capítulos') : 'Sem limite de cap.';
+        setText($('ink-slm'), cfg.sleepMin ? cfg.sleepMin + ' min' : 'Desligado');
+        setText($('ink-slc'), cfg.sleepCaps ? cfg.sleepCaps + (cfg.sleepCaps === 1 ? ' capítulo' : ' capítulos') : 'Sem limite de cap.');
         const ea = $('ink-eyeauto'); if (ea) ea.classList.toggle('on', !!cfg.eyeAuto);
-        const ef = $('ink-eyef'); if (ef) ef.textContent = 'das ' + (cfg.eyeFrom | 0) + 'h';
-        const et = $('ink-eyet'); if (et) et.textContent = 'às ' + (cfg.eyeTo | 0) + 'h';
+        setText($('ink-eyef'), 'das ' + (cfg.eyeFrom | 0) + 'h');
+        setText($('ink-eyet'), 'às ' + (cfg.eyeTo | 0) + 'h');
         const pw = $('ink-perwork'); if (pw) pw.classList.toggle('on', !!cfg.perWork);
         const sk = $('ink-skip'); if (sk) sk.classList.toggle('on', !!cfg.skipJunk);
         const me = $('ink-media'); if (me) me.classList.toggle('on', cfg.media !== false);
