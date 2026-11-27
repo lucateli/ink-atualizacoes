@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ink Leitor
 // @namespace    ink-leitor
-// @version      4.13.12
+// @version      4.13.14
 // @description  Leitor automático, OCR, TTS, música, ordenador de capítulos, auto-arrumar bolhas, timer de sono, estatísticas e mais
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
@@ -27,7 +27,7 @@
     'use strict';
     if (window.__ink) return;
     window.__ink = true;
-    const VERSION = '4.13.12';
+    const VERSION = '4.13.14';
 
     /* 4.13.10: programa de PC — "Atualizar" sem fechar o programa.
        O botão Atualizar guarda o arquivo novo no navegador do programa e recarrega a página;
@@ -1022,23 +1022,36 @@
         }
         // 4.13.8: a barra de páginas do site (ex.: 109/178) fica parada enquanto o preparo roda.
         // Põe uma cópia parada por cima e esconde a original (que continua no lugar e continua sendo lida pelo script).
-        let ghost = null, frozenBar = null, freezeTimer = 0;
+        let ghost = null, frozenBar = null, freezeTimer = 0, snap = null;
+        let warned = false;
         function findBar() {
             if (!ctrEl || !ctrEl.isConnected) counter();
             const c = ctrEl;
             if (!c || !c.isConnected) return null;
             const cw = c.getBoundingClientRect().width || 1;
+            // 4.13.14: sobe pelos pais e fica com o MAIOR que ainda é só a faixa da barra
+            // (baixa, mais larga que o contador, com poucos botões); o contador sozinho é o plano B
             let e = c, best = null;
-            for (let i = 0; i < 5 && e.parentElement && e.parentElement !== document.body; i++) {
+            for (let i = 0; i < 8 && e.parentElement && e.parentElement !== document.body; i++) {
                 e = e.parentElement;
+                if (mine(e)) break;
                 const r = e.getBoundingClientRect();
-                if (r.height > 64 || r.width > innerWidth * 0.99) break;
-                if (e.querySelector('input[type=range],[role=slider]') || r.width >= cw * 4) { best = e; break; }
+                if (r.height > 90) break;
+                if ($$('button,[role=button]', e).filter(visible).length > 2) break;
+                if (r.width >= cw * 4 || e.querySelector('input[type=range],[role=slider]')) best = e;
+            }
+            if (!best) {
+                best = c.parentElement && c.parentElement !== document.body ? c.parentElement : c;
+                if (!warned) { warned = true; console.warn('[Ink] não achei a faixa da barra de páginas; congelando só o contador', c.outerHTML.slice(0, 200)); }
             }
             return best;
         }
         function placeGhost(bar) {
-            const r = bar.getBoundingClientRect();
+            // 4.13.13: a posição é gravada UMA vez (só refaz se a janela mudar de tamanho);
+            // antes a cópia seguia a barra original e subia junto com ela
+            if (snap && (snap.w !== innerWidth || snap.h !== innerHeight)) snap = null;
+            if (!snap) { const b = bar.getBoundingClientRect(); snap = { left: b.left, top: b.top, width: b.width, height: b.height, w: innerWidth, h: innerHeight }; }
+            const r = snap;
             const st = ghost.style;
             st.left = r.left + 'px'; st.top = r.top + 'px'; st.width = r.width + 'px'; st.height = r.height + 'px';
             const g = ghost.getBoundingClientRect();     // se algum pai tiver transform, corrige o desvio
@@ -1053,6 +1066,10 @@
                 const bar = findBar();
                 if (!bar) return;
                 ghost = bar.cloneNode(true);
+                // cloneNode não copia o valor atual de campos (barra deslizante): copia na mão
+                const oi = bar.querySelectorAll('input'), ci = ghost.querySelectorAll('input');
+                oi.forEach((n, k) => { try { if (ci[k]) ci[k].value = n.value; } catch (x) { } });
+                if (bar.matches('input')) { try { ghost.value = bar.value; } catch (x) { } }
                 ghost.setAttribute('data-ink-freeze', '1');
                 ghost.setAttribute('aria-hidden', 'true');
                 ghost.removeAttribute('id');
@@ -1078,7 +1095,7 @@
             if (freezeTimer) { clearInterval(freezeTimer); freezeTimer = 0; }
             if (frozenBar && frozenBar.el) { frozenBar.el.style.opacity = frozenBar.op; frozenBar.el.style.pointerEvents = frozenBar.pe; }
             if (ghost) ghost.remove();
-            ghost = frozenBar = null;
+            ghost = frozenBar = snap = null;
         }
 
         async function waitFor(fn, ms) {
@@ -2810,6 +2827,12 @@
      * ================================================================== */
     /*CL_START*/
     const CHANGELOG = [
+        { "v": "4.13.14", "d": "2026-11-27", "t": [
+            "A barra de páginas do site não avança mais com o Preparar capítulo ligado: acha a faixa inteira (número + barra deslizante), copia o valor da barra e, se não achar, congela pelo menos o número"
+        ] },
+        { "v": "4.13.13", "d": "2026-11-27", "t": [
+            "A barra de páginas congelada durante o preparo agora fica mesmo parada na tela: antes a cópia seguia a barra original e subia quando o site mudava o layout (ex.: ao aparecer 2/8 · 158/178)"
+        ] },
         { "v": "4.13.12", "d": "2026-11-27", "t": [
             "Arrumar bolhas agora mostra quantas bolhas precisam mesmo ser movidas (\"Movendo 2 de 7 · as outras 5 já estão no lugar\"); as que já estão na ordem certa não são tocadas"
         ] },
