@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ink Leitor
 // @namespace    ink-leitor
-// @version      4.13.11
+// @version      4.13.12
 // @description  Leitor automático, OCR, TTS, música, ordenador de capítulos, auto-arrumar bolhas, timer de sono, estatísticas e mais
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
@@ -27,7 +27,7 @@
     'use strict';
     if (window.__ink) return;
     window.__ink = true;
-    const VERSION = '4.13.11';
+    const VERSION = '4.13.12';
 
     /* 4.13.10: programa de PC — "Atualizar" sem fechar o programa.
        O botão Atualizar guarda o arquivo novo no navegador do programa e recarrega a página;
@@ -888,7 +888,7 @@
             if (curOrder().every((e, i) => e === sorted[i])) { say(`✓ Já estava na ordem certa (${mode === 'manga' ? 'mangá' : 'HQ'})`); return true; }
             say('⏳ Arrumando…');
             undoOrder = curOrder();
-            const ok = await reorder(sorted, (n, t) => say(`⏳ Posição ${n} de ${t}…`));
+            const ok = await reorder(sorted, (n, t) => say(`⏳ Movendo ${n} de ${t} · as outras ${tiles.length - t} já estão no lugar`));
             if (stopAsked) say('⏹ Parado. Toque em Desfazer para voltar à ordem anterior.');
             else if (ok) say(`✓ ${tiles.length} balões arrumados (${mode === 'manga' ? 'mangá' : 'HQ'}). Confira e toque em Salvar.`);
             else say('⚠ Não consegui arrastar tudo. Confira os números antes de Salvar.');
@@ -2810,6 +2810,9 @@
      * ================================================================== */
     /*CL_START*/
     const CHANGELOG = [
+        { "v": "4.13.12", "d": "2026-11-27", "t": [
+            "Arrumar bolhas agora mostra quantas bolhas precisam mesmo ser movidas (\"Movendo 2 de 7 · as outras 5 já estão no lugar\"); as que já estão na ordem certa não são tocadas"
+        ] },
         { "v": "4.13.11", "d": "2026-11-27", "t": [
             "Preparar capítulo no máximo: arraste rápido em 1 passo, conferências do site a cada ~2 ms e esperas mínimas ao carregar as bolhas e ao assentar a animação",
             "Se o arraste de 1 passo falhar, ele sobe sozinho para o ritmo médio/lento e volta ao rápido depois de acertar 10 vezes seguidas"
