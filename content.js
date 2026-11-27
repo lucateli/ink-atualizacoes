@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ink Leitor
 // @namespace    ink-leitor
-// @version      4.13.3
+// @version      4.13.4
 // @description  Leitor automático, OCR, TTS, música, ordenador de capítulos, auto-arrumar bolhas, timer de sono, estatísticas e mais
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
@@ -78,7 +78,7 @@
         const iv = setInterval(tick, 1500);
     })();
 
-    const VERSION = '4.13.3';
+    const VERSION = '4.13.4';
     const IS_MOBILE = (() => {
         try { return matchMedia('(pointer:coarse)').matches || innerWidth < 700; }
         catch (e) { return innerWidth < 700; }
@@ -573,6 +573,7 @@
      *     lê a posição pelas caixas numeradas desenhadas sobre a página
      *   - 4.13.2: arraste rápido (poucos passos, sem esperas fixas, tenta mover
      *     direto para o lugar certo); se falhar, volta sozinho ao modo lento
+     *   - 4.13.4: esperas do arraste ainda menores (menos passos, sem pausas longas)
      * ================================================================== */
     const BubbleSorter = (() => {
         let isOpen = false;
@@ -707,11 +708,12 @@
 
         /* ritmos do arraste: 0 = rápido, 1 = médio, 2 = lento (segura antes de arrastar).
            hold = espera depois de apertar · steps/gap = passos do movimento · pre = espera antes de soltar
-           wait = quanto esperar a bolha mudar de lugar · settle = espera a animação assentar */
+           wait = quanto esperar a bolha mudar de lugar · settle = espera a animação assentar
+           4.13.4: valores menores em todos os ritmos */
         const PACE = [
-            { hold: 25, steps: 7, gap: 9, pre: 40, wait: 450, settle: 140 },
-            { hold: 60, steps: 12, gap: 14, pre: 70, wait: 700, settle: 200 },
-            { hold: 450, steps: 14, gap: 16, pre: 70, wait: 900, settle: 220 }
+            { hold: 10, steps: 4, gap: 5, pre: 15, wait: 350, settle: 70 },
+            { hold: 40, steps: 8, gap: 9, pre: 40, wait: 550, settle: 120 },
+            { hold: 300, steps: 10, gap: 12, pre: 50, wait: 800, settle: 180 }
         ];
         let slow = 0, okRun = 0, jumpBad = false;   // aprendem durante o uso: se o rápido falha, sobe o nível
 
@@ -735,7 +737,7 @@
         async function waitMoved(el, from, P) {
             const t0 = performance.now();
             while (performance.now() - t0 < P.wait) {
-                await sleep(25);
+                await sleep(15);
                 if (curOrder().indexOf(el) !== from) {
                     await sleep(P.settle);
                     const now = curOrder().indexOf(el);
@@ -757,7 +759,7 @@
             for (let tryN = 0; tryN < 3; tryN++) {
                 const lvl = Math.min(2, tryN + slow), P = PACE[lvl];
                 el.scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'instant' });
-                await sleep(lvl ? 60 : 30);
+                await sleep(lvl ? 40 : 12);
                 const ord = curOrder();
                 const me = el.getBoundingClientRect();
                 let to = from + dir;
@@ -957,6 +959,8 @@
      *  4.13.2: esperas fixas menores (o que ainda espera, espera só até o site responder)
      *  4.13.3: o painel não pula durante o preparo (caixas de texto com altura fixa,
      *          a linha "Continuar" guarda o lugar e o detalhe de cada posição vai só no status do topo)
+     *  4.13.4: ainda mais rápido: consulta o site com mais frequência, esperas menores
+     *          ao trocar de página, ao carregar as bolhas e ao fechar a tela de arrumar
      * ================================================================== */
     const Prep = (() => {
         let on = false, stText = '';
@@ -983,7 +987,7 @@
                 const v = fn();
                 if (v) return v;
                 if (Date.now() - t0 >= ms) return null;
-                await sleep(80);
+                await sleep(35);
             }
         }
 
@@ -1026,7 +1030,7 @@
                 try { if (!METHODS[name]()) continue; } catch (e) { continue; }
                 const now = await waitFor(() => { const c = counter(); return c && c.p !== from.p ? c : null; }, 1200);
                 if (!now) continue;
-                if (now.p === from.p + dir) { learned[dir] = name; await sleep(180); return; }
+                if (now.p === from.p + dir) { learned[dir] = name; await sleep(60); return; }
                 throw new Error(`a página pulou de ${from.p} para ${now.p}`);
             }
             throw new Error(`não consegui sair da página ${from.p}`);
@@ -1055,7 +1059,7 @@
         // devolve 'ok', 'vazia' (sem balões) ou 'falhou'
         async function doPage(page, say) {
             await setZoom(true);
-            const c = await waitFor(() => { const x = counter(); return x && x.p === page && x.b != null ? x : null; }, 4000);
+            const c = await waitFor(() => { const x = counter(); return x && x.p === page && x.b != null ? x : null; }, 2500);
             if (!c) return 'vazia';
             const gear = await waitFor(gearBtn, 3000);
             if (!gear) throw new Error('não achei a engrenagem das bolhas');
@@ -1066,13 +1070,13 @@
             await waitFor(() => {
                 const n = BubbleSorter.getTiles().length;
                 if (n !== last) { last = n; since = Date.now(); }
-                return n > 0 && Date.now() - since > 400;
+                return n > 0 && Date.now() - since > 180;
             }, 8000);
             const ok = await BubbleSorter.arrange(cfg.manga ? 'manga' : 'hq', m => say(`Pág ${page}: ${m}`));
             check();
             if (!ok) { await closeModal(/^cancelar$/i); return 'falhou'; }
             await closeModal(/^salvar$/i);
-            await sleep(300);
+            await sleep(100);
             return 'ok';
         }
 
@@ -2682,6 +2686,11 @@
      * ================================================================== */
     /*CL_START*/
     const CHANGELOG = [
+        { "v": "4.13.4", "d": "2026-11-26", "t": [
+            "Preparar capítulo e Auto Mangá/HQ ainda mais rápidos: o arraste das bolhas usa menos passos e esperas bem menores em todos os ritmos",
+            "O preparo confere o site com mais frequência e espera menos ao trocar de página, ao carregar as bolhas e ao fechar a tela de arrumar",
+            "Páginas sem balões agora esperam até 2,5 s (antes eram 4 s)"
+        ] },
         { "v": "4.13.3", "d": "2026-11-26", "t": [
             "O painel não pula mais durante o Preparar capítulo: o status e a linha de progresso têm altura fixa (texto longo rola dentro da caixa)",
             "A linha Continuar não some quando o preparo começa, então nada se mexe de lugar",
