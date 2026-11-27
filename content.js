@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ink Leitor
 // @namespace    ink-leitor
-// @version      4.13.7
+// @version      4.13.8
 // @description  Leitor automático, OCR, TTS, música, ordenador de capítulos, auto-arrumar bolhas, timer de sono, estatísticas e mais
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
@@ -78,7 +78,7 @@
         const iv = setInterval(tick, 1500);
     })();
 
-    const VERSION = '4.13.7';
+    const VERSION = '4.13.8';
     const IS_MOBILE = (() => {
         try { return matchMedia('(pointer:coarse)').matches || innerWidth < 700; }
         catch (e) { return innerWidth < 700; }
@@ -968,7 +968,7 @@
         const STOP = new Error('parado');
         const check = () => { if (!on) throw STOP; };
         const visible = e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
-        const mine = e => e.closest('#ink-panel,#ink-news,#ink-auto-row');
+        const mine = e => e.closest('#ink-panel,#ink-news,#ink-auto-row,[data-ink-freeze]');
 
         // contador do site, lido na hora: "4/24" ou "1/6 · 4/24"
         let ctrEl = null;
@@ -979,6 +979,67 @@
             ctrEl = $$('body *').find(e => e.childElementCount <= 3 && !mine(e) && read(e) && visible(e)) || null;
             return read(ctrEl);
         }
+        // 4.13.8: a barra de páginas do site (ex.: 109/178) fica parada enquanto o preparo roda.
+        // Põe uma cópia parada por cima e esconde a original (que continua no lugar e continua sendo lida pelo script).
+        let ghost = null, frozenBar = null, freezeTimer = 0;
+        function findBar() {
+            if (!ctrEl || !ctrEl.isConnected) counter();
+            const c = ctrEl;
+            if (!c || !c.isConnected) return null;
+            const cw = c.getBoundingClientRect().width || 1;
+            let e = c, best = null;
+            for (let i = 0; i < 5 && e.parentElement && e.parentElement !== document.body; i++) {
+                e = e.parentElement;
+                const r = e.getBoundingClientRect();
+                if (r.height > 64 || r.width > innerWidth * 0.99) break;
+                if (e.querySelector('input[type=range],[role=slider]') || r.width >= cw * 4) { best = e; break; }
+            }
+            return best;
+        }
+        function placeGhost(bar) {
+            const r = bar.getBoundingClientRect();
+            const st = ghost.style;
+            st.left = r.left + 'px'; st.top = r.top + 'px'; st.width = r.width + 'px'; st.height = r.height + 'px';
+            const g = ghost.getBoundingClientRect();     // se algum pai tiver transform, corrige o desvio
+            if (Math.abs(g.left - r.left) > 0.5) st.left = (r.left - (g.left - r.left)) + 'px';
+            if (Math.abs(g.top - r.top) > 0.5) st.top = (r.top - (g.top - r.top)) + 'px';
+            if (bar.style.opacity !== '0') bar.style.opacity = '0';
+            if (bar.style.pointerEvents !== 'none') bar.style.pointerEvents = 'none';
+        }
+        function freezeTick() {
+            if (!on) { unfreezeBar(); return; }
+            if (!ghost) {
+                const bar = findBar();
+                if (!bar) return;
+                ghost = bar.cloneNode(true);
+                ghost.setAttribute('data-ink-freeze', '1');
+                ghost.setAttribute('aria-hidden', 'true');
+                ghost.removeAttribute('id');
+                ghost.querySelectorAll('[id]').forEach(n => n.removeAttribute('id'));
+                ghost.querySelectorAll('input,button,a,[tabindex]').forEach(n => n.setAttribute('tabindex', '-1'));
+                Object.assign(ghost.style, { position: 'fixed', margin: '0', pointerEvents: 'none', zIndex: '2147481000', transform: 'none', transition: 'none', animation: 'none', opacity: '1', visibility: 'visible', right: 'auto', bottom: 'auto' });
+                frozenBar = { el: bar, op: bar.style.opacity, pe: bar.style.pointerEvents };
+                bar.parentElement.insertBefore(ghost, bar.nextSibling);
+                placeGhost(bar);
+                return;
+            }
+            // o site pode ter redesenhado a barra: acha a nova, esconde ela e põe a cópia parada ao lado
+            if (!frozenBar.el.isConnected || !ghost.isConnected) {
+                const bar = findBar();
+                if (!bar) return;
+                if (frozenBar.el !== bar) { frozenBar = { el: bar, op: bar.style.opacity, pe: bar.style.pointerEvents }; }
+                if (!ghost.isConnected) bar.parentElement.insertBefore(ghost, bar.nextSibling);
+            }
+            placeGhost(frozenBar.el);
+        }
+        function freezeBar() { unfreezeBar(); freezeTimer = setInterval(freezeTick, 120); freezeTick(); }
+        function unfreezeBar() {
+            if (freezeTimer) { clearInterval(freezeTimer); freezeTimer = 0; }
+            if (frozenBar && frozenBar.el) { frozenBar.el.style.opacity = frozenBar.op; frozenBar.el.style.pointerEvents = frozenBar.pe; }
+            if (ghost) ghost.remove();
+            ghost = frozenBar = null;
+        }
+
         async function waitFor(fn, ms) {
             const t0 = Date.now();
             for (;;) {
@@ -1143,6 +1204,7 @@
             on = true; learned = {}; zoomBad = false; ctrEl = null;
             stText = ''; setText($('ink-prep-st'), '');
             paint();
+            freezeBar();
             const path = location.pathname;
             const saved = from ? [...from.saved] : [], empty = from ? [...from.empty] : [], failed = from ? [...from.failed] : [];
             let manga = from ? from.manga : !!cfg.manga;
@@ -1181,7 +1243,7 @@
             // se parou com a tela das bolhas aberta, fecha sem salvar a página incompleta
             const m = cfg.prep && BubbleSorter.findModal();
             if (m) { const c = modalBtn(m, /^cancelar$/i); if (c) c.click(); }
-            on = false; paint();
+            on = false; unfreezeBar(); paint();
             report(`${end}. Salvas: ${saved.length}${total ? ' de ' + total : ''}`
                 + (empty.length ? ` · sem balões detectados: ${empty.join(', ')}` : '')
                 + (failed.length ? ` · revisar: ${failed.join(', ')}` : ''));
@@ -2699,6 +2761,9 @@
      * ================================================================== */
     /*CL_START*/
     const CHANGELOG = [
+        { "v": "4.13.8", "d": "2026-11-27", "t": [
+            "A barra de páginas do site (ex.: 109/178) fica parada enquanto o Preparar capítulo está ligado; o preparo segue arrumando as páginas normalmente e a barra volta ao normal quando ele termina"
+        ] },
         { "v": "4.13.7", "d": "2026-11-27", "t": [
             "Preparar capítulo tenta trocar de página sem desligar e ligar o Bubble Zoom a cada página (mais rápido); se o site não aceitar, volta sozinho ao jeito anterior"
         ] },
