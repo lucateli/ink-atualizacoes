@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ink Leitor
 // @namespace    ink-leitor
-// @version      4.13.15
+// @version      4.13.16
 // @description  Leitor automático, OCR, TTS, música, ordenador de capítulos, auto-arrumar bolhas, timer de sono, estatísticas e mais
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
@@ -27,7 +27,7 @@
     'use strict';
     if (window.__ink) return;
     window.__ink = true;
-    const VERSION = '4.13.15';
+    const VERSION = '4.13.16';
 
     /* 4.13.10: programa de PC — "Atualizar" sem fechar o programa.
        O botão Atualizar guarda o arquivo novo no navegador do programa e recarrega a página;
@@ -489,6 +489,16 @@
         return out.join(';') + `|${scrollX | 0},${scrollY | 0}`;
     };
 
+    const _camCache = { value: '', at: 0 };
+    const readCamSig = () => {
+        const now = performance.now();
+        if (now - _camCache.at >= 90) {
+            _camCache.value = camSig();
+            _camCache.at = now;
+        }
+        return _camCache.value;
+    };
+
     const readState = () => {
         const now = performance.now();
         const reScanMs = isPerf() ? 2800 : 1500;
@@ -502,7 +512,7 @@
         if (_cache.ctr && (m = RX_CTR.exec(_cache.ctr.textContent)) && sane.ctr(m)) { o.b = +m[1]; o.bt = +m[2]; o.p = +m[3]; o.pt = +m[4]; }
         if (_cache.pg && (m = RX_PG.exec(_cache.pg.textContent)) && sane.pg(m)) { o.pg = +m[1]; o.pgt = +m[2]; }
         if (_cache.pct && (m = RX_PCT.exec(_cache.pct.textContent)) && sane.pct(m)) { o.pct = +m[1]; }
-        o.cam = camSig();
+        o.cam = readCamSig();
         o.sig = [o.b, o.bt, o.p, o.pt, o.pg, o.pgt, o.pct, o.cam].join('|');
         return o;
     };
@@ -601,9 +611,15 @@
         let isOpen = false;
         const TILE = '.bz-order__tile';
 
+        let fallbackScanAt = 0;
         function findModal() {
             const m = document.querySelector('.bz-order');
             if (m) return m;
+            // A busca alternativa percorre os botões do site; limita a frequência sem atrasar
+            // a detecção normal do modal .bz-order.
+            const now = performance.now();
+            if (now - fallbackScanAt < 350) return null;
+            fallbackScanAt = now;
             for (const b of $$('button')) {
                 if (!/^reescanear$/i.test(txt(b)) || b.closest('#ink-panel')) continue;
                 let el = b.parentElement;
@@ -1483,10 +1499,15 @@
             if ($('ink-order')) apply();
         }
 
+        let lastBuildPath = '', lastBuildAt = 0;
         function build() {
             if (SAFE || $('ink-order')) return;
+            // A lista pode carregar depois da navegação, mas não precisa ser varrida a cada 1,5 s.
+            const path = location.pathname, now = Date.now();
+            if (path === lastBuildPath && now - lastBuildAt < 1800) return;
+            lastBuildPath = path; lastBuildAt = now;
             // NÃO monta na tela de leitura: lá os links /ler/ são o carrossel "Próximas leituras"
-            if (location.pathname.startsWith('/ler/')) return;
+            if (path.startsWith('/ler/')) return;
             if (!RX_OBRA.test(location.pathname)) return;
             const box = findContainer();
             if (!box || collectItems(box).length < 2) return;
@@ -1611,15 +1632,29 @@
     const visited = new Set();
     const pathOf = h => { try { return new URL(h, location.href).pathname; } catch (e) { return ''; } };
     const RX_END_BTN = /^pr[oó]xima\s+em\s+\d+\s*s$|^pr[oó]ximo\s+cap[ií]tulo$/i;
+    let endBtnCache = null, endBtnScanAt = 0, endBtnScanPath = '';
 
     function findEndBtn() {
+        const path = location.pathname;
+        if (path !== endBtnScanPath) {
+            endBtnScanPath = path;
+            endBtnScanAt = 0;
+            endBtnCache = null;
+        }
+        const now = performance.now();
+        if (now - endBtnScanAt < 180) return endBtnCache && endBtnCache.isConnected ? endBtnCache : null;
+        endBtnScanAt = now;
+        endBtnCache = null;
         const mine = $('ink-panel');
         for (const el of $$('button,a,[role=button]')) {
             if (mine && mine.contains(el)) continue;
             const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
-            if (t.length < 40 && RX_END_BTN.test(t) && el.getBoundingClientRect().width > 0) return el;
+            if (t.length < 40 && RX_END_BTN.test(t) && el.getBoundingClientRect().width > 0) {
+                endBtnCache = el;
+                break;
+            }
         }
-        return null;
+        return endBtnCache;
     }
 
     function findNextEl() {
@@ -1751,12 +1786,15 @@
         if (readState().b != null) return 'none';
         let el = scrollerEl(), mode = el ? 'scroll' : 'wheel';
         let pos = el ? el.scrollTop : 0, last = performance.now(), ramp = 0, lastUi = 0, bottomSince = 0, lastH = el ? el.scrollHeight : 0;
-        let wacc = 0, t0 = performance.now(), sig0 = moveSig(), lastMove = performance.now(), triedWheel = !el;
+        let wacc = 0, sig0 = moveSig(), lastMove = performance.now(), lastMoveCheck = lastMove, triedWheel = !el;
         while (alive(id)) {
             await new Promise(r => requestAnimationFrame(r));
             const now = performance.now(), dt = Math.min(100, now - last); last = now;
             if (paused()) {
-                ramp = 0; if (el && mode === 'scroll') pos = el.scrollTop; lastMove = now; t0 = now; sig0 = moveSig();
+                ramp = 0;
+                if (el && mode === 'scroll') pos = el.scrollTop;
+                lastMove = now;
+                if (now - lastMoveCheck >= 100) { sig0 = moveSig(); lastMoveCheck = now; }
                 if (now - lastUi > 400) { lastUi = now; setStatus('⏸ Em pausa…'); }
                 continue;
             }
@@ -1773,8 +1811,11 @@
                 wacc += step;
                 if (Math.abs(wacc) >= 3) { wheelAt(wacc); wacc = 0; }
             }
-            const sg = moveSig();
-            if (sg !== sig0) { sig0 = sg; lastMove = now; }
+            if (now - lastMoveCheck >= 100) {
+                lastMoveCheck = now;
+                const sg = moveSig();
+                if (sg !== sig0) { sig0 = sg; lastMove = now; }
+            }
             if (now - lastMove > 1600) {
                 const s = readState();
                 if (nearEnd(s) || (mode === 'scroll' && atBottom(el))) {
@@ -2873,6 +2914,10 @@
      * ================================================================== */
     /*CL_START*/
     const CHANGELOG = [
+        { "v": "4.13.16", "d": "2026-11-27", "t": [
+            "Leitura automática mais leve: assinatura visual e verificação do botão de próximo capítulo agora usam caches curtos",
+            "Menos varreduras repetidas da página ao procurar o modal de bolhas e a lista de capítulos"
+        ] },
         { "v": "4.13.15", "d": "2026-11-27", "t": [
             "Preparar capítulo pula as páginas que já ficaram salvas num preparo anterior (se sobraram só algumas, refaz só elas). \"Recomeçar do zero\" continua refazendo tudo",
             "Novo botão \"Parar se as Tintas acabarem\" (desligado por padrão): quando o site avisa que as Tintas de hoje caíram, o preparo para depois de salvar a página e você continua depois em Continuar"
