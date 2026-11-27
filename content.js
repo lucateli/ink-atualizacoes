@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ink Leitor
 // @namespace    ink-leitor
-// @version      4.13.16
+// @version      4.13.17
 // @description  Leitor automático, OCR, TTS, música, ordenador de capítulos, auto-arrumar bolhas, timer de sono, estatísticas e mais
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
@@ -27,7 +27,7 @@
     'use strict';
     if (window.__ink) return;
     window.__ink = true;
-    const VERSION = '4.13.16';
+    const VERSION = '4.13.17';
 
     /* 4.13.10: programa de PC — "Atualizar" sem fechar o programa.
        O botão Atualizar guarda o arquivo novo no navegador do programa e recarrega a página;
@@ -703,8 +703,72 @@
             return out;
         }
 
-        // agrupa em fileiras por sobreposição vertical; dentro da fileira: mangá = direita→esquerda
+        // 4.13.17: no mangá, forma faixas pela posição SUPERIOR dos balões.
+        // Isso evita que um balão/quadro alto expanda a faixa e misture linhas
+        // diferentes. Dentro de cada faixa, a leitura segue da direita para a esquerda.
+        // A lógica antiga do modo HQ é mantida para não alterar seu comportamento.
         function orderBoxes(pts, mode) {
+            if (mode === 'manga') {
+                const left = Math.min(...pts.map(p => p.bx.l));
+                const right = Math.max(...pts.map(p => p.bx.r));
+                const top = Math.min(...pts.map(p => p.bx.t));
+                const bottom = Math.max(...pts.map(p => p.bx.b));
+                const pageW = Math.max(right - left, 0.0001);
+                const pageH = Math.max(bottom - top, 0.0001);
+                const median = values => {
+                    const a = values.slice().sort((x, y) => x - y);
+                    return a[Math.floor(a.length / 2)] || 0;
+                };
+                const byTop = pts.slice().sort((a, b) =>
+                    (a.bx.t - b.bx.t) || (b.bx.r - a.bx.r)
+                );
+                const rows = [];
+
+                for (const item of byTop) {
+                    const h = Math.max(item.bx.b - item.bx.t, pageH * 0.01);
+                    let chosen = null;
+                    let bestScore = Infinity;
+
+                    for (const row of rows) {
+                        const rowTop = median(row.items.map(p => p.bx.t));
+                        const rowH = median(row.items.map(p => Math.max(p.bx.b - p.bx.t, pageH * 0.01)));
+                        const tolerance = Math.max(pageH * 0.025, Math.min(h, rowH) * 0.42);
+                        const delta = Math.abs(item.bx.t - rowTop);
+                        if (delta <= tolerance) {
+                            const score = delta / tolerance;
+                            if (score < bestScore) {
+                                bestScore = score;
+                                chosen = row;
+                            }
+                        }
+                    }
+
+                    if (chosen) chosen.items.push(item);
+                    else rows.push({ items: [item] });
+                }
+
+                rows.sort((a, b) =>
+                    median(a.items.map(p => p.bx.t)) - median(b.items.map(p => p.bx.t))
+                );
+
+                const ordered = [];
+                for (const row of rows) {
+                    row.items.sort((a, b) => {
+                        const ax = (a.bx.l + a.bx.r) / 2;
+                        const bx = (b.bx.l + b.bx.r) / 2;
+                        const dx = ax - bx;
+                        // Balões praticamente na mesma coluna: mantém o de cima primeiro.
+                        if (Math.abs(dx) <= pageW * 0.025) {
+                            return (a.bx.t - b.bx.t) || (b.bx.r - a.bx.r);
+                        }
+                        return -dx; // mangá: direita → esquerda
+                    });
+                    ordered.push(...row.items.map(p => p.el));
+                }
+                return ordered;
+            }
+
+            // Modo HQ: comportamento original (esquerda → direita por faixa).
             const byTop = pts.slice().sort((a, b) => a.bx.t - b.bx.t);
             const rows = [];
             for (const it of byTop) {
@@ -721,8 +785,7 @@
                 rows.push({ t: it.bx.t, b: it.bx.b, items: [it] });
             }
             const cx = p => (p.bx.l + p.bx.r) / 2;
-            const dir = (a, b) => mode === 'manga' ? cx(b) - cx(a) : cx(a) - cx(b);
-            // bolhas empilhadas (uma em cima da outra) formam uma coluna: lê a de cima primeiro
+            const dir = (a, b) => cx(a) - cx(b);
             const empilhadas = (a, b) => Math.min(a.bx.r, b.bx.r) - Math.max(a.bx.l, b.bx.l) > Math.min(a.bx.r - a.bx.l, b.bx.r - b.bx.l) * 0.5;
             return rows.flatMap(r => {
                 const cols = [];
