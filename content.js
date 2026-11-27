@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ink Leitor
 // @namespace    ink-leitor
-// @version      4.13.9
+// @version      4.13.10
 // @description  Leitor automático, OCR, TTS, música, ordenador de capítulos, auto-arrumar bolhas, timer de sono, estatísticas e mais
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
@@ -27,6 +27,29 @@
     'use strict';
     if (window.__ink) return;
     window.__ink = true;
+    const VERSION = '4.13.10';
+
+    /* 4.13.10: programa de PC — "Atualizar" sem fechar o programa.
+       O botão Atualizar guarda o arquivo novo no navegador do programa e recarrega a página;
+       aqui, se o guardado for MAIS NOVO que este, roda ele no lugar. Quando o programa baixar
+       uma versão igual ou mais nova sozinho (ao abrir), o guardado é descartado. */
+    if (window.__INK_PC__ && !window.__inkHot) {
+        try {
+            const j = JSON.parse(localStorage.getItem('ink_pc_hot') || 'null');
+            if (j && typeof j.text === 'string' && j.ver) {
+                const a = String(j.ver).split('.').map(Number), b = VERSION.split('.').map(Number);
+                let newer = false;
+                for (let i = 0; i < 4; i++) { const d = (a[i] || 0) - (b[i] || 0); if (d) { newer = d > 0; break; } }
+                if (!newer) localStorage.removeItem('ink_pc_hot');
+                else if (j.text.trimEnd().endsWith('/*' + 'INK_EOF' + '*/')) {
+                    window.__inkHot = true;
+                    window.__ink = false;
+                    try { new Function(j.text)(); return; }
+                    catch (e) { console.warn('[Ink] não consegui rodar a versão nova guardada', e); window.__ink = true; }
+                }
+            }
+        } catch (e) { }
+    }
 
     /* ---- 4.8.3: erro do script não pode chegar no tratador de erros do site ---- */
     const ERRS = [];
@@ -78,7 +101,6 @@
         const iv = setInterval(tick, 1500);
     })();
 
-    const VERSION = '4.13.9';
     const IS_MOBILE = (() => {
         try { return matchMedia('(pointer:coarse)').matches || innerWidth < 700; }
         catch (e) { return innerWidth < 700; }
@@ -2719,7 +2741,15 @@
     }
     async function applyUpdate() {
         // programa de PC: quem baixa é o próprio .exe, ao abrir; aqui não baixa arquivo nenhum
-        if (window.__INK_PC__) { setStatus('💻 Feche todas as janelas do InkLeitor e abra de novo para atualizar.'); return; }
+        // 4.13.10: guarda a versão nova e recarrega a página; no recarregamento ela roda no lugar desta
+        if (window.__INK_PC__) {
+            if (!UPD.text || !UPD.ver) { setStatus('⚠ Toque em verificar atualização e tente de novo.'); return; }
+            try { localStorage.setItem('ink_pc_hot', JSON.stringify({ ver: UPD.ver, text: UPD.text })); }
+            catch (e) { setStatus('⚠ Não consegui guardar a atualização. Feche e abra o programa.'); return; }
+            setStatus('✓ Atualizado! Reiniciando…');
+            setTimeout(() => location.reload(), 600);
+            return;
+        }
         setStatus('⏳ Atualizando…');
         try {
             const r = await extSync();
@@ -2780,6 +2810,9 @@
      * ================================================================== */
     /*CL_START*/
     const CHANGELOG = [
+        { "v": "4.13.10", "d": "2026-11-27", "t": [
+            "No programa de PC, o botão Atualizar agora aplica a versão nova e reinicia a página sozinho, sem precisar fechar e abrir o programa"
+        ] },
         { "v": "4.13.9", "d": "2026-11-27", "t": [
             "Arrumar bolhas mais rápido: move só as bolhas que estão fora do lugar (a maior sequência já certa fica parada), com bem menos arrastes por página",
             "Espera um pouco menos as bolhas carregarem ao abrir cada página"
@@ -2936,7 +2969,7 @@
         if (hasNewer()) {
             ban.append(el('div', 'nw-ban-t', `⬆ Nova versão ${UPD.ver} disponível`), el('div', 'nw-ban-s', `Você está na ${VERSION}.`));
             const b = el('button', 'nw-btn', 'Atualizar agora');
-            b.onclick = async () => { b.disabled = true; b.textContent = '⏳ Atualizando…'; await applyUpdate(); b.textContent = window.__INK_PC__ ? 'Feche e abra' : '✓ Pedido enviado'; };
+            b.onclick = async () => { b.disabled = true; b.textContent = '⏳ Atualizando…'; await applyUpdate(); b.textContent = window.__INK_PC__ ? '⏳ Reiniciando…' : '✓ Pedido enviado'; };
             ban.append(b);
         } else {
             ban.append(el('div', 'nw-ban-t', `✓ Versão ${VERSION} (mais recente conhecida)`));
