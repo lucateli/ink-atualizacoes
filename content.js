@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ink Leitor
 // @namespace    ink-leitor
-// @version      4.16.0
+// @version      4.16.1
 // @description  Ink Leitor: leitura automática, OCR/TTS, preparo inteligente, fila de capítulos, histórico, metas e backup
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
@@ -27,7 +27,7 @@
     'use strict';
     if (window.__ink) return;
     window.__ink = true;
-    const VERSION = '4.16.0';
+    const VERSION = '4.16.1';
 
     /* 4.13.10: programa de PC — "Atualizar" sem fechar o programa.
        O botão Atualizar guarda o arquivo novo no navegador do programa e recarrega a página;
@@ -1141,6 +1141,7 @@
      *          a linha "Continuar" guarda o lugar e o detalhe de cada posição vai só no status do topo)
      *  4.13.4: ainda mais rápido: consulta o site com mais frequência, esperas menores
      *          ao trocar de página, ao carregar as bolhas e ao fechar a tela de arrumar
+     *  4.16.1: espera a linha vermelha de varredura do site terminar antes de continuar a página
      * ================================================================== */
     const Prep = (() => {
         let on = false, resumingRead = false, stText = '', progressTimer = 0, runStarted = 0, activePage = 0, lastSummary = null;
@@ -1273,6 +1274,51 @@
             }
         }
 
+        /* 4.16.1: linha vermelha de varredura que o site passa sobre a página quando o Bubble Zoom liga.
+           Enquanto ela anda, os balões ainda não estão prontos. Reconhece a linha pelo formato (fina, larga,
+           avermelhada) e só conta se ela se MOVEU (assim uma barra vermelha parada do site não trava a espera). */
+        const scanTops = new WeakMap();
+        function scanLine() {
+            let found = false;
+            for (const e of document.querySelectorAll('body *')) {
+                if (e.childElementCount > 2 || mine(e)) continue;
+                const r = e.getBoundingClientRect();
+                if (r.height < 1 || r.height > 8 || r.width < innerWidth * 0.15 || r.bottom < 0 || r.top > innerHeight) continue;
+                let cs; try { cs = getComputedStyle(e); } catch (x) { continue; }
+                if (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity || '1') < 0.1) continue;
+                const col = (cs.backgroundColor || '') + ' ' + (cs.backgroundImage || '');
+                let red = false;
+                for (const m of col.matchAll(/rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)(?:[,\s/]+([\d.]+))?/g)) {
+                    const a = m[4] == null ? 1 : parseFloat(m[4]);
+                    if (a >= 0.3 && +m[1] >= 170 && +m[2] <= 140 && +m[3] <= 130) { red = true; break; }
+                }
+                if (!red) continue;
+                const prev = scanTops.get(e);
+                scanTops.set(e, r.top);
+                if (prev == null || Math.abs(prev - r.top) > 0.5) found = true;
+            }
+            return found;
+        }
+        // espera os balões da página `page` aparecerem E a linha de varredura terminar. Devolve o contador, ou null se a página não tem balões.
+        async function waitScan(page) {
+            const t0 = Date.now();
+            let seen = false, endAt = 0;
+            for (;;) {
+                check();
+                while (document.hidden) { await sleep(500); check(); }
+                const x = counter(), ok = !!x && x.p === page && x.b != null;
+                const now = Date.now(), el = now - t0;
+                if (scanLine()) { seen = true; endAt = 0; }
+                else if (seen && !endAt) endAt = now;
+                if (ok && seen && endAt && now - endAt >= 150) return x;        // varredura acabou e os balões estão lá
+                if (ok && !seen && el >= 400) return x;                        // não vi linha nenhuma: não trava
+                if (!ok && !seen && el >= 1000) return null;                   // sem linha e sem balões: página vazia
+                if (!ok && seen && endAt && now - endAt >= 1500) return null;  // varredura acabou e não surgiu balão
+                if (el >= 25000) return ok ? x : null;                         // trava de segurança
+                await sleep(60);
+            }
+        }
+
         const zoomBtn = () => $$('button,[role=button]').find(b => !mine(b) && /bubble\s*zoom/i.test(`${b.getAttribute('aria-label') || ''} ${b.title || ''}`));
         const zoomIsOn = () => { const b = zoomBtn(); return !!b && /desligar/i.test(`${b.getAttribute('aria-label') || ''} ${b.title || ''}`); };
         async function setZoom(want) {
@@ -1355,7 +1401,8 @@
         // devolve 'ok', 'vazia' (sem balões) ou 'falhou'
         async function doPage(page, say, options = {}) {
             await setZoom(true);
-            const c = await waitFor(() => { const x = counter(); return x && x.p === page && x.b != null ? x : null; }, 1000);
+            say(`Pág ${page}: esperando a varredura do site…`);
+            const c = await waitScan(page);
             if (!c) return 'vazia';
             const gear = await waitFor(gearBtn, 3000);
             if (!gear) throw new Error('não achei a engrenagem das bolhas');
@@ -1383,7 +1430,7 @@
 
         async function restorePage(page, keys, say) {
             await setZoom(true);
-            const c = await waitFor(() => { const x = counter(); return x && x.p === page && x.b != null ? x : null; }, 1200);
+            const c = await waitScan(page);
             if (!c) return false;
             const gear = await waitFor(gearBtn, 3000);
             if (!gear) throw new Error('não achei a engrenagem para voltar a página ' + page);
@@ -3446,6 +3493,11 @@
      * ================================================================== */
     /*CL_START*/
     const CHANGELOG = [
+        { "v": "4.16.1", "d": "2026-11-27", "t": [
+            "Preparar capítulo agora espera a linha vermelha de varredura do site terminar antes de continuar a página",
+            "Só depois que a varredura acaba e os balões aparecem é que o preparo abre o Arrumar as bolhas; páginas sem balões continuam sendo puladas sem travar",
+            "Vale também para o botão Voltar preparo"
+        ] },
         { "v": "4.16.0", "d": "2026-11-27", "t": [
             "Mega atualização: simulação de preparo sem salvar, estimativa de bolhas que mudariam e tempo por página",
             "Relatório copiável, lista de páginas com falha, refazer somente pendentes, barra de progresso e tempo restante",
