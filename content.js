@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ink Leitor
 // @namespace    ink-leitor
-// @version      4.17.0
+// @version      4.18.1
 // @description  Ink Leitor: leitura automática, OCR/TTS, preparo inteligente, fila de capítulos, histórico, metas e backup
 // @match        https://www.ink.app.br/*
 // @match        https://ink.app.br/*
@@ -27,7 +27,7 @@
     'use strict';
     if (window.__ink) return;
     window.__ink = true;
-    const VERSION = '4.18.0';
+    const VERSION = '4.18.1';
 
     /* 4.13.10: programa de PC — "Atualizar" sem fechar o programa.
        O botão Atualizar guarda o arquivo novo no navegador do programa e recarrega a página;
@@ -456,7 +456,16 @@
     const _bad = new WeakSet();
     let _frozen = 0;
 
-    const visible = n => { const r = n.getBoundingClientRect(); return r.width > 0 && r.height > 0 && r.height < 120 && r.width < 320; };
+    const visible = n => {
+        if (!n || !n.isConnected || n.hidden) return false;
+        const r = n.getBoundingClientRect();
+        if (!(r.width > 0 && r.height > 0 && r.height < 120 && r.width < 320)) return false;
+        for (let p = n; p && p.nodeType === 1; p = p.parentElement) {
+            let cs; try { cs = getComputedStyle(p); } catch (e) { return false; }
+            if (cs.display === 'none' || cs.visibility === 'hidden' || cs.visibility === 'collapse' || Number(cs.opacity) <= 0.01) return false;
+        }
+        return true;
+    };
     const sane = {
         ctr: m => +m[1] >= 1 && +m[1] <= +m[2] && +m[3] >= 1 && +m[3] <= +m[4],
         pg: m => +m[2] > 1 && +m[1] >= 1 && +m[1] <= +m[2],
@@ -467,7 +476,7 @@
         const mine = $('ink-panel');
         let c = null, g = null, p = null;
         for (const n of $$('div,span,p,button')) {
-            if (n.childElementCount > 3 || (mine && mine.contains(n)) || _bad.has(n) || !visible(n)) continue;
+            if (n.childElementCount > 3 || (mine && mine.contains(n)) || n.closest('#ink-news,#ink-auto-row,#ink-order,[data-ink-freeze],.bz-order') || _bad.has(n) || !visible(n)) continue;
             const t = n.textContent;
             if (!t || t.length > 30) continue;
             let m;
@@ -1059,9 +1068,20 @@
             else say('⚠ Não terminei de desfazer. Toque de novo ou use Cancelar.');
         }
 
+        function modalVisible(modal = findModal()) {
+            if (!modal || !modal.isConnected || modal.hidden || modal.getAttribute('aria-hidden') === 'true') return false;
+            const r = modal.getBoundingClientRect();
+            if (r.width < 2 || r.height < 2 || r.right <= 0 || r.bottom <= 0 || r.left >= innerWidth || r.top >= innerHeight) return false;
+            for (let p = modal; p && p.nodeType === 1; p = p.parentElement) {
+                let cs; try { cs = getComputedStyle(p); } catch (e) { return false; }
+                if (cs.display === 'none' || cs.visibility === 'hidden' || cs.visibility === 'collapse' || Number(cs.opacity) <= 0.01) return false;
+            }
+            return true;
+        }
+
         function injectUI() {
             const modal = findModal();
-            if (!modal || modal.querySelector('#ink-auto-row')) return;
+            if (!modal || !modalVisible(modal) || modal.querySelector('#ink-auto-row')) return;
             const row = document.createElement('div');
             row.id = 'ink-auto-row';
             row.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;margin:8px 0;align-items:center;';
@@ -1116,7 +1136,8 @@
         function start() {
             if (SAFE) return;
             setInterval(() => {
-                isOpen = !!findModal();
+                const modal = findModal();
+                isOpen = modalVisible(modal);
                 if (isOpen) injectUI();
                 else { clearPreview(); undoOrder = null; }
             }, isPerf() ? 1200 : 700);
@@ -2131,6 +2152,18 @@
      * ================================================================== */
     let running = false, runId = 0, lastUser = 0;
     const alive = id => running && id === runId;
+    const noteUserActivity = e => {
+        if (e && e.isTrusted === false) return; // ignora teclas/rolagens sintéticas do próprio leitor
+        lastUser = Date.now();
+    };
+    document.addEventListener('pointerdown', noteUserActivity, { capture: true, passive: true });
+    document.addEventListener('pointermove', e => {
+        if (e && e.isTrusted !== false && (e.buttons || e.pointerType === 'touch')) noteUserActivity(e);
+    }, { capture: true, passive: true });
+    document.addEventListener('touchstart', noteUserActivity, { capture: true, passive: true });
+    document.addEventListener('touchmove', noteUserActivity, { capture: true, passive: true });
+    document.addEventListener('wheel', noteUserActivity, { capture: true, passive: true });
+    document.addEventListener('keydown', noteUserActivity, true);
 
     const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 3, 4, 5, 6];
     const prog = s => s.b != null ? s.p * 100000 + s.b : (s.pg != null ? s.pg : (s.pct != null ? s.pct : null));
@@ -2193,7 +2226,7 @@
         return Math.min(9000, Math.max(300, ms / sp));
     }
     const userIdle = () => Date.now() - lastUser > 1800;
-    const paused = () => document.hidden || BubbleSorter.isOpen || !!document.querySelector('.bz-order') || !userIdle();
+    const paused = () => document.hidden || BubbleSorter.isOpen || !userIdle();
 
     async function humanWait(ms, st, id) {
         let left = ms, last = performance.now(), ui = 0, chk = 0;
@@ -2211,7 +2244,7 @@
 
     const visited = new Set();
     const pathOf = h => { try { return new URL(h, location.href).pathname; } catch (e) { return ''; } };
-    const RX_END_BTN = /^pr[oó]xima\s+em\s+\d+\s*s$|^pr[oó]ximo\s+cap[ií]tulo$/i;
+    const RX_END_BTN = /^(?:pr[oó]xima\s+em\s+\d+\s*(?:s|seg(?:undo)?s?)|pr[oó]ximo\s+cap[ií]tulo)$/i;
     let endBtnCache = null, endBtnScanAt = 0, endBtnScanPath = '';
 
     function findEndBtn() {
@@ -2227,9 +2260,10 @@
         endBtnCache = null;
         const mine = $('ink-panel');
         for (const el of $$('button,a,[role=button]')) {
-            if (mine && mine.contains(el)) continue;
-            const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
-            if (t.length < 40 && RX_END_BTN.test(t) && el.getBoundingClientRect().width > 0) {
+            if ((mine && mine.contains(el)) || el.disabled || el.getAttribute('aria-disabled') === 'true') continue;
+            const t = [el.textContent || '', el.getAttribute('aria-label') || '', el.title || ''].join(' ').replace(/\s+/g, ' ').trim();
+            const r = el.getBoundingClientRect();
+            if (t.length < 90 && RX_END_BTN.test(t) && r.width > 0 && r.height > 0) {
                 endBtnCache = el;
                 break;
             }
@@ -2241,7 +2275,7 @@
         const eb = findEndBtn();
         if (eb) return eb;
         const mine = $('ink-panel');
-        const ok = el => el && !(mine && mine.contains(el)) && el.getBoundingClientRect().width > 0;
+        const ok = el => { if (!el || (mine && mine.contains(el)) || el.hidden || el.disabled || el.getAttribute('aria-disabled') === 'true') return false; const r = el.getBoundingClientRect(); if (!(r.width > 0 && r.height > 0)) return false; for (let p = el; p && p.nodeType === 1; p = p.parentElement) { const cs = getComputedStyle(p); if (cs.display === 'none' || cs.visibility === 'hidden' || cs.visibility === 'collapse' || Number(cs.opacity) <= 0.01) return false; } return true; };
         const usable = a => { const p = pathOf(a.getAttribute('href') || ''); return p !== location.pathname && !visited.has(p); };
         for (const el of $$('a,button,[role=button]')) {
             if (!ok(el)) continue;
@@ -2295,7 +2329,7 @@
         return true;
     }
 
-    let smoothOff = false;
+    let smoothOff = false, smoothRetryAt = 0;
     function scrollerEl() {
         let e = document.elementFromPoint(innerWidth / 2, innerHeight * 0.45);
         while (e && e !== document.body && e !== document.documentElement) {
@@ -2363,13 +2397,16 @@
     const ANX_LBL = ['Ansiedade', 'Ans. normal', 'Ans. crônica'];
 
     async function smoothRun(id) {
+        if (cfg.voice) return 'cont';
         if (readState().b != null) return 'none';
         let el = scrollerEl(), mode = el ? 'scroll' : 'wheel';
         let pos = el ? el.scrollTop : 0, last = performance.now(), ramp = 0, lastUi = 0, bottomSince = 0, lastH = el ? el.scrollHeight : 0;
         let wacc = 0, sig0 = moveSig(), lastMove = performance.now(), lastMoveCheck = lastMove, triedWheel = !el;
         while (alive(id)) {
             await new Promise(r => requestAnimationFrame(r));
+            if (!alive(id)) return 'cont';
             const now = performance.now(), dt = Math.min(100, now - last); last = now;
+            if (cfg.voice) return 'cont';
             if (paused()) {
                 ramp = 0;
                 if (el && mode === 'scroll') pos = el.scrollTop;
@@ -2404,7 +2441,9 @@
                     continue;
                 }
                 if (mode === 'scroll' && !triedWheel) { triedWheel = true; mode = 'wheel'; lastMove = now; wacc = 0; continue; }
-                smoothOff = true; return 'none';
+                smoothOff = true;
+                smoothRetryAt = Date.now() + 12000; // tenta de novo: o leitor pode terminar de carregar depois
+                return 'none';
             } else bottomSince = 0;
             if (mode === 'scroll') {
                 if (atBottom(el)) {
@@ -2421,11 +2460,24 @@
 
     async function mainLoop() {
         const id = ++runId;
-        running = true; refreshPanel(); keepAwake(true); sleepArm(); kaStart();
+        running = true;
+        smoothOff = false; // uma falha anterior não pode desativar a rolagem nas próximas leituras
+        smoothRetryAt = 0;
+        let activePath = location.pathname + location.search;
+        refreshPanel(); keepAwake(true); sleepArm(); kaStart();
         let stuck = 0, endFails = 0;
         visited.clear();
         try {
             while (alive(id)) {
+                const currentPath = location.pathname + location.search;
+                if (currentPath !== activePath) {
+                    activePath = currentPath;
+                    smoothOff = false; // tenta novamente no capítulo recém-aberto
+                    smoothRetryAt = 0;
+                    stuck = 0;
+                    endFails = 0;
+                }
+                if (smoothOff && smoothRetryAt && Date.now() >= smoothRetryAt) smoothOff = false;
                 if (cfg.auto) {
                     const eb = findEndBtn();
                     if (eb) {
@@ -2491,16 +2543,31 @@
     const finish = msg => { running = false; runId++; cancelSpeech(); musDuck(false); setStatus(msg); refreshPanel(); keepAwake(false); kaStop(); };
     const stop = msg => { if (!running) return; running = false; runId++; cancelSpeech(); musDuck(false); setStatus(msg || 'Parado.'); refreshPanel(); keepAwake(false); kaStop(); };
 
-    let wakeLock = null;
+    let wakeLock = null, wakeLockPromise = null, wakeLockWanted = false;
     async function keepAwake(on) {
+        wakeLockWanted = !!on;
+        if (!on) {
+            const current = wakeLock; wakeLock = null;
+            if (current) { try { await current.release(); } catch (e) { } }
+            return;
+        }
+        if (!navigator.wakeLock || document.hidden || wakeLock || wakeLockPromise) return;
+        const request = navigator.wakeLock.request('screen');
+        wakeLockPromise = request;
         try {
-            if (on) {
-                if (!wakeLock && navigator.wakeLock && !document.hidden) {
-                    wakeLock = await navigator.wakeLock.request('screen');
-                    wakeLock.addEventListener('release', () => { wakeLock = null; });
-                }
-            } else if (wakeLock) { const w = wakeLock; wakeLock = null; await w.release(); }
-        } catch (e) { wakeLock = null; }
+            const lock = await request;
+            if (wakeLockPromise === request) wakeLockPromise = null;
+            // Uma solicitação pendente pode terminar depois de parar; só conserva o bloqueio
+            // se a leitura ainda estiver ativa (inclusive se uma nova leitura já tiver começado).
+            if (!wakeLockWanted || !running || document.hidden) {
+                try { await lock.release(); } catch (e) { }
+                return;
+            }
+            wakeLock = lock;
+            lock.addEventListener('release', () => { if (wakeLock === lock) wakeLock = null; });
+        } catch (e) {
+            if (wakeLockPromise === request) wakeLockPromise = null;
+        }
     }
     document.addEventListener('visibilitychange', () => { if (running && !document.hidden) keepAwake(true); });
 
@@ -4446,9 +4513,6 @@ Alt+Shift+I: iniciar preparo · K: parar · J: continuar</div>
         head.addEventListener('pointercancel', onUp);
         // abrir/fechar uma seção muda a altura: mantém o painel dentro da tela
         u.addEventListener('toggle', applyPos, true);
-
-        u.addEventListener('pointerdown', () => { lastUser = Date.now(); });
-        document.addEventListener('keydown', () => { lastUser = Date.now(); });
 
         fillVoices(); musPaintList(); musPaintBtn();
         refreshPanel(); applyTheme(); applyTab(); applyMin(); applyEye(); metaPaint(); contPaint(); statsPaint();
